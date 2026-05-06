@@ -548,10 +548,13 @@ with st.sidebar:
                 errors.append(f"Bad format: {line}")
         if saved: st.success(f"✓ {saved} holding(s) saved")
         for e in errors: st.error(e)
-        if st.button("🗑️ CLEAR ALL", use_container_width=True):
-        get_connection().execute("DELETE FROM portfolio").connection.commit()
-        st.rerun()
 
+    if st.button("🗑️ CLEAR ALL", use_container_width=True):
+        conn = get_connection()
+        conn.execute("DELETE FROM portfolio")
+        conn.commit()
+        conn.close()
+        st.rerun()
     st.markdown('<div style="font-family:\'Rajdhani\',sans-serif;font-size:0.68em;font-weight:700;letter-spacing:0.2em;text-transform:uppercase;color:#1e2d3d;margin:14px 0 5px;">🔍 Scanner</div>', unsafe_allow_html=True)
 
     custom_tickers = st.text_input("tickers", placeholder="SOUN, BBAI, RGTI, IONQ",
