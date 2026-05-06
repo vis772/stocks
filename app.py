@@ -18,6 +18,7 @@ from core.scanner import scan_ticker, scan_universe
 from analysis.portfolio import analyze_holding, compute_portfolio_summary
 from data.market_data import fetch_ticker_snapshot, get_price_history
 from analysis.technicals import compute_technicals
+from db.database import initialize_db, upsert_holding, get_portfolio, get_connection
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -547,6 +548,9 @@ with st.sidebar:
                 errors.append(f"Bad format: {line}")
         if saved: st.success(f"✓ {saved} holding(s) saved")
         for e in errors: st.error(e)
+        if st.button("🗑️ CLEAR ALL", use_container_width=True):
+        get_connection().execute("DELETE FROM portfolio").connection.commit()
+        st.rerun()
 
     st.markdown('<div style="font-family:\'Rajdhani\',sans-serif;font-size:0.68em;font-weight:700;letter-spacing:0.2em;text-transform:uppercase;color:#1e2d3d;margin:14px 0 5px;">🔍 Scanner</div>', unsafe_allow_html=True)
 
