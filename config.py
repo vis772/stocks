@@ -10,7 +10,7 @@ from typing import List
 # We focus on small-cap and mid-cap only.
 # Small-cap: $50M - $2B | Mid-cap: $2B - $10B
 MIN_MARKET_CAP = 50_000_000       # $50M floor — below this is micro-cap/too risky
-MAX_MARKET_CAP = 25_000_000_000   # $20B ceiling — above this is large-cap territory
+MAX_MARKET_CAP = 25_000_000_000   # $10B ceiling — above this is large-cap territory
 
 # ─── Volume Filters ────────────────────────────────────────────────────────────
 MIN_AVG_VOLUME = 500_000           # Minimum average daily volume (liquidity floor)
@@ -60,6 +60,7 @@ RISK_FLAGS = {
     "extreme_volatility":  "⚠️ 30-day volatility > 100% annualized",
     "low_liquidity":       "⚠️ Average volume < 500K — liquidity risk",
     "pump_signal":         "⚠️ Volume spike without confirmed catalyst — pump risk",
+    "earnings_imminent":   "⚠️ Earnings within 7 days — binary event risk",
 }
 
 # ─── Data Sources ──────────────────────────────────────────────────────────────
