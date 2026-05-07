@@ -80,8 +80,8 @@ def scan_ticker(ticker: str, save: bool = True) -> Optional[Dict]:
     snapshot["relative_volume"]    = technicals.get("relative_volume", 0)
 
     # ── Step 4: SEC Filings ────────────────────────────────────────────────────
-    try:
-        filings     = get_recent_filings(ticker, days_back=30)
+   try:
+        filings      = get_recent_filings(ticker, days_back=30)
         sec_analysis = analyze_filing_risk(filings)
         result["data_sources"].append("SEC EDGAR (free)")
     except Exception as e:
@@ -89,6 +89,18 @@ def scan_ticker(ticker: str, save: bool = True) -> Optional[Dict]:
         sec_analysis = {"active_flags": [], "flag_details": {}, "filing_summary": []}
         result["warnings"].append(f"SEC data unavailable: {str(e)}")
 
+    filing_ai_summary = ""
+    try:
+        important_filings = [f for f in filings if f.get("form_type") in ("8-K", "S-3", "424B3", "424B4")]
+        if important_filings:
+            top_filing = important_filings[0]
+            filing_ai_summary = summarize_filing_with_claude(
+                filing_url=top_filing["url"],
+                form_type=top_filing["form_type"],
+                ticker=ticker,
+            )
+    except Exception as e:
+        result["warnings"].append(f"AI filing summary unavailable: {str(e)}")
     # ── Step 5: News ──────────────────────────────────────────────────────────
     try:
         articles = fetch_ticker_news(ticker, max_articles=10)
