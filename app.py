@@ -867,7 +867,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4 = st.tabs(["⚡  Scanner","💼  Portfolio","🔬  Deep Dive","ℹ️  Info"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["⚡  Scanner","💼  Portfolio","🔬  Deep Dive","🔔  Live Alerts","ℹ️  Info"])
 
 
 # ── TAB 1: SCANNER ────────────────────────────────────────────────────────────
@@ -1039,8 +1039,145 @@ with tab3:
         </div>""", unsafe_allow_html=True)
 
 
-# ── TAB 4: INFO ───────────────────────────────────────────────────────────────
+# ── TAB 4: LIVE ALERTS ────────────────────────────────────────────────────────
 with tab4:
+    st.markdown("## 🔔 Live Alert Feed")
+    st.markdown('<p style="color:#2a4060;font-size:0.82em;font-family:\'JetBrains Mono\',monospace;">Real-time alerts from the background scanner. Refreshes every 30 seconds.</p>', unsafe_allow_html=True)
+
+    # Auto-refresh
+    refresh = st.button("🔄 Refresh Now", use_container_width=False)
+
+    # Load alert log
+    alert_log = []
+    try:
+        import json as _json
+        with open("alert_log.json") as f:
+            alert_log = _json.load(f)
+        alert_log = list(reversed(alert_log))  # newest first
+    except Exception:
+        pass
+
+    # Load scanner state
+    scanner_state = {}
+    try:
+        with open("scanner_state.json") as f:
+            scanner_state = _json.load(f)
+    except Exception:
+        pass
+
+    # Status bar
+    scan_count   = scanner_state.get("scan_count", 0)
+    last_updated = scanner_state.get("last_updated", "—")
+    is_running   = scan_count > 0
+
+    col_s1, col_s2, col_s3 = st.columns(3)
+    col_s1.metric("Scanner Status", "🟢 RUNNING" if is_running else "⚪ WAITING")
+    col_s2.metric("Scans Today",    scan_count)
+    col_s3.metric("Last Scan",      last_updated[11:16] if len(last_updated) > 11 else "—")
+
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+    # Load today's watchlist
+    try:
+        with open("watchlist_today.json") as f:
+            wl_data = _json.load(f)
+        wl_tickers = wl_data.get("tickers", [])
+        wl_stats   = wl_data.get("stats", {})
+
+        st.markdown('<div class="sh">Today\'s Dynamic Watchlist</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="background:rgba(0,150,255,0.04);border:1px solid rgba(0,150,255,0.15);'
+            f'border-radius:8px;padding:12px 16px;font-family:\'JetBrains Mono\',monospace;font-size:0.78em;color:#3a5878;">'
+            f'<span style="color:#2a4060;">Screened:</span> <span style="color:#5ba3d9;">{wl_stats.get("screened",0):,} stocks</span> &nbsp;·&nbsp; '
+            f'<span style="color:#2a4060;">Active:</span> <span style="color:#5ba3d9;">{wl_stats.get("interesting",0)}</span> &nbsp;·&nbsp; '
+            f'<span style="color:#2a4060;">Watching:</span> <span style="color:#00e87a;">{len(wl_tickers)}</span><br><br>'
+            f'<span style="color:#1e3a52;">{" · ".join(wl_tickers[:30])}{"..." if len(wl_tickers) > 30 else ""}</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+        gap_ups = wl_stats.get("gap_ups", [])
+        if gap_ups:
+            st.markdown(f'<div style="margin-top:8px;color:#00e87a;font-size:0.78em;font-family:\'JetBrains Mono\',monospace;">🚀 Gap-ups today: {", ".join(gap_ups)}</div>', unsafe_allow_html=True)
+
+    except FileNotFoundError:
+        st.info("No watchlist generated yet. The scanner builds today's watchlist at 6 AM ET, or you can trigger it manually.")
+        if st.button("🔍 Build Watchlist Now", type="primary"):
+            with st.spinner("Scanning universe for active stocks... (this takes 2-3 minutes)"):
+                try:
+                    from morning_screen import build_todays_watchlist
+                    wl = build_todays_watchlist(max_stocks=50)
+                    st.success(f"✓ Built watchlist with {len(wl)} stocks: {', '.join(wl[:10])}...")
+                except Exception as e:
+                    st.error(f"Screen failed: {e}")
+
+    # Alert feed
+    st.markdown('<div class="sh" style="margin-top:16px;">Alert History</div>', unsafe_allow_html=True)
+    if not alert_log:
+        st.markdown("""
+        <div class="empty" style="padding:30px 20px;">
+          <div class="ico" style="font-size:2em;">🔔</div>
+          <h3 style="font-size:1.2em;">NO ALERTS YET</h3>
+          <p>Alerts appear here when the scanner detects significant activity.<br>
+          Make sure the background scanner is running on Railway.</p>
+        </div>""", unsafe_allow_html=True)
+    else:
+        for alert in alert_log[:30]:
+            # Color code by alert type
+            if "🟢" in alert or "🚀" in alert or "✓" in alert:
+                color = "#00e87a"; bg = "rgba(0,232,122,0.05)"
+            elif "🔴" in alert or "⚠" in alert:
+                color = "#ff2d55"; bg = "rgba(255,45,85,0.05)"
+            elif "📋" in alert:
+                color = "#9b59ff"; bg = "rgba(155,89,255,0.05)"
+            elif "⚡" in alert:
+                color = "#ffb700"; bg = "rgba(255,183,0,0.05)"
+            elif "📰" in alert:
+                color = "#0096ff"; bg = "rgba(0,150,255,0.05)"
+            else:
+                color = "#3a5878"; bg = "transparent"
+
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:12px;padding:8px 12px;
+                        background:{bg};border-left:2px solid {color}40;
+                        border-radius:0 6px 6px 0;margin-bottom:4px;">
+                <span style="color:{color};font-family:'JetBrains Mono',monospace;font-size:0.8em;">{alert}</span>
+            </div>""", unsafe_allow_html=True)
+
+    # Setup instructions
+    with st.expander("⚙️ Setup Instructions — How to activate real-time alerts"):
+        st.markdown("""
+        **Step 1: Get Pushover (one-time $5)**
+        1. Go to **pushover.net** → sign up
+        2. Copy your **User Key** from the dashboard
+        3. Click "Create an Application" → copy the **API Token**
+
+        **Step 2: Add keys to Railway**
+        1. Go to your Railway project
+        2. Click your service → **Variables** tab
+        3. Add these variables:
+        ```
+        PUSHOVER_USER_KEY = your_user_key_here
+        PUSHOVER_API_TOKEN = your_api_token_here
+        ANTHROPIC_API_KEY = your_anthropic_key
+        FINNHUB_API_KEY = your_finnhub_key
+        ```
+
+        **Step 3: Deploy the scanner process**
+        1. Make sure your GitHub repo has the new `Procfile` committed
+        2. Railway will automatically run both:
+           - `web` → the Streamlit dashboard
+           - `scanner` → the background real-time scanner
+
+        **What you'll get:**
+        - 📱 Push notification within 60 seconds of a volume spike
+        - 📱 Alert when a new 8-K is filed for any watchlist stock
+        - 📱 Alert when a stock moves >5% in a single minute
+        - ☀️ Morning brief at 9:25 AM with today's active watchlist
+        """)
+
+# ── TAB 5: INFO ───────────────────────────────────────────────────────────────
+with tab5:
     st.markdown("""
 ## How APEX Scanner Works
 
