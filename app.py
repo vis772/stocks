@@ -480,12 +480,10 @@ def render_deep_dive(r: dict):
             st.markdown(f'<div style="color:#00dd66;font-size:0.83em;padding:3px 0;">✓ {n}</div>', unsafe_allow_html=True)
        for f in fsumm:
             st.markdown(f'<div style="color:#7a9ab8;font-size:0.8em;padding:3px 0;font-family:\'JetBrains Mono\',monospace;">{f}</div>', unsafe_allow_html=True)
-
-        ai_summary = r.get("filing_ai_summary", "")
+     ai_summary = r.get("filing_ai_summary", "")
         if ai_summary:
             st.markdown('<div class="sh">⚡ AI Filing Analysis</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="box" style="border-color:#00aaff;">{ai_summary}</div>', unsafe_allow_html=True)
-
     # Risk flags
     if flags:
         st.markdown('<div class="sh">Risk Flags</div>', unsafe_allow_html=True)
