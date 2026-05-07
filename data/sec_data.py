@@ -59,7 +59,53 @@ REVERSE_SPLIT_KEYWORDS = [
 ]
 
 
-def get_recent_filings(ticker: str, days_back: int = 30) -> List[Dict]:
+def summarize_filing_with_claude(filing_url: str, form_type: str, ticker: str) -> str:
+    """
+    Fetch the actual text of an SEC filing and summarize it using Claude.
+    Returns a plain-English summary of what the filing says and why it matters.
+    """
+    import anthropic
+    import os
+
+    try:
+        # Fetch the filing text
+        resp = requests.get(filing_url, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return "Could not fetch filing text."
+
+        # Clean the HTML to plain text
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.text, "lxml")
+        text = soup.get_text(separator=" ", strip=True)
+
+        # Trim to first 6000 characters — enough context, saves API cost
+        text = text[:6000]
+
+        # Call Claude
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return "No Anthropic API key set — add it to Streamlit secrets."
+
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=400,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"You are analyzing an SEC {form_type} filing for {ticker}. "
+                    f"Summarize in 3-5 bullet points what this filing says and why it matters "
+                    f"for a retail investor holding or considering this stock. "
+                    f"Be specific — mention dollar amounts, percentages, dates, and names where present. "
+                    f"Flag anything that is bullish or bearish clearly. "
+                    f"Filing text:\n\n{text}"
+                )
+            }]
+        )
+        return message.content[0].text
+
+    except Exception as e:
+        return f"Filing summary unavailable: {str(e)}"
     """
     Pull recent SEC filings for a ticker using EDGAR full-text search.
     Returns a list of filing dicts with type, date, url, and plain-English signal.
