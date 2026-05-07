@@ -26,6 +26,7 @@ from data.news_data import fetch_ticker_news, analyze_news_sentiment
 from analysis.technicals import compute_technicals, suggest_entry_and_stops
 from analysis.fundamentals import score_fundamentals, score_risk, score_catalyst
 from db.database import save_scan_result
+from data.sec_data import get_recent_filings, analyze_filing_risk, summarize_filing_with_claude
 
 
 def scan_ticker(ticker: str, save: bool = True) -> Optional[Dict]:
@@ -223,7 +224,8 @@ def scan_ticker(ticker: str, save: bool = True) -> Optional[Dict]:
 
         # Catalysts & News
         "catalyst_notes":   catalyst_result.get("catalyst_notes", []),
-        "filing_summary":   sec_analysis.get("filing_summary", []),
+       "filing_summary":   sec_analysis.get("filing_summary", []),
+        "filing_ai_summary": filing_ai_summary,
         "recent_headlines": news_sentiment.get("recent_headlines", []),
         "hype_alert":       news_sentiment.get("hype_alert", False),
         "sentiment_score":  sent_score,
