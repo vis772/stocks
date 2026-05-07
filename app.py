@@ -427,6 +427,34 @@ def render_deep_dive(r: dict):
         for lbl, val, cls in rows:
             st.markdown(stat_row(lbl, val, cls), unsafe_allow_html=True)
 
+        # Option A: Earnings warning
+        earnings_date = r.get("earnings_date")
+        days_to_earn  = r.get("days_to_earnings")
+        if earnings_date:
+            earn_cls = "r" if r.get("earnings_warning") else "a"
+            earn_str = f"{earnings_date} ({days_to_earn}d away)" if days_to_earn is not None else earnings_date
+            st.markdown(stat_row("Earnings Date", earn_str, earn_cls), unsafe_allow_html=True)
+            if r.get("earnings_warning"):
+                st.markdown(
+                    '<div style="background:rgba(255,51,85,0.08);border:1px solid rgba(255,51,85,0.3);'
+                    'border-radius:5px;padding:8px 12px;color:#ff3355;font-size:0.78em;'
+                    'font-family:\'JetBrains Mono\',monospace;margin-top:6px;">'
+                    f'⚠ EARNINGS IN {days_to_earn} DAYS — Binary event. Stock can move 20-50% either direction. '
+                    f'Do not hold through earnings unless you have strong conviction and can absorb the loss.</div>',
+                    unsafe_allow_html=True
+                )
+
+        # Option C: Sector relative strength
+        rs_label = r.get("sector_rs_label")
+        if rs_label:
+            rs_color = "#00ff88" if "outperform" in rs_label.lower() else "#ff3355" if "underperform" in rs_label.lower() else "#ffaa00"
+            st.markdown(
+                f'<div style="margin-top:8px;padding:8px 12px;background:#0e1419;border:1px solid #1e2d3d;'
+                f'border-radius:5px;color:{rs_color};font-size:0.78em;font-family:\'JetBrains Mono\',monospace;">'
+                f'SECTOR RS: {rs_label}</div>',
+                unsafe_allow_html=True
+            )
+
     st.markdown('<div class="sh">Full Analysis</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="box">{r.get("summary","")}</div>', unsafe_allow_html=True)
 
