@@ -21,7 +21,7 @@ import traceback
 
 from config import SCORING_WEIGHTS, SIGNAL_THRESHOLDS, RISK_FLAGS
 from data.market_data import fetch_ticker_snapshot, passes_universe_filter
-from data.sec_data import get_recent_filings, analyze_filing_risk
+from data.sec_data import get_recent_filings, analyze_filing_risk, summarize_filing_with_claude
 from data.news_data import fetch_ticker_news, analyze_news_sentiment
 from analysis.technicals import compute_technicals, suggest_entry_and_stops
 from analysis.fundamentals import score_fundamentals, score_risk, score_catalyst
