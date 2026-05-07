@@ -1,16 +1,4 @@
 # data/sec_data.py
-# Fetches SEC filings from EDGAR — completely free and highly valuable.
-# The most actionable free data for detecting dilution risk, going concern
-# warnings, and major corporate events BEFORE they're widely known.
-#
-# Key filing types we care about:
-#   S-3 / S-3ASR  → Shelf registration (dilution likely pending)
-#   424B          → Prospectus (dilution is happening NOW)
-#   8-K           → Material events (contracts, partnerships, exec changes)
-#   10-Q / 10-K   → Quarterly/annual reports (going concern, financials)
-#   Form 4        → Insider buys and sells
-#   SC 13G/13D    → Institutional ownership changes
-
 import requests
 import feedparser
 import re
@@ -18,13 +6,11 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from config import SEC_USER_AGENT, EDGAR_BASE_URL
 
-
 HEADERS = {
     "User-Agent": SEC_USER_AGENT,
     "Accept-Encoding": "gzip, deflate",
 }
 
-# Filing types and what they mean in plain English
 FILING_SIGNALS = {
     "S-3":      ("dilution_risk",    "Shelf registration — company can issue new shares"),
     "S-3ASR":   ("dilution_risk",    "Automatic shelf registration — large dilution possible"),
@@ -40,87 +26,34 @@ FILING_SIGNALS = {
     "PRE 14A":  ("proxy",            "Preliminary proxy statement"),
 }
 
-# Keywords that trigger going concern warning flag
 GOING_CONCERN_KEYWORDS = [
     "going concern", "substantial doubt", "ability to continue",
     "may not be able to continue", "doubt about its ability",
 ]
 
-# Keywords that suggest ATM (at-the-money) offering activity
 ATM_KEYWORDS = [
     "at-the-market", "at the market", "atm offering", "atm program",
     "equity distribution agreement", "sales agreement",
 ]
 
-# Reverse split signals
 REVERSE_SPLIT_KEYWORDS = [
     "reverse stock split", "reverse split", "consolidation of shares",
     "1-for-", "for-1 reverse",
 ]
 
 
-def summarize_filing_with_claude(filing_url: str, form_type: str, ticker: str) -> str:
+def get_recent_filings(ticker: str, days_back: int = 30) -> List[Dict]:
     """
-    Fetch the actual text of an SEC filing and summarize it using Claude.
-    Returns a plain-English summary of what the filing says and why it matters.
-    """
-    import anthropic
-    import os
-
-    try:
-        # Fetch the filing text
-        resp = requests.get(filing_url, headers=HEADERS, timeout=15)
-        if resp.status_code != 200:
-            return "Could not fetch filing text."
-
-        # Clean the HTML to plain text
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(resp.text, "lxml")
-        text = soup.get_text(separator=" ", strip=True)
-
-        # Trim to first 6000 characters — enough context, saves API cost
-        text = text[:6000]
-
-        # Call Claude
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            return "No Anthropic API key set — add it to Streamlit secrets."
-
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=400,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"You are analyzing an SEC {form_type} filing for {ticker}. "
-                    f"Summarize in 3-5 bullet points what this filing says and why it matters "
-                    f"for a retail investor holding or considering this stock. "
-                    f"Be specific — mention dollar amounts, percentages, dates, and names where present. "
-                    f"Flag anything that is bullish or bearish clearly. "
-                    f"Filing text:\n\n{text}"
-                )
-            }]
-        )
-        return message.content[0].text
-
-    except Exception as e:
-        return f"Filing summary unavailable: {str(e)}"
-    """
-    Pull recent SEC filings for a ticker using EDGAR full-text search.
+    Pull recent SEC filings for a ticker using EDGAR.
     Returns a list of filing dicts with type, date, url, and plain-English signal.
     """
     filings = []
     try:
-        # First, get the company's CIK number from EDGAR
         cik = _get_cik(ticker)
         if not cik:
             return []
 
-        # Fetch recent filings for this CIK
-        url = (
-            f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
-        )
+        url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
         resp = requests.get(url, headers=HEADERS, timeout=10)
         if resp.status_code != 200:
             return []
@@ -128,9 +61,9 @@ def summarize_filing_with_claude(filing_url: str, form_type: str, ticker: str) -
         data = resp.json()
         recent = data.get("filings", {}).get("recent", {})
 
-        forms       = recent.get("form", [])
-        dates       = recent.get("filingDate", [])
-        accessions  = recent.get("accessionNumber", [])
+        forms        = recent.get("form", [])
+        dates        = recent.get("filingDate", [])
+        accessions   = recent.get("accessionNumber", [])
         descriptions = recent.get("primaryDocument", [])
 
         cutoff = datetime.now() - timedelta(days=days_back)
@@ -142,9 +75,8 @@ def summarize_filing_with_claude(filing_url: str, form_type: str, ticker: str) -
                 continue
 
             if filing_date < cutoff:
-                break   # EDGAR returns newest first, so we can break early
+                break
 
-            # Only track filing types we care about
             signal_key = None
             for key in FILING_SIGNALS:
                 if form.startswith(key):
@@ -155,18 +87,18 @@ def summarize_filing_with_claude(filing_url: str, form_type: str, ticker: str) -
                 continue
 
             signal_type, signal_desc = FILING_SIGNALS[signal_key]
-            acc_clean = accession.replace("-", "")
+            acc_clean  = accession.replace("-", "")
             filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{doc}"
 
             filings.append({
-                "ticker":       ticker,
-                "form_type":    form,
-                "date":         date_str,
-                "signal_type":  signal_type,
-                "description":  signal_desc,
-                "url":          filing_url,
-                "accession":    accession,
-                "days_ago":     (datetime.now() - filing_date).days,
+                "ticker":      ticker,
+                "form_type":   form,
+                "date":        date_str,
+                "signal_type": signal_type,
+                "description": signal_desc,
+                "url":         filing_url,
+                "accession":   accession,
+                "days_ago":    (datetime.now() - filing_date).days,
             })
 
     except Exception as e:
@@ -178,14 +110,9 @@ def summarize_filing_with_claude(filing_url: str, form_type: str, ticker: str) -
 def analyze_filing_risk(filings: List[Dict]) -> Dict:
     """
     Given a list of recent filings, determine which risk flags are active.
-
-    Returns a dict with:
-      - active_flags: list of flag names
-      - flag_details: human-readable explanations
-      - filing_summary: list of plain-English sentences
     """
-    active_flags = []
-    flag_details = {}
+    active_flags   = []
+    flag_details   = {}
     filing_summary = []
 
     dilution_forms  = [f for f in filings if f["signal_type"] == "dilution_risk"]
@@ -193,7 +120,6 @@ def analyze_filing_risk(filings: List[Dict]) -> Dict:
     material_events = [f for f in filings if f["signal_type"] == "material_event"]
     proxy_forms     = [f for f in filings if f["signal_type"] == "proxy"]
 
-    # ── Dilution / Shelf Registration ─────────────────────────────────────────
     if dilution_forms:
         most_recent = dilution_forms[0]
         active_flags.append("shelf_registration")
@@ -206,7 +132,6 @@ def analyze_filing_risk(filings: List[Dict]) -> Dict:
             f"{most_recent['description']}. Source: SEC EDGAR"
         )
 
-    # ── Proxy / Reverse Split Risk ─────────────────────────────────────────────
     if proxy_forms:
         active_flags.append("reverse_split_risk")
         filing_summary.append(
@@ -214,14 +139,12 @@ def analyze_filing_risk(filings: List[Dict]) -> Dict:
             f"possible reverse split or major corporate action vote pending"
         )
 
-    # ── 8-K Material Events ────────────────────────────────────────────────────
-    for f in material_events[:3]:   # Show up to 3 recent 8-Ks
+    for f in material_events[:3]:
         filing_summary.append(
             f"📋 8-K filed {f['days_ago']} days ago ({f['date']}). "
             f"Review at: {f['url']}"
         )
 
-    # ── Insider Activity ───────────────────────────────────────────────────────
     if insider_forms:
         filing_summary.append(
             f"👤 {len(insider_forms)} insider transaction(s) in past 30 days. "
@@ -236,10 +159,53 @@ def analyze_filing_risk(filings: List[Dict]) -> Dict:
     }
 
 
+def summarize_filing_with_claude(filing_url: str, form_type: str, ticker: str) -> str:
+    """
+    Fetch the actual text of an SEC filing and summarize it using Claude.
+    """
+    import os
+    try:
+        import anthropic
+    except ImportError:
+        return "Anthropic package not installed."
+
+    try:
+        resp = requests.get(filing_url, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return "Could not fetch filing text."
+
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.text, "lxml")
+        text = soup.get_text(separator=" ", strip=True)[:6000]
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return "No Anthropic API key set — add it to Streamlit secrets."
+
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=400,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"You are analyzing an SEC {form_type} filing for {ticker}. "
+                    f"Summarize in 3-5 bullet points what this filing says and why it matters "
+                    f"for a retail investor. Be specific — mention dollar amounts, percentages, "
+                    f"dates, and names where present. Flag anything bullish or bearish clearly.\n\n"
+                    f"Filing text:\n\n{text}"
+                )
+            }]
+        )
+        return message.content[0].text
+
+    except Exception as e:
+        return f"Filing summary unavailable: {str(e)}"
+
+
 def get_insider_form4s(ticker: str, days_back: int = 30) -> List[Dict]:
     """
     Fetch Form 4 (insider transactions) for a ticker via EDGAR RSS.
-    Returns a list of transactions with direction and approximate size.
     """
     try:
         cik = _get_cik(ticker)
@@ -256,10 +222,10 @@ def get_insider_form4s(ticker: str, days_back: int = 30) -> List[Dict]:
 
         for entry in feed.entries[:10]:
             transactions.append({
-                "title":    entry.get("title", ""),
-                "date":     entry.get("updated", ""),
-                "summary":  entry.get("summary", ""),
-                "url":      entry.get("link", ""),
+                "title":   entry.get("title", ""),
+                "date":    entry.get("updated", ""),
+                "summary": entry.get("summary", ""),
+                "url":     entry.get("link", ""),
             })
 
         return transactions
@@ -272,23 +238,18 @@ def get_insider_form4s(ticker: str, days_back: int = 30) -> List[Dict]:
 def _get_cik(ticker: str) -> Optional[str]:
     """
     Look up a company's CIK number from EDGAR's company search.
-    CIK is required for all EDGAR API calls.
     """
     try:
-        url = f"https://efts.sec.gov/LATEST/search-index?q=%22{ticker}%22&dateRange=custom&startdt=2020-01-01&forms=10-K"
-        # Use the simpler company lookup endpoint
         url = f"https://www.sec.gov/cgi-bin/browse-edgar?company=&CIK={ticker}&type=10-K&dateb=&owner=include&count=5&search_text=&action=getcompany&output=atom"
         feed = feedparser.parse(url)
 
         if feed.entries:
-            # CIK is in the company-info tag
             for entry in feed.entries:
-                link = entry.get("link", "")
+                link  = entry.get("link", "")
                 match = re.search(r"CIK=(\d+)", link)
                 if match:
                     return match.group(1)
 
-        # Fallback: use the EDGAR company search JSON
         resp = requests.get(
             f"https://efts.sec.gov/LATEST/search-index?q=%22{ticker}%22&forms=10-K&dateRange=custom&startdt=2022-01-01",
             headers=HEADERS, timeout=8
