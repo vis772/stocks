@@ -83,6 +83,16 @@ def scan_ticker(ticker: str, save: bool = True) -> Optional[Dict]:
     try:
         filings     = get_recent_filings(ticker, days_back=30)
         sec_analysis = analyze_filing_risk(filings)
+        # Summarize the most important recent filing with Claude
+        filing_ai_summary = ""
+        important_filings = [f for f in filings if f.get("form_type") in ("8-K", "S-3", "424B3", "424B4")]
+        if important_filings:
+            top_filing = important_filings[0]
+            filing_ai_summary = summarize_filing_with_claude(
+                filing_url=top_filing["url"],
+                form_type=top_filing["form_type"],
+                ticker=ticker,
+            )
         result["data_sources"].append("SEC EDGAR (free)")
     except Exception as e:
         filings      = []
