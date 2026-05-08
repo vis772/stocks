@@ -1,10 +1,10 @@
 # scanner_loop.py
-# The real-time background scanner.
-# Runs continuously during market hours, scanning the dynamic watchlist
-# every 60 seconds and sending phone alerts for significant events.
-#
-# This runs as a SEPARATE PROCESS alongside the Streamlit dashboard.
-# Railway runs both via the Procfile.
+# Real-time background scanner.
+# Runs continuously during market hours.
+# - All 50 watchlist stocks scanned every 60 seconds simultaneously
+# - Top 10 priority stocks get news checked every 15 seconds (4x per minute)
+# - SEC filings checked every 5 minutes
+# - EOD report generated at 4:00 PM ET
 
 import os
 import time
@@ -12,10 +12,10 @@ import json
 import requests
 import feedparser
 import re
+import threading
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Set
-import sqlite3
 
 from alerts import (
     alert_volume_spike, alert_price_move,
@@ -25,24 +25,24 @@ from alerts import (
     send_alert
 )
 from morning_screen import build_todays_watchlist, load_todays_watchlist, WATCHLIST_FILE
+
+FINNHUB_BASE = "https://finnhub.io/api/v1"
 STATE_FILE   = "scanner_state.json"
 
 # ─── Alert thresholds ─────────────────────────────────────────────────────────
-VOLUME_SPIKE_THRESHOLD  = 2.5   # Alert if volume > 2.5x average
-PRICE_MOVE_THRESHOLD    = 5.0   # Alert if price moves > 5% in one scan cycle
-PRICE_MOVE_10MIN        = 8.0   # Alert if price moves > 8% in 10 minutes
-GAP_UP_THRESHOLD        = 4.0   # Alert on gap-up > 4%
-SEC_LOOKBACK_HOURS      = 2     # Check for SEC filings in last 2 hours
+VOLUME_SPIKE_THRESHOLD = 2.5
+PRICE_MOVE_THRESHOLD   = 5.0
+PRICE_MOVE_10MIN       = 8.0
+GAP_UP_THRESHOLD       = 4.0
 
 # ─── Market hours (ET) ────────────────────────────────────────────────────────
 MARKET_OPEN_HOUR    = 9
-MARKET_OPEN_MIN     = 25   # Start scanning 5 min before open
+MARKET_OPEN_MIN     = 25
 MARKET_CLOSE_HOUR   = 16
-MARKET_CLOSE_MIN    = 30   # Scan 30 min after close for after-hours
-
-PREMARKET_HOUR      = 6    # Morning screen time
-SCAN_INTERVAL_SEC   = 60   # Scan every 60 seconds during market hours
-AFTERHOURS_INTERVAL = 300  # Every 5 minutes after hours
+MARKET_CLOSE_MIN    = 30
+PREMARKET_HOUR      = 6
+SCAN_INTERVAL_SEC   = 60
+AFTERHOURS_INTERVAL = 300
 
 
 def _fh_key() -> str:
@@ -64,27 +64,25 @@ def _fh_get(endpoint: str, params: dict) -> Optional[dict]:
         return None
 
 
-# ─── State management ─────────────────────────────────────────────────────────
-# Tracks what we've already alerted on to avoid duplicate notifications
+# ─── State ────────────────────────────────────────────────────────────────────
 
 class ScannerState:
     def __init__(self):
-        self.alerted_today: Set[str] = set()  # "TICKER_event_type" keys
-        self.last_prices:   Dict[str, float] = {}
-        self.last_volumes:  Dict[str, float] = {}
-        self.price_at_10min: Dict[str, float] = {}
-        self.alert_log:     List[str] = []
-        self.scan_count:    int = 0
-        self.last_sec_check: datetime = datetime.now() - timedelta(hours=3)
-        self.known_filings: Set[str] = set()  # accession numbers seen
+        self.alerted_today:   Set[str] = set()
+        self.last_prices:     Dict[str, float] = {}
+        self.last_volumes:    Dict[str, float] = {}
+        self.price_at_10min:  Dict[str, float] = {}
+        self.alert_log:       List[str] = []
+        self.scan_count:      int = 0
+        self.last_sec_check:  datetime = datetime.now() - timedelta(hours=3)
+        self.known_filings:   Set[str] = set()
         self._load()
 
     def _load(self):
         try:
             with open(STATE_FILE) as f:
                 data = json.load(f)
-            today = datetime.now().strftime("%Y-%m-%d")
-            if data.get("date") == today:
+            if data.get("date") == datetime.now().strftime("%Y-%m-%d"):
                 self.alerted_today = set(data.get("alerted_today", []))
                 self.known_filings = set(data.get("known_filings", []))
         except (FileNotFoundError, json.JSONDecodeError):
@@ -112,10 +110,8 @@ class ScannerState:
 
     def log_alert(self, msg: str):
         self.alert_log.append(f"{datetime.now().strftime('%H:%M')} {msg}")
-        # Keep last 50 alerts
         if len(self.alert_log) > 50:
             self.alert_log = self.alert_log[-50:]
-        # Write to shared state file so dashboard can show it
         try:
             with open("alert_log.json", "w") as f:
                 json.dump(self.alert_log, f)
@@ -123,17 +119,38 @@ class ScannerState:
             pass
 
 
-# ─── Single ticker scan ────────────────────────────────────────────────────────
+# ─── Market hours ─────────────────────────────────────────────────────────────
+
+def is_market_hours() -> bool:
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    h, m = now.hour, now.minute
+    after_open   = (h > MARKET_OPEN_HOUR)  or (h == MARKET_OPEN_HOUR  and m >= MARKET_OPEN_MIN)
+    before_close = (h < MARKET_CLOSE_HOUR) or (h == MARKET_CLOSE_HOUR and m <= MARKET_CLOSE_MIN)
+    return after_open and before_close
+
+
+def is_premarket() -> bool:
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    return PREMARKET_HOUR <= now.hour < MARKET_OPEN_HOUR
+
+
+def is_morning_screen_time() -> bool:
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    return now.hour == PREMARKET_HOUR and now.minute < 10
+
+
+# ─── Single ticker scan ───────────────────────────────────────────────────────
 
 def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
-    """
-    Scan a single ticker and fire alerts if thresholds are met.
-    Returns list of alert messages fired (for digest).
-    """
+    """Scan one ticker for price/volume alerts. Returns list of alerts fired."""
     fired = []
-
     try:
-        # Get real-time quote from Finnhub
         quote = _fh_get("quote", {"symbol": ticker})
         if not quote or not quote.get("c") or quote["c"] <= 0:
             return fired
@@ -147,30 +164,25 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
 
         change_pct = (price - prev_close) / prev_close * 100
 
-        # ── Volume spike ─────────────────────────────────────────────────────
+        # ── Volume spike ──────────────────────────────────────────────────────
         last_vol = state.last_volumes.get(ticker, 0)
         if last_vol > 0 and volume > 0:
-            # Compare current volume rate vs recent rate
-            vol_ratio = volume / max(last_vol, 1)
-            # Approximate relative volume vs typical
-            # We estimate based on time of day
             hour = datetime.now().hour
             minutes_into_day = max(1, (hour - 9) * 60 + datetime.now().minute - 30)
-            expected_vol_pct = min(minutes_into_day / 390, 1.0)  # 390 min trading day
-            if expected_vol_pct > 0.05:
-                annualized_rvol = (volume / expected_vol_pct) / max(last_vol / 0.5, 1)
-                if annualized_rvol > VOLUME_SPIKE_THRESHOLD:
+            expected_pct = min(minutes_into_day / 390, 1.0)
+            if expected_pct > 0.05:
+                rvol = (volume / expected_pct) / max(last_vol / 0.5, 1)
+                if rvol > VOLUME_SPIKE_THRESHOLD:
                     key = f"{ticker}_volume_{datetime.now().strftime('%Y-%m-%d-%H')}"
                     if not state.already_alerted(key):
-                        alert_volume_spike(ticker, annualized_rvol, price, change_pct)
+                        alert_volume_spike(ticker, rvol, price, change_pct)
                         state.mark_alerted(key)
-                        msg = f"⚡ {ticker} volume spike {annualized_rvol:.1f}x"
+                        msg = f"⚡ {ticker} volume spike {rvol:.1f}x"
                         state.log_alert(msg)
                         fired.append(msg)
-
         state.last_volumes[ticker] = volume
 
-        # ── Price move since last scan ────────────────────────────────────────
+        # ── Price move since last scan ─────────────────────────────────────────
         last_price = state.last_prices.get(ticker)
         if last_price and last_price > 0:
             move_pct = (price - last_price) / last_price * 100
@@ -184,9 +196,9 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                     fired.append(msg)
 
         # ── 10-minute price move ───────────────────────────────────────────────
-        price_10min_ago = state.price_at_10min.get(ticker)
-        if price_10min_ago and price_10min_ago > 0:
-            move_10min = (price - price_10min_ago) / price_10min_ago * 100
+        price_10min = state.price_at_10min.get(ticker)
+        if price_10min and price_10min > 0:
+            move_10min = (price - price_10min) / price_10min * 100
             if abs(move_10min) >= PRICE_MOVE_10MIN:
                 key = f"{ticker}_10min_{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
                 if not state.already_alerted(key):
@@ -196,13 +208,11 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                     state.log_alert(msg)
                     fired.append(msg)
 
-        # Update price tracking
         state.last_prices[ticker] = price
-        # Rotate 10-min price every ~10 scans
         if state.scan_count % 10 == 0:
             state.price_at_10min[ticker] = price
 
-        # ── Daily gap check (only do once per day) ────────────────────────────
+        # ── Gap check (once per day) ───────────────────────────────────────────
         gap_key = f"{ticker}_gap_{datetime.now().strftime('%Y-%m-%d')}"
         if not state.already_alerted(gap_key):
             if change_pct >= GAP_UP_THRESHOLD:
@@ -233,87 +243,69 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 )
                 state.mark_alerted(gap_key)
 
-        # ── News check ────────────────────────────────────────────────────────
+        # ── News check (main scan — catches remaining stocks) ─────────────────
         today     = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        news = _fh_get("company-news", {"symbol": ticker, "from": yesterday, "to": today})
-
+        news      = _fh_get("company-news", {"symbol": ticker, "from": yesterday, "to": today})
         if news:
-            # Check for articles in the last 30 minutes
             cutoff = datetime.now() - timedelta(minutes=30)
             for article in news[:5]:
                 pub_time = article.get("datetime", 0)
-                if pub_time:
-                    pub_dt = datetime.fromtimestamp(pub_time)
-                    if pub_dt > cutoff:
-                        headline = article.get("headline", "")
-                        art_key  = f"{ticker}_news_{pub_time}"
-                        if headline and not state.already_alerted(art_key):
-                            # Basic sentiment
-                            text = headline.lower()
-                            positive_words = ["surge","soar","beat","win","launch","partner","contract","buy","upgrade"]
-                            negative_words = ["fall","drop","miss","loss","warning","sell","downgrade","lawsuit","concern"]
-                            pos = sum(1 for w in positive_words if w in text)
-                            neg = sum(1 for w in negative_words if w in text)
-                            sentiment = "positive" if pos > neg else "negative" if neg > pos else "neutral"
+                if not pub_time:
+                    continue
+                pub_dt  = datetime.fromtimestamp(pub_time)
+                if pub_dt > cutoff:
+                    headline = article.get("headline", "")
+                    art_key  = f"{ticker}_news_{pub_time}"
+                    if headline and not state.already_alerted(art_key):
+                        text      = headline.lower()
+                        pos       = sum(1 for w in ["surge","soar","beat","win","launch","partner","contract","awarded","upgrade","record","buy"] if w in text)
+                        neg       = sum(1 for w in ["fall","drop","miss","loss","warning","sell","downgrade","lawsuit","concern","bankruptcy","dilut"] if w in text)
+                        sentiment = "positive" if pos > neg else "negative" if neg > pos else "neutral"
+                        alert_news(ticker, headline, sentiment, price)
+                        state.mark_alerted(art_key)
+                        msg = f"📰 {ticker} news: {headline[:60]}..."
+                        state.log_alert(msg)
+                        fired.append(msg)
+                        break
 
-                            alert_news(ticker, headline, sentiment, price)
-                            state.mark_alerted(art_key)
-                            msg = f"📰 {ticker} news: {headline[:60]}..."
-                            state.log_alert(msg)
-                            fired.append(msg)
-                            break  # One news alert per ticker per scan
-
-    except Exception as e:
-        pass  # Never crash the scanner on a single ticker failure
+    except Exception:
+        pass
 
     return fired
 
 
-# ─── SEC Filing Monitor ────────────────────────────────────────────────────────
+# ─── SEC Filing Monitor ───────────────────────────────────────────────────────
 
 def check_sec_filings(watchlist: List[str], state: ScannerState):
-    """
-    Check EDGAR for new filings from any company in our watchlist.
-    Uses the EDGAR recent filings RSS feed.
-    """
+    """Check EDGAR RSS for new filings from watchlist stocks."""
     try:
-        # High-value filing types to alert on
         priority_forms = {"8-K", "S-3", "424B3", "424B4", "SC 13D"}
-
         feed = feedparser.parse(
             "https://www.sec.gov/cgi-bin/browse-edgar"
             "?action=getcurrent&type=8-K&dateb=&owner=include&count=40&output=atom"
         )
-
         ticker_set = set(t.upper() for t in watchlist)
 
         for entry in feed.entries[:20]:
             title     = entry.get("title", "")
             link      = entry.get("link", "")
-            summary   = entry.get("summary", "")
             accession = re.search(r"(\d{10}-\d{2}-\d{6})", link)
             acc_id    = accession.group(1) if accession else link
 
-            # Skip if we've already seen this filing
             if acc_id in state.known_filings:
                 continue
-
             state.known_filings.add(acc_id)
 
-            # Check if this filing is for one of our watchlist stocks
-            title_upper = title.upper()
             for ticker in ticker_set:
-                if ticker in title_upper or ticker in summary.upper():
+                if ticker in title.upper():
                     filing_key = f"{ticker}_filing_{acc_id}"
                     if not state.already_alerted(filing_key):
-                        # Determine form type
                         form_type = "8-K"
                         for ft in priority_forms:
-                            if ft in title_upper:
+                            if ft in title.upper():
                                 form_type = ft
                                 break
-
                         alert_sec_filing(
                             ticker=ticker,
                             form_type=form_type,
@@ -322,9 +314,8 @@ def check_sec_filings(watchlist: List[str], state: ScannerState):
                             summary=f"New {form_type} detected for {ticker}. Review immediately.",
                         )
                         state.mark_alerted(filing_key)
-                        msg = f"📋 {ticker} new {form_type} filing"
-                        state.log_alert(msg)
-                        break
+                        state.log_alert(f"📋 {ticker} new {form_type} filing")
+                    break
 
         state.last_sec_check = datetime.now()
 
@@ -332,60 +323,95 @@ def check_sec_filings(watchlist: List[str], state: ScannerState):
         print(f"  [scanner] SEC check failed: {e}")
 
 
-# ─── Market hours check ────────────────────────────────────────────────────────
+# ─── Fast News Monitor (top 10 stocks, 4x per minute) ────────────────────────
 
-def is_market_hours() -> bool:
-    now = datetime.now()
-    # Skip weekends
-    if now.weekday() >= 5:
-        return False
-    h, m = now.hour, now.minute
-    after_open  = (h > MARKET_OPEN_HOUR) or (h == MARKET_OPEN_HOUR and m >= MARKET_OPEN_MIN)
-    before_close = (h < MARKET_CLOSE_HOUR) or (h == MARKET_CLOSE_HOUR and m <= MARKET_CLOSE_MIN)
-    return after_open and before_close
+def run_news_monitor(watchlist: List[str], state: ScannerState):
+    """
+    Dedicated news monitor thread.
+    Checks top 10 priority stocks every 15 seconds = 4 times per minute.
+    Runs alongside the main scanner loop.
+    """
+    def news_loop():
+        while True:
+            try:
+                if not is_market_hours():
+                    time.sleep(60)
+                    continue
 
+                # Always use the first 10 stocks — these are highest activity
+                priority_stocks = watchlist[:10]
+                today     = datetime.now().strftime("%Y-%m-%d")
+                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                cutoff    = datetime.now() - timedelta(minutes=15)
 
-def is_premarket() -> bool:
-    now = datetime.now()
-    if now.weekday() >= 5:
-        return False
-    return PREMARKET_HOUR <= now.hour < MARKET_OPEN_HOUR
+                for ticker in priority_stocks:
+                    try:
+                        news = _fh_get("company-news", {
+                            "symbol": ticker,
+                            "from":   yesterday,
+                            "to":     today,
+                        })
 
+                        if not news:
+                            continue
 
-def is_morning_screen_time() -> bool:
-    now = datetime.now()
-    if now.weekday() >= 5:
-        return False
-    return now.hour == PREMARKET_HOUR and now.minute < 10
+                        for article in news[:3]:
+                            pub_time = article.get("datetime", 0)
+                            if not pub_time:
+                                continue
+                            pub_dt = datetime.fromtimestamp(pub_time)
+                            if pub_dt < cutoff:
+                                continue
+
+                            headline = article.get("headline", "")
+                            # Use fastnews key so it doesn't conflict with main scan
+                            art_key  = f"{ticker}_fastnews_{pub_time}"
+
+                            if headline and not state.already_alerted(art_key):
+                                quote = _fh_get("quote", {"symbol": ticker})
+                                price = quote.get("c", 0) if quote else 0
+
+                                text = headline.lower()
+                                pos  = sum(1 for w in ["surge","soar","beat","win","launch","partner","contract","awarded","upgrade","record","buy"] if w in text)
+                                neg  = sum(1 for w in ["fall","drop","miss","loss","warning","sell","downgrade","lawsuit","concern","bankruptcy","dilut"] if w in text)
+                                sentiment = "positive" if pos > neg else "negative" if neg > pos else "neutral"
+
+                                alert_news(ticker, headline, sentiment, price)
+                                state.mark_alerted(art_key)
+                                state.log_alert(f"📰 {ticker} fast news: {headline[:50]}...")
+                            break
+
+                        time.sleep(0.3)  # Small gap between tickers
+
+                    except Exception:
+                        continue
+
+            except Exception as e:
+                print(f"  [news_monitor] Error: {e}")
+
+            time.sleep(15)  # 15 seconds = 4 checks per minute
+
+    thread = threading.Thread(target=news_loop, daemon=True)
+    thread.start()
+    print("  ✓ Fast news monitor started — top 10 stocks checked 4x per minute")
+    return thread
 
 
 # ─── Main scanner loop ────────────────────────────────────────────────────────
 
 def run_scanner():
-    """
-    Main infinite loop. This runs forever on Railway.
-    """
+    """Main infinite loop. Runs forever on Railway."""
     print("\n" + "="*60)
     print("APEX Real-Time Scanner Starting...")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S ET')}")
     print("="*60 + "\n")
 
-    state = ScannerState()
-    watchlist: List[str] = []
+    state              = ScannerState()
+    watchlist:         List[str] = []
     morning_brief_sent = False
     last_digest_time   = datetime.now()
     eod_report_sent    = False
-
-    # Send startup notification
-    send_alert(
-        title="⚡ APEX Scanner Started",
-        message=(
-            f"Real-time scanner is now running on Railway.\n"
-            f"Started at: {datetime.now().strftime('%H:%M ET')}\n"
-            f"Scanning every 60 seconds during market hours."
-        ),
-        priority=PRIORITY_NORMAL,
-    )
+    news_thread        = None
 
     while True:
         try:
@@ -394,8 +420,10 @@ def run_scanner():
             # ── Morning screen at 6 AM ────────────────────────────────────────
             if is_morning_screen_time() and not watchlist:
                 print("\n[MORNING SCREEN] Building today's watchlist...")
-                watchlist = build_todays_watchlist(max_stocks=50)
+                watchlist          = build_todays_watchlist(max_stocks=50)
                 morning_brief_sent = False
+                eod_report_sent    = False
+                news_thread        = None  # Reset so it restarts with new watchlist
 
             # ── Load watchlist if empty ────────────────────────────────────────
             if not watchlist:
@@ -405,7 +433,7 @@ def run_scanner():
                     watchlist = DEFAULT_UNIVERSE
                     print(f"  Using default universe: {len(watchlist)} stocks")
 
-            # ── Morning brief at 9:25 AM ───────────────────────────────────────
+            # ── Morning brief at 8:30 AM ET (7:30 CST) ────────────────────────
             if (now.hour == 8 and now.minute >= 30 and not morning_brief_sent and watchlist):
                 try:
                     with open(WATCHLIST_FILE) as f:
@@ -425,15 +453,19 @@ def run_scanner():
                 state.scan_count += 1
                 print(f"\n[SCAN #{state.scan_count}] {now.strftime('%H:%M:%S')} — {len(watchlist)} stocks")
 
+                # Start fast news monitor thread if not running
+                if news_thread is None or not news_thread.is_alive():
+                    news_thread = run_news_monitor(watchlist, state)
+
                 all_alerts = []
 
                 # Check SEC filings every 5 minutes
-                sec_elapsed = (now - state.last_sec_check).total_seconds()
-                if sec_elapsed >= 300:
-                    print("  Checking SEC EDGAR for new filings...")
+                if (now - state.last_sec_check).total_seconds() >= 300:
+                    print("  Checking SEC EDGAR...")
                     check_sec_filings(watchlist, state)
 
-                # Scan all tickers in parallel
+                # Scan ALL stocks simultaneously using thread pool
+                # 15 workers = 15 stocks at a time, cycles through all 50 in ~3-5 seconds
                 with ThreadPoolExecutor(max_workers=15) as executor:
                     futures = {
                         executor.submit(scan_one_ticker, ticker, state): ticker
@@ -447,61 +479,50 @@ def run_scanner():
                             pass
 
                 if all_alerts:
-                    print(f"  🔔 {len(all_alerts)} alert(s) fired this scan")
+                    print(f"  🔔 {len(all_alerts)} alert(s) fired")
                 else:
-                    print(f"  ✓ No alerts — market quiet")
+                    print(f"  ✓ No alerts this scan")
 
-                # ── 30-min digest ─────────────────────────────────────────────
-                digest_elapsed = (now - last_digest_time).total_seconds()
-                if digest_elapsed >= 1800 and state.alert_log:
-                    recent_alerts = [a for a in state.alert_log[-10:]]
-                    if recent_alerts:
-                        alert_digest(recent_alerts)
+                # 30-min digest
+                if (now - last_digest_time).total_seconds() >= 1800 and state.alert_log:
+                    alert_digest(state.alert_log[-10:])
                     last_digest_time = now
 
-                # ── EOD report at 4:00 PM ET ───────────────────────────────────
+                # EOD report at 4:00 PM ET
                 if now.hour == 16 and now.minute < 5 and not eod_report_sent:
                     print("\n[EOD REPORT] Generating end-of-day report...")
                     try:
                         from eod_report import run_eod_report
                         run_eod_report()
                         eod_report_sent = True
-                        state.log_alert("📊 End-of-day report generated")
+                        state.log_alert("📊 End-of-day report generated and sent")
                     except Exception as e:
-                        print(f"  [EOD] Report generation failed: {e}")
+                        print(f"  [EOD] Failed: {e}")
 
                 # Reset EOD flag for next day
                 if now.hour == 6 and now.minute < 5:
                     eod_report_sent = False
 
-                # Wait until next scan
                 time.sleep(SCAN_INTERVAL_SEC)
 
-            # ── After hours / pre-market ──────────────────────────────────────
+            # ── Pre-market ────────────────────────────────────────────────────
             elif is_premarket():
-                # Light scan during pre-market
-                print(f"  [PRE-MARKET] {now.strftime('%H:%M')} — light scan")
-
-                # Just check SEC filings during pre-market
-                if watchlist:
-                    sec_elapsed = (now - state.last_sec_check).total_seconds()
-                    if sec_elapsed >= 600:  # Every 10 min pre-market
-                        check_sec_filings(watchlist, state)
-
+                print(f"  [PRE-MARKET] {now.strftime('%H:%M')} — checking SEC filings")
+                if watchlist and (now - state.last_sec_check).total_seconds() >= 600:
+                    check_sec_filings(watchlist, state)
                 time.sleep(AFTERHOURS_INTERVAL)
 
+            # ── Market closed ─────────────────────────────────────────────────
             else:
-                # Market closed — sleep longer
-                next_check = 600  # Check every 10 min when closed
-                print(f"  [CLOSED] {now.strftime('%H:%M')} — market closed, sleeping {next_check//60}min")
-                time.sleep(next_check)
+                print(f"  [CLOSED] {now.strftime('%H:%M')} — sleeping 10 min")
+                time.sleep(600)
 
         except KeyboardInterrupt:
-            print("\nScanner stopped by user.")
+            print("\nScanner stopped.")
             break
         except Exception as e:
-            print(f"  [scanner] Unexpected error: {e}")
-            time.sleep(30)  # Brief pause then continue
+            print(f"  [scanner] Error: {e}")
+            time.sleep(30)
 
 
 if __name__ == "__main__":
