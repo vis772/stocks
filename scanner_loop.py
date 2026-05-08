@@ -406,7 +406,7 @@ def run_scanner():
                     print(f"  Using default universe: {len(watchlist)} stocks")
 
             # ── Morning brief at 9:25 AM ───────────────────────────────────────
-            if (now.hour == 9 and now.minute >= 25 and not morning_brief_sent and watchlist):
+            if (now.hour == 8 and now.minute >= 30 and not morning_brief_sent and watchlist):
                 try:
                     with open(WATCHLIST_FILE) as f:
                         wl_data = json.load(f)
