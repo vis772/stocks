@@ -1047,6 +1047,27 @@ with tab4:
     # Auto-refresh
     refresh = st.button("🔄 Refresh Now", use_container_width=False)
 
+    # ── EOD Report Download ───────────────────────────────────────────────────
+    try:
+        import json as _json
+        with open("latest_report.json") as f:
+            report_meta = _json.load(f)
+        report_path = report_meta.get("path", "")
+        report_date = report_meta.get("date", "")
+
+        if report_path and os.path.exists(report_path):
+            st.markdown('<div class="sh">📊 Latest EOD Report</div>', unsafe_allow_html=True)
+            with open(report_path, "rb") as pdf_file:
+                st.download_button(
+                    label=f"⬇️ Download EOD Report — {report_date}",
+                    data=pdf_file,
+                    file_name=f"APEX_EOD_{report_date}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+    except Exception:
+        pass
+
     # Load alert log
     alert_log = []
     try:
