@@ -25,8 +25,6 @@ from alerts import (
     send_alert
 )
 from morning_screen import build_todays_watchlist, load_todays_watchlist, WATCHLIST_FILE
-
-FINNHUB_BASE = "https://finnhub.io/api/v1"
 STATE_FILE   = "scanner_state.json"
 
 # ─── Alert thresholds ─────────────────────────────────────────────────────────
@@ -376,6 +374,7 @@ def run_scanner():
     watchlist: List[str] = []
     morning_brief_sent = False
     last_digest_time   = datetime.now()
+    eod_report_sent    = False
 
     # Send startup notification
     send_alert(
@@ -407,7 +406,7 @@ def run_scanner():
                     print(f"  Using default universe: {len(watchlist)} stocks")
 
             # ── Morning brief at 9:25 AM ───────────────────────────────────────
-            if (now.hour == 8 and now.minute >= 30 and not morning_brief_sent and watchlist):
+            if (now.hour == 9 and now.minute >= 25 and not morning_brief_sent and watchlist):
                 try:
                     with open(WATCHLIST_FILE) as f:
                         wl_data = json.load(f)
@@ -459,6 +458,21 @@ def run_scanner():
                     if recent_alerts:
                         alert_digest(recent_alerts)
                     last_digest_time = now
+
+                # ── EOD report at 4:00 PM ET ───────────────────────────────────
+                if now.hour == 16 and now.minute < 5 and not eod_report_sent:
+                    print("\n[EOD REPORT] Generating end-of-day report...")
+                    try:
+                        from eod_report import run_eod_report
+                        run_eod_report()
+                        eod_report_sent = True
+                        state.log_alert("📊 End-of-day report generated")
+                    except Exception as e:
+                        print(f"  [EOD] Report generation failed: {e}")
+
+                # Reset EOD flag for next day
+                if now.hour == 6 and now.minute < 5:
+                    eod_report_sent = False
 
                 # Wait until next scan
                 time.sleep(SCAN_INTERVAL_SEC)
