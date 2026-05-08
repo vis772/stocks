@@ -1,8 +1,8 @@
 # scanner_loop.py
-# Real-time background scanner.
-# Runs continuously during market hours.
+# Real-time background scanner with Claude-powered news analysis.
 # - All 50 watchlist stocks scanned every 60 seconds simultaneously
 # - Top 10 priority stocks get news checked every 15 seconds (4x per minute)
+# - Claude analyzes every news article for context, tone, and significance
 # - SEC filings checked every 5 minutes
 # - EOD report generated at 4:00 PM ET
 
@@ -145,10 +145,110 @@ def is_morning_screen_time() -> bool:
     return now.hour == PREMARKET_HOUR and now.minute < 10
 
 
+# ─── Claude News Analysis ─────────────────────────────────────────────────────
+
+def analyze_news_with_claude(ticker: str, headline: str, summary: str = "") -> dict:
+    """
+    Use Claude Haiku to analyze a news headline for:
+    - Sentiment (positive/negative/neutral)
+    - Significance (high/medium/low)
+    - Context (what actually happened in plain English)
+    - Alert worthiness (is this actually relevant to a trader?)
+
+    Cost: ~$0.0008 per article = ~$1/month at typical volume.
+    Falls back to keyword matching if no API key.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if not api_key:
+        return _keyword_sentiment(headline)
+
+    try:
+        import anthropic
+        client  = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Analyze this news for stock {ticker}.\n\n"
+                    f"Headline: {headline}\n"
+                    f"Summary: {summary[:300] if summary else 'None'}\n\n"
+                    f"Reply in JSON only, no markdown, no explanation outside JSON:\n"
+                    f'{{"sentiment": "positive|negative|neutral", '
+                    f'"significance": "high|medium|low", '
+                    f'"context": "one sentence: what happened and why it matters for the stock price", '
+                    f'"alert_worthy": true|false, '
+                    f'"reason": "brief reason for alert_worthy decision"}}'
+                )
+            }]
+        )
+
+        text   = message.content[0].text.strip()
+        text   = text.replace("```json", "").replace("```", "").strip()
+        result = json.loads(text)
+
+        # Validate expected fields exist
+        if "sentiment" not in result or "alert_worthy" not in result:
+            return _keyword_sentiment(headline)
+
+        return result
+
+    except Exception as e:
+        print(f"  [claude] News analysis failed for {ticker}: {e}")
+        return _keyword_sentiment(headline)
+
+
+def _keyword_sentiment(headline: str) -> dict:
+    """Fallback keyword-based sentiment when Claude is unavailable."""
+    text = headline.lower()
+    pos  = sum(1 for w in [
+        "surge","soar","beat","win","launch","partner","contract",
+        "awarded","upgrade","record","buy","gains","jumps","rises",
+        "approval","milestone","expansion","agreement"
+    ] if w in text)
+    neg  = sum(1 for w in [
+        "fall","drop","miss","loss","warning","sell","downgrade",
+        "lawsuit","concern","bankruptcy","dilut","reverse split",
+        "investigation","fraud","debt","default","decline"
+    ] if w in text)
+    sentiment = "positive" if pos > neg else "negative" if neg > pos else "neutral"
+    return {
+        "sentiment":    sentiment,
+        "significance": "medium",
+        "context":      headline,
+        "alert_worthy": True,
+        "reason":       "keyword analysis fallback",
+    }
+
+
+def format_news_alert(ticker: str, headline: str, analysis: dict, price: float) -> str:
+    """Build a rich alert message using Claude's analysis."""
+    sentiment    = analysis.get("sentiment", "neutral")
+    significance = analysis.get("significance", "medium")
+    context      = analysis.get("context", headline)
+    reason       = analysis.get("reason", "")
+
+    emoji = "🟢" if sentiment == "positive" else "🔴" if sentiment == "negative" else "📰"
+    sig   = "🔥 HIGH SIGNIFICANCE" if significance == "high" else ""
+
+    return (
+        f"{emoji} {ticker} News Alert {sig}\n\n"
+        f"Headline: {headline[:150]}\n\n"
+        f"Analysis: {context}\n\n"
+        f"Sentiment: {sentiment.upper()} | Significance: {significance.upper()}\n"
+        f"Price: ${price:.4f} | Time: {datetime.now().strftime('%H:%M ET')}"
+    )
+
+
 # ─── Single ticker scan ───────────────────────────────────────────────────────
 
 def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
-    """Scan one ticker for price/volume alerts. Returns list of alerts fired."""
+    """
+    Scan one ticker for price, volume, and news alerts.
+    Returns list of alert messages fired this scan.
+    """
     fired = []
     try:
         quote = _fh_get("quote", {"symbol": ticker})
@@ -243,7 +343,7 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 )
                 state.mark_alerted(gap_key)
 
-        # ── News check (main scan — catches remaining stocks) ─────────────────
+        # ── News check (main scan) ────────────────────────────────────────────
         today     = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         news      = _fh_get("company-news", {"symbol": ticker, "from": yesterday, "to": today})
@@ -253,21 +353,43 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 pub_time = article.get("datetime", 0)
                 if not pub_time:
                     continue
-                pub_dt  = datetime.fromtimestamp(pub_time)
-                if pub_dt > cutoff:
-                    headline = article.get("headline", "")
-                    art_key  = f"{ticker}_news_{pub_time}"
-                    if headline and not state.already_alerted(art_key):
-                        text      = headline.lower()
-                        pos       = sum(1 for w in ["surge","soar","beat","win","launch","partner","contract","awarded","upgrade","record","buy"] if w in text)
-                        neg       = sum(1 for w in ["fall","drop","miss","loss","warning","sell","downgrade","lawsuit","concern","bankruptcy","dilut"] if w in text)
-                        sentiment = "positive" if pos > neg else "negative" if neg > pos else "neutral"
-                        alert_news(ticker, headline, sentiment, price)
+                pub_dt   = datetime.fromtimestamp(pub_time)
+                if pub_dt < cutoff:
+                    continue
+
+                headline = article.get("headline", "")
+                art_key  = f"{ticker}_news_{pub_time}"
+
+                if headline and not state.already_alerted(art_key):
+                    # Claude analysis
+                    analysis = analyze_news_with_claude(
+                        ticker, headline, article.get("summary", "")
+                    )
+
+                    # Skip if Claude says not alert worthy
+                    if not analysis.get("alert_worthy", True):
                         state.mark_alerted(art_key)
-                        msg = f"📰 {ticker} news: {headline[:60]}..."
-                        state.log_alert(msg)
-                        fired.append(msg)
-                        break
+                        print(f"  [claude] {ticker} news skipped — not alert worthy: {analysis.get('reason','')}")
+                        continue
+
+                    sentiment = analysis.get("sentiment", "neutral")
+                    msg_body  = format_news_alert(ticker, headline, analysis, price)
+
+                    # High significance = high priority alert
+                    priority = PRIORITY_HIGH if analysis.get("significance") == "high" else PRIORITY_NORMAL
+
+                    send_alert(
+                        title=f"{'🟢' if sentiment=='positive' else '🔴' if sentiment=='negative' else '📰'} {ticker} — News",
+                        message=msg_body,
+                        priority=priority,
+                        url=f"https://finance.yahoo.com/quote/{ticker}/news",
+                        url_title=f"{ticker} News",
+                    )
+                    state.mark_alerted(art_key)
+                    msg = f"📰 {ticker} news ({sentiment}): {headline[:50]}..."
+                    state.log_alert(msg)
+                    fired.append(msg)
+                    break
 
     except Exception:
         pass
@@ -323,13 +445,14 @@ def check_sec_filings(watchlist: List[str], state: ScannerState):
         print(f"  [scanner] SEC check failed: {e}")
 
 
-# ─── Fast News Monitor (top 10 stocks, 4x per minute) ────────────────────────
+# ─── Fast News Monitor — Top 10 stocks, 4x per minute ────────────────────────
 
 def run_news_monitor(watchlist: List[str], state: ScannerState):
     """
     Dedicated news monitor thread.
     Checks top 10 priority stocks every 15 seconds = 4 times per minute.
-    Runs alongside the main scanner loop.
+    Uses Claude to analyze each article for context, tone, and significance.
+    Runs alongside the main 60-second scanner loop.
     """
     def news_loop():
         while True:
@@ -338,7 +461,6 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
                     time.sleep(60)
                     continue
 
-                # Always use the first 10 stocks — these are highest activity
                 priority_stocks = watchlist[:10]
                 today     = datetime.now().strftime("%Y-%m-%d")
                 yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -364,24 +486,46 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
                                 continue
 
                             headline = article.get("headline", "")
-                            # Use fastnews key so it doesn't conflict with main scan
                             art_key  = f"{ticker}_fastnews_{pub_time}"
 
                             if headline and not state.already_alerted(art_key):
+                                # Claude analysis for accurate context and tone
+                                analysis = analyze_news_with_claude(
+                                    ticker, headline, article.get("summary", "")
+                                )
+
+                                # Skip if Claude says not worth alerting
+                                if not analysis.get("alert_worthy", True):
+                                    state.mark_alerted(art_key)
+                                    print(f"  [claude] {ticker} fast news skipped: {analysis.get('reason','')}")
+                                    continue
+
+                                sentiment    = analysis.get("sentiment", "neutral")
+                                significance = analysis.get("significance", "medium")
+
+                                # Get current price
                                 quote = _fh_get("quote", {"symbol": ticker})
                                 price = quote.get("c", 0) if quote else 0
 
-                                text = headline.lower()
-                                pos  = sum(1 for w in ["surge","soar","beat","win","launch","partner","contract","awarded","upgrade","record","buy"] if w in text)
-                                neg  = sum(1 for w in ["fall","drop","miss","loss","warning","sell","downgrade","lawsuit","concern","bankruptcy","dilut"] if w in text)
-                                sentiment = "positive" if pos > neg else "negative" if neg > pos else "neutral"
+                                msg_body = format_news_alert(ticker, headline, analysis, price)
 
-                                alert_news(ticker, headline, sentiment, price)
+                                # High significance gets high priority alert
+                                priority = PRIORITY_HIGH if significance == "high" else PRIORITY_NORMAL
+
+                                send_alert(
+                                    title=f"{'🟢' if sentiment=='positive' else '🔴' if sentiment=='negative' else '📰'} {ticker} — Fast News",
+                                    message=msg_body,
+                                    priority=priority,
+                                    url=f"https://finance.yahoo.com/quote/{ticker}/news",
+                                    url_title=f"{ticker} News",
+                                )
                                 state.mark_alerted(art_key)
-                                state.log_alert(f"📰 {ticker} fast news: {headline[:50]}...")
+                                state.log_alert(
+                                    f"📰 {ticker} fast news ({sentiment}/{significance}): {headline[:45]}..."
+                                )
                             break
 
-                        time.sleep(0.3)  # Small gap between tickers
+                        time.sleep(0.3)
 
                     except Exception:
                         continue
@@ -389,11 +533,11 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
             except Exception as e:
                 print(f"  [news_monitor] Error: {e}")
 
-            time.sleep(15)  # 15 seconds = 4 checks per minute
+            time.sleep(15)  # 15 seconds = 4 times per minute
 
     thread = threading.Thread(target=news_loop, daemon=True)
     thread.start()
-    print("  ✓ Fast news monitor started — top 10 stocks checked 4x per minute")
+    print("  ✓ Fast news monitor started — top 10 stocks checked 4x per minute with Claude analysis")
     return thread
 
 
@@ -423,7 +567,7 @@ def run_scanner():
                 watchlist          = build_todays_watchlist(max_stocks=50)
                 morning_brief_sent = False
                 eod_report_sent    = False
-                news_thread        = None  # Reset so it restarts with new watchlist
+                news_thread        = None
 
             # ── Load watchlist if empty ────────────────────────────────────────
             if not watchlist:
@@ -443,10 +587,9 @@ def run_scanner():
                 except Exception:
                     gap_ups   = []
                     n_filings = 0
-
                 alert_morning_brief(watchlist, n_filings, gap_ups)
                 morning_brief_sent = True
-                state.log_alert(f"☀️ Morning brief sent — {len(watchlist)} stocks on watchlist")
+                state.log_alert(f"☀️ Morning brief sent — {len(watchlist)} stocks")
 
             # ── Market hours scan ─────────────────────────────────────────────
             if is_market_hours():
@@ -459,13 +602,12 @@ def run_scanner():
 
                 all_alerts = []
 
-                # Check SEC filings every 5 minutes
+                # SEC filings every 5 minutes
                 if (now - state.last_sec_check).total_seconds() >= 300:
                     print("  Checking SEC EDGAR...")
                     check_sec_filings(watchlist, state)
 
-                # Scan ALL stocks simultaneously using thread pool
-                # 15 workers = 15 stocks at a time, cycles through all 50 in ~3-5 seconds
+                # Scan ALL stocks simultaneously
                 with ThreadPoolExecutor(max_workers=15) as executor:
                     futures = {
                         executor.submit(scan_one_ticker, ticker, state): ticker
@@ -495,7 +637,7 @@ def run_scanner():
                         from eod_report import run_eod_report
                         run_eod_report()
                         eod_report_sent = True
-                        state.log_alert("📊 End-of-day report generated and sent")
+                        state.log_alert("📊 EOD report generated and sent")
                     except Exception as e:
                         print(f"  [EOD] Failed: {e}")
 
@@ -507,7 +649,7 @@ def run_scanner():
 
             # ── Pre-market ────────────────────────────────────────────────────
             elif is_premarket():
-                print(f"  [PRE-MARKET] {now.strftime('%H:%M')} — checking SEC filings")
+                print(f"  [PRE-MARKET] {now.strftime('%H:%M')} — light scan")
                 if watchlist and (now - state.last_sec_check).total_seconds() >= 600:
                     check_sec_filings(watchlist, state)
                 time.sleep(AFTERHOURS_INTERVAL)
