@@ -268,6 +268,22 @@ def build_todays_watchlist(max_stocks: int = 50) -> List[str]:
             }
         }, f, indent=2)
 
+    # Also save to shared PostgreSQL database so dashboard can read it
+    try:
+        from db.database import save_watchlist
+        stats = {
+            "screened":    len(candidate_tickers),
+            "interesting": len(interesting),
+            "watchlist":   len(final_watchlist),
+            "gap_ups":     [s["ticker"] for s in interesting if s["change_pct"] > 3][:10],
+            "gap_downs":   [s["ticker"] for s in interesting if s["change_pct"] < -3][:10],
+            "new_filings": list(filing_counts.keys())[:10],
+        }
+        save_watchlist(final_watchlist, stats)
+        print("  ✓ Watchlist saved to shared database")
+    except Exception as e:
+        print(f"  [db] Watchlist DB save failed: {e}")
+
     return final_watchlist
 
 
