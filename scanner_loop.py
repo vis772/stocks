@@ -36,11 +36,15 @@ _stream: Optional["TiingoStream"] = None
 TIINGO_FRESH_MS = 5000   # treat ticks newer than this as live; else fall back to Finnhub
 
 # ─── Alert thresholds ─────────────────────────────────────────────────────────
-VOLUME_SPIKE_THRESHOLD = 2.5
-PRICE_MOVE_THRESHOLD   = 5.0
-PRICE_MOVE_10MIN       = 8.0
-GAP_UP_THRESHOLD       = 4.0
-VWAP_EXTENDED_PCT      = 5.0   # Alert when price is this % above VWAP
+VOLUME_SPIKE_THRESHOLD     = 2.5
+PRICE_MOVE_THRESHOLD       = 5.0
+PRICE_MOVE_10MIN           = 8.0
+GAP_UP_THRESHOLD           = 4.0
+VWAP_EXTENDED_PCT          = 5.0
+PREDICTION_SCAN_INTERVAL   = 1800   # seconds between full-score prediction scans
+PREDICTION_BUY_THRESHOLD   = 65     # score >= this → prediction_buy
+PREDICTION_SELL_THRESHOLD  = 30     # score <= this → prediction_sell
+PREDICTION_TOP_N           = 10     # how many momentum stocks to score each cycle
 
 # ─── Market hours in ET ───────────────────────────────────────────────────────
 # Railway runs UTC. We convert to ET for all time checks.
@@ -116,6 +120,7 @@ class ScannerState:
         self.premarket_high:    Dict[str, float] = {}
         self.premarket_low:     Dict[str, float] = {}
         self.level_session_date: str = ""
+        self.last_prediction_run: datetime = now_et() - timedelta(hours=2)
         self._load()
 
     def _load(self):
@@ -801,6 +806,66 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
     return thread
 
 
+# ─── Prediction scan ──────────────────────────────────────────────────────────
+
+def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
+    """
+    Run full scan_ticker() on the top-N momentum stocks every 30 minutes.
+    Logs prediction_buy (score >= PREDICTION_BUY_THRESHOLD) and
+    prediction_sell (score <= PREDICTION_SELL_THRESHOLD) as paper trades.
+    Uses ThreadPoolExecutor to avoid blocking the main loop.
+    """
+    from core.scanner import scan_ticker
+    from db.database import log_paper_trade
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    top_tickers = [r["ticker"] for r in state._momentum_ranking_cache[:PREDICTION_TOP_N]]
+    if not top_tickers:
+        top_tickers = watchlist[:PREDICTION_TOP_N]
+
+    print(f"  [prediction] Scoring: {', '.join(top_tickers)}")
+
+    def _score(ticker):
+        try:
+            return ticker, scan_ticker(ticker, save=False)
+        except Exception as e:
+            print(f"  [prediction] {ticker} error: {e}")
+            return ticker, None
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = {ex.submit(_score, t): t for t in top_tickers}
+        for fut in as_completed(futures, timeout=120):
+            try:
+                ticker, result = fut.result()
+            except Exception:
+                continue
+            if not result or result.get("error") or result.get("filtered_out"):
+                continue
+
+            score = result.get("final_score", 0)
+            price = result.get("price", 0)
+            if not price:
+                continue
+
+            if score >= PREDICTION_BUY_THRESHOLD:
+                stop_ = result.get("stop_loss")  or round(price * 0.93, 4)
+                t1    = result.get("target_1")   or round(price * 1.10, 4)
+                t2    = result.get("target_2")   or round(price * 1.20, 4)
+                log_paper_trade(ticker, "prediction_buy", price, stop_, t1, t2,
+                                source_type="prediction_buy", score_at_entry=round(score, 1))
+                state.log_alert(f"🤖 PRED BUY {ticker} ({score:.0f}pt)")
+                print(f"  [prediction] 📈 BUY {ticker} score={score:.0f}")
+
+            elif score <= PREDICTION_SELL_THRESHOLD:
+                s_stop = round(price * 1.07, 4)
+                s_t1   = round(price * 0.90, 4)
+                s_t2   = round(price * 0.80, 4)
+                log_paper_trade(ticker, "prediction_sell", price, s_stop, s_t1, s_t2,
+                                source_type="prediction_sell", score_at_entry=round(score, 1))
+                state.log_alert(f"🤖 PRED SELL {ticker} ({score:.0f}pt)")
+                print(f"  [prediction] 📉 SELL {ticker} score={score:.0f}")
+
+
 # ─── Main loop ────────────────────────────────────────────────────────────────
 
 def run_scanner():
@@ -888,6 +953,12 @@ def run_scanner():
                 top_movers = _build_momentum_ranking(watchlist, state)
                 if state.scan_count % 5 == 0:
                     state.save()
+
+                # Prediction scan every 30 minutes (runs full score on top-N stocks)
+                if (et - state.last_prediction_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
+                    print("\n[PREDICTION SCAN] Running 30-min full-score prediction scan...")
+                    run_prediction_scan(watchlist, state)
+                    state.last_prediction_run = et
 
                 # 30-min digest with top movers
                 if (et - last_digest_time).total_seconds() >= 1800 and state.alert_log:
