@@ -107,6 +107,9 @@ class ScannerState:
         self.above_vwap:        Dict[str, Optional[bool]] = {}
         self.vwap_values:       Dict[str, float] = {}
         self.vwap_session_date: str = ""
+        # Intraday metrics for momentum ranking
+        self.last_change_pct:   Dict[str, float] = {}
+        self.last_rvol:         Dict[str, float] = {}
         self._load()
 
     def _load(self):
@@ -123,15 +126,32 @@ class ScannerState:
     def save(self):
         try:
             from db.database import save_scanner_state
+            # Build VWAP snapshot from in-memory state
+            vwap_snap = {}
+            for ticker, vwap in self.vwap_values.items():
+                price    = self.last_prices.get(ticker, 0)
+                above    = self.above_vwap.get(ticker)
+                dist_pct = round((price - vwap) / vwap * 100, 2) if vwap > 0 and price > 0 else 0
+                vwap_snap[ticker] = {
+                    "vwap":     vwap,
+                    "price":    round(price, 4),
+                    "above":    above,
+                    "dist_pct": dist_pct,
+                }
             save_scanner_state({
-                "date":          now_et().strftime("%Y-%m-%d"),
-                "alerted_today": list(self.alerted_today),
-                "known_filings": list(self.known_filings),
-                "scan_count":    self.scan_count,
-                "last_updated":  now_et().isoformat(),
+                "date":             now_et().strftime("%Y-%m-%d"),
+                "alerted_today":    list(self.alerted_today),
+                "known_filings":    list(self.known_filings),
+                "scan_count":       self.scan_count,
+                "last_updated":     now_et().isoformat(),
+                "vwap_snapshot":    vwap_snap,
+                "momentum_ranking": self._momentum_ranking_cache,
             })
         except Exception as e:
             print(f"  [state] Save failed: {e}")
+
+    # Cached momentum ranking so save() can include it without recomputing
+    _momentum_ranking_cache: list = []
 
     def already_alerted(self, key: str) -> bool:
         return key in self.alerted_today
@@ -299,6 +319,45 @@ def _ensure_stream(watchlist: List[str]) -> None:
             print(f"  [tiingo] update_tickers failed: {e}")
 
 
+# ─── Momentum ranking ─────────────────────────────────────────────────────────
+
+def _build_momentum_ranking(watchlist: List[str], state: ScannerState) -> List[dict]:
+    """
+    Rank watchlist tickers by intraday momentum: RVOL + price change + VWAP position.
+    Returns list sorted best-first. Updates state._momentum_ranking_cache in place.
+    """
+    rows = []
+    for ticker in watchlist:
+        change = state.last_change_pct.get(ticker, 0)
+        rvol   = state.last_rvol.get(ticker, 1.0)
+        above  = state.above_vwap.get(ticker)
+        price  = state.last_prices.get(ticker, 0)
+        vwap   = state.vwap_values.get(ticker, 0)
+        dist   = round((price - vwap) / vwap * 100, 2) if vwap > 0 and price > 0 else 0
+
+        # RVOL: 35 pts max at 5× relative volume
+        rvol_pts   = min(max(rvol - 1.0, 0) / 4.0 * 35, 35)
+        # Price change: 40 pts for +10% day; penalise losers at half rate
+        change_pts = max(min(change / 10.0 * 40, 40), change / 10.0 * 20)
+        # VWAP: 25 pts for being above
+        vwap_pts   = 25 if above else 0
+
+        score = round(max(0, min(100, rvol_pts + change_pts + vwap_pts)), 1)
+        rows.append({
+            "ticker":     ticker,
+            "score":      score,
+            "change":     round(change, 2),
+            "rvol":       round(rvol, 2),
+            "above_vwap": above,
+            "dist_pct":   dist,
+            "price":      round(price, 4),
+        })
+
+    rows.sort(key=lambda x: x["score"], reverse=True)
+    state._momentum_ranking_cache = rows
+    return rows
+
+
 # ─── VWAP ─────────────────────────────────────────────────────────────────────
 
 def _update_vwap(
@@ -422,12 +481,16 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
             if vwap is not None:
                 fired.extend(_check_vwap_alerts(ticker, price, vwap, change_pct, state, et))
 
+        # Record per-ticker intraday metrics for momentum ranking
+        state.last_change_pct[ticker] = change_pct
+
         # ── Volume spike ──────────────────────────────────────────────────────
         if last_vol > 0 and volume > 0:
             minutes_into_day = max(1, (et.hour - 9) * 60 + et.minute - 30)
             expected_pct = min(minutes_into_day / 390, 1.0)
             if expected_pct > 0.05:
                 rvol = (volume / expected_pct) / max(last_vol / 0.5, 1)
+                state.last_rvol[ticker] = rvol      # keep for momentum ranking
                 if rvol > VOLUME_SPIKE_THRESHOLD:
                     # Key uses hour only — one alert per hour max
                     key = f"{ticker}_volume_{et.strftime('%Y-%m-%d-%H')}"
@@ -716,9 +779,14 @@ def run_scanner():
                 else:
                     print(f"  ✓ No alerts this scan")
 
-                # 30-min digest
+                # Build momentum ranking and flush to DB every 5 scans
+                top_movers = _build_momentum_ranking(watchlist, state)
+                if state.scan_count % 5 == 0:
+                    state.save()
+
+                # 30-min digest with top movers
                 if (et - last_digest_time).total_seconds() >= 1800 and state.alert_log:
-                    alert_digest(state.alert_log[-10:])
+                    alert_digest(state.alert_log[-10:], top_movers=top_movers[:5])
                     last_digest_time = et
 
                 # EOD report at exactly 4:00 PM ET

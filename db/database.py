@@ -115,6 +115,9 @@ def _init_postgres():
             last_updated    TEXT
         )
     """)
+    # Migration-safe: add new columns to existing deployments
+    cur.execute("ALTER TABLE scanner_state ADD COLUMN IF NOT EXISTS vwap_snapshot     TEXT DEFAULT '{}'")
+    cur.execute("ALTER TABLE scanner_state ADD COLUMN IF NOT EXISTS momentum_ranking  TEXT DEFAULT '[]'")
 
     conn.commit()
     cur.close()
@@ -191,6 +194,14 @@ def _init_sqlite():
             last_updated  TEXT
         )
     """)
+    for col_sql in [
+        "ALTER TABLE scanner_state ADD COLUMN vwap_snapshot    TEXT DEFAULT '{}'",
+        "ALTER TABLE scanner_state ADD COLUMN momentum_ranking TEXT DEFAULT '[]'",
+    ]:
+        try:
+            cur.execute(col_sql)
+        except Exception:
+            pass  # Column already exists
 
     conn.commit()
     conn.close()
@@ -491,20 +502,23 @@ def load_scanner_state() -> dict:
         try:
             conn = _get_pg_conn()
             cur  = conn.cursor()
-            cur.execute(
-                "SELECT alerted_today, known_filings, scan_count, last_updated FROM scanner_state WHERE date = %s",
-                (date_str,)
-            )
+            cur.execute("""
+                SELECT alerted_today, known_filings, scan_count, last_updated,
+                       vwap_snapshot, momentum_ranking
+                FROM scanner_state WHERE date = %s
+            """, (date_str,))
             row = cur.fetchone()
             cur.close()
             conn.close()
             if row:
                 return {
-                    "date":          date_str,
-                    "alerted_today": json.loads(row[0] or "[]"),
-                    "known_filings": json.loads(row[1] or "[]"),
-                    "scan_count":    row[2] or 0,
-                    "last_updated":  row[3] or "",
+                    "date":             date_str,
+                    "alerted_today":    json.loads(row[0] or "[]"),
+                    "known_filings":    json.loads(row[1] or "[]"),
+                    "scan_count":       row[2] or 0,
+                    "last_updated":     row[3] or "",
+                    "vwap_snapshot":    json.loads(row[4] or "{}"),
+                    "momentum_ranking": json.loads(row[5] or "[]"),
                 }
         except Exception as e:
             print(f"  [db] State load failed: {e}")
@@ -523,19 +537,25 @@ def save_scanner_state(state_dict: dict):
             conn = _get_pg_conn()
             cur  = conn.cursor()
             cur.execute("""
-                INSERT INTO scanner_state (date, alerted_today, known_filings, scan_count, last_updated)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO scanner_state
+                    (date, alerted_today, known_filings, scan_count, last_updated,
+                     vwap_snapshot, momentum_ranking)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (date) DO UPDATE SET
-                    alerted_today = EXCLUDED.alerted_today,
-                    known_filings = EXCLUDED.known_filings,
-                    scan_count    = EXCLUDED.scan_count,
-                    last_updated  = EXCLUDED.last_updated
+                    alerted_today    = EXCLUDED.alerted_today,
+                    known_filings    = EXCLUDED.known_filings,
+                    scan_count       = EXCLUDED.scan_count,
+                    last_updated     = EXCLUDED.last_updated,
+                    vwap_snapshot    = EXCLUDED.vwap_snapshot,
+                    momentum_ranking = EXCLUDED.momentum_ranking
             """, (
                 date_str,
                 json.dumps(list(state_dict.get("alerted_today", []))),
                 json.dumps(list(state_dict.get("known_filings", []))),
                 state_dict.get("scan_count", 0),
                 state_dict.get("last_updated", ""),
+                json.dumps(state_dict.get("vwap_snapshot", {})),
+                json.dumps(state_dict.get("momentum_ranking", [])),
             ))
             conn.commit()
             cur.close()

@@ -1105,6 +1105,82 @@ with tab4:
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
+    # ── Momentum Ranking ──────────────────────────────────────────────────────
+    momentum = scanner_state.get("momentum_ranking", [])
+    if momentum:
+        st.markdown('<div class="sh">Momentum Ranking</div>', unsafe_allow_html=True)
+        top = momentum[:15]
+        cols_per_row = 5
+        for row_start in range(0, len(top), cols_per_row):
+            chunk = top[row_start:row_start + cols_per_row]
+            mcols = st.columns(cols_per_row)
+            for mc, m in zip(mcols, chunk):
+                chg   = m.get("change", 0)
+                score = m.get("score", 0)
+                above = m.get("above_vwap")
+                rvol  = m.get("rvol", 1)
+                chg_c = "#00e87a" if chg >= 0 else "#ff2d55"
+                vwap_badge = '<span style="color:#00e87a;font-size:0.7em;">▲V</span>' if above else '<span style="color:#ff2d55;font-size:0.7em;">▼V</span>'
+                mc.markdown(f"""
+                <div style="background:var(--bgcard);border:1px solid var(--border);border-radius:6px;
+                            padding:8px 10px;text-align:center;transition:border-color 0.2s;"
+                     onmouseover="this.style.borderColor='var(--borderhi)'"
+                     onmouseout="this.style.borderColor='var(--border)'">
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:0.85em;color:#5ba3d9;
+                               font-weight:600;letter-spacing:0.05em;">{m['ticker']}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:0.8em;color:{chg_c};
+                               font-weight:600;margin:2px 0;">{chg:+.1f}%</div>
+                  <div style="display:flex;justify-content:center;gap:6px;margin-top:2px;">
+                    {vwap_badge}
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:0.65em;color:#2a4060;">{rvol:.1f}×</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:0.65em;color:#1e3a52;">{score:.0f}pt</span>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+    # ── Live VWAP Status ──────────────────────────────────────────────────────
+    vwap_snap = scanner_state.get("vwap_snapshot", {})
+    if vwap_snap:
+        st.markdown('<div class="sh" style="margin-top:14px;">Live VWAP Status</div>', unsafe_allow_html=True)
+        above_list = sorted(
+            [(t, d) for t, d in vwap_snap.items() if d.get("above")],
+            key=lambda x: x[1]["dist_pct"], reverse=True
+        )
+        below_list = sorted(
+            [(t, d) for t, d in vwap_snap.items() if d.get("above") is False],
+            key=lambda x: x[1]["dist_pct"]
+        )
+        va, vb = st.columns(2)
+        with va:
+            st.markdown(
+                f'<div style="color:#00e87a;font-size:0.68em;font-family:\'JetBrains Mono\','
+                f'monospace;letter-spacing:0.1em;margin-bottom:5px;">▲ ABOVE VWAP ({len(above_list)})</div>',
+                unsafe_allow_html=True)
+            for ticker, d in above_list[:12]:
+                st.markdown(f"""
+                <div style="display:flex;justify-content:space-between;align-items:center;
+                            padding:3px 8px;border-left:2px solid rgba(0,232,122,0.25);
+                            background:rgba(0,232,122,0.02);border-radius:0 3px 3px 0;margin-bottom:2px;">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#5ba3d9;">{ticker}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.68em;color:#2a4060;">${d['price']:.3f}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#00e87a;font-weight:600;">+{d['dist_pct']:.1f}%</span>
+                </div>""", unsafe_allow_html=True)
+        with vb:
+            st.markdown(
+                f'<div style="color:#ff2d55;font-size:0.68em;font-family:\'JetBrains Mono\','
+                f'monospace;letter-spacing:0.1em;margin-bottom:5px;">▼ BELOW VWAP ({len(below_list)})</div>',
+                unsafe_allow_html=True)
+            for ticker, d in below_list[:12]:
+                st.markdown(f"""
+                <div style="display:flex;justify-content:space-between;align-items:center;
+                            padding:3px 8px;border-left:2px solid rgba(255,45,85,0.25);
+                            background:rgba(255,45,85,0.02);border-radius:0 3px 3px 0;margin-bottom:2px;">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#5ba3d9;">{ticker}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.68em;color:#2a4060;">${d['price']:.3f}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#ff2d55;font-weight:600;">{d['dist_pct']:.1f}%</span>
+                </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
     # Load today's watchlist from shared DB
     try:
         from db.database import load_watchlist

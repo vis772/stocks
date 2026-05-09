@@ -148,14 +148,22 @@ def alert_morning_brief(watchlist: list, new_filings: int, gap_ups: list):
     )
 
 
-def alert_digest(alerts_summary: list):
-    """Send a digest of recent alerts every 30 minutes."""
-    if not alerts_summary:
+def alert_digest(alerts_summary: list, top_movers: list = None):
+    """Send a 30-minute digest with recent alerts and top momentum movers."""
+    if not alerts_summary and not top_movers:
         return
-    lines = "\n".join(alerts_summary[:8])
+    parts = []
+    if top_movers:
+        mover_strs = [
+            f"{m['ticker']} {m['change']:+.1f}% rvol={m['rvol']:.1f}x {'▲' if m.get('above_vwap') else '▼'}VWAP"
+            for m in top_movers[:5]
+        ]
+        parts.append("Top movers: " + "  |  ".join(mover_strs))
+    if alerts_summary:
+        parts.extend(alerts_summary[-6:])
     send_alert(
         title=f"📊 APEX Digest — {datetime.now().strftime('%H:%M ET')}",
-        message=lines,
+        message="\n".join(parts),
         priority=PRIORITY_LOW,
     )
 
