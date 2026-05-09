@@ -16,6 +16,7 @@ from alerts import (
     alert_volume_spike, alert_price_move,
     alert_sec_filing, alert_news,
     alert_morning_brief, alert_digest,
+    alert_vwap_cross,
     PRIORITY_HIGH, PRIORITY_NORMAL,
     send_alert
 )
@@ -39,6 +40,7 @@ VOLUME_SPIKE_THRESHOLD = 2.5
 PRICE_MOVE_THRESHOLD   = 5.0
 PRICE_MOVE_10MIN       = 8.0
 GAP_UP_THRESHOLD       = 4.0
+VWAP_EXTENDED_PCT      = 5.0   # Alert when price is this % above VWAP
 
 # ─── Market hours in ET ───────────────────────────────────────────────────────
 # Railway runs UTC. We convert to ET for all time checks.
@@ -99,6 +101,12 @@ class ScannerState:
         self.scan_count:      int = 0
         self.last_sec_check:  datetime = now_et() - timedelta(hours=3)
         self.known_filings:   Set[str] = set()
+        # VWAP accumulators — reset each regular session (9:30 ET)
+        self.vwap_cum_tp_vol:   Dict[str, float] = {}
+        self.vwap_cum_vol:      Dict[str, float] = {}
+        self.above_vwap:        Dict[str, Optional[bool]] = {}
+        self.vwap_values:       Dict[str, float] = {}
+        self.vwap_session_date: str = ""
         self._load()
 
     def _load(self):
@@ -291,6 +299,89 @@ def _ensure_stream(watchlist: List[str]) -> None:
             print(f"  [tiingo] update_tickers failed: {e}")
 
 
+# ─── VWAP ─────────────────────────────────────────────────────────────────────
+
+def _update_vwap(
+    ticker: str,
+    price: float,
+    volume: float,
+    high: float,
+    low: float,
+    last_vol: float,
+    state: ScannerState,
+) -> Optional[float]:
+    """
+    Accumulate intraday VWAP using Finnhub cumulative volume.
+
+    Typical price = (H + L + close) / 3.  Delta volume is the incremental
+    shares traded since the last scan.  Resets at the start of each regular
+    session (9:30 AM ET).  Returns the current VWAP or None when there is
+    insufficient data yet.
+    """
+    today = now_et().strftime("%Y-%m-%d")
+    if state.vwap_session_date != today:
+        state.vwap_cum_tp_vol   = {}
+        state.vwap_cum_vol      = {}
+        state.above_vwap        = {}
+        state.vwap_values       = {}
+        state.vwap_session_date = today
+
+    delta_vol = max(0.0, volume - last_vol)
+    if delta_vol > 0:
+        tp = (high + low + price) / 3.0
+        state.vwap_cum_tp_vol[ticker] = state.vwap_cum_tp_vol.get(ticker, 0.0) + tp * delta_vol
+        state.vwap_cum_vol[ticker]    = state.vwap_cum_vol.get(ticker, 0.0) + delta_vol
+
+    cum_vol = state.vwap_cum_vol.get(ticker, 0.0)
+    if cum_vol <= 0:
+        return None
+
+    vwap = state.vwap_cum_tp_vol[ticker] / cum_vol
+    state.vwap_values[ticker] = round(vwap, 4)
+    return vwap
+
+
+def _check_vwap_alerts(
+    ticker: str,
+    price: float,
+    vwap: float,
+    change_pct: float,
+    state: ScannerState,
+    et,
+) -> List[str]:
+    """Fire alerts for VWAP crosses and overextended moves. Returns fired msgs."""
+    fired     = []
+    was_above = state.above_vwap.get(ticker)   # None on first observation
+    is_above  = price >= vwap
+    state.above_vwap[ticker] = is_above
+
+    # Cross events — requires a prior observation to avoid spurious first-tick alert
+    if was_above is not None and was_above != is_above:
+        key = f"{ticker}_vwap_cross_{et.strftime('%Y-%m-%d-%H')}_{et.minute // 5}"
+        if not state.already_alerted(key):
+            direction = "above" if is_above else "below"
+            alert_vwap_cross(ticker, price, vwap, direction, change_pct)
+            state.mark_alerted(key)
+            emoji = "🟢" if is_above else "🔴"
+            msg   = f"{emoji} {ticker} crossed {direction} VWAP ${vwap:.4f}"
+            state.log_alert(msg)
+            fired.append(msg)
+
+    # Extended above VWAP — once per hour
+    if is_above and vwap > 0:
+        ext_pct = (price - vwap) / vwap * 100
+        if ext_pct >= VWAP_EXTENDED_PCT:
+            key = f"{ticker}_vwap_ext_{et.strftime('%Y-%m-%d-%H')}"
+            if not state.already_alerted(key):
+                alert_vwap_cross(ticker, price, vwap, "extended", change_pct)
+                state.mark_alerted(key)
+                msg = f"⚡ {ticker} extended {ext_pct:.1f}% above VWAP"
+                state.log_alert(msg)
+                fired.append(msg)
+
+    return fired
+
+
 # ─── Single ticker scan ───────────────────────────────────────────────────────
 
 def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
@@ -304,6 +395,8 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
 
         prev_close = quote["pc"]
         volume     = quote.get("v", 0)
+        high       = quote.get("h") or quote["c"]
+        low        = quote.get("l") or quote["c"]
 
         # Prefer the Tiingo last-tick if it's fresh; else fall back to Finnhub.
         price = quote["c"]
@@ -321,9 +414,15 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
 
         change_pct = (price - prev_close) / prev_close * 100
         et         = now_et()
+        last_vol   = state.last_volumes.get(ticker, 0)
+
+        # ── VWAP (regular session only) ───────────────────────────────────────
+        if is_market_hours():
+            vwap = _update_vwap(ticker, price, volume, high, low, last_vol, state)
+            if vwap is not None:
+                fired.extend(_check_vwap_alerts(ticker, price, vwap, change_pct, state, et))
 
         # ── Volume spike ──────────────────────────────────────────────────────
-        last_vol = state.last_volumes.get(ticker, 0)
         if last_vol > 0 and volume > 0:
             minutes_into_day = max(1, (et.hour - 9) * 60 + et.minute - 30)
             expected_pct = min(minutes_into_day / 390, 1.0)

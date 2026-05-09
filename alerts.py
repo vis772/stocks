@@ -158,3 +158,42 @@ def alert_digest(alerts_summary: list):
         message=lines,
         priority=PRIORITY_LOW,
     )
+
+
+def alert_vwap_cross(ticker: str, price: float, vwap: float, direction: str, change_pct: float):
+    """Alert for VWAP cross or extended move above VWAP."""
+    if direction == "above":
+        title    = f"🟢 {ticker} — Reclaimed VWAP"
+        body     = (
+            f"Price: ${price:.4f}  VWAP: ${vwap:.4f}\n"
+            f"Day chg: {change_pct:+.1f}%\n"
+            f"Bullish: price crossed back above VWAP\n"
+            f"Time: {datetime.now().strftime('%H:%M ET')}"
+        )
+        priority = PRIORITY_HIGH
+    elif direction == "below":
+        title    = f"🔴 {ticker} — Lost VWAP"
+        body     = (
+            f"Price: ${price:.4f}  VWAP: ${vwap:.4f}\n"
+            f"Day chg: {change_pct:+.1f}%\n"
+            f"Bearish: price dropped below VWAP\n"
+            f"Time: {datetime.now().strftime('%H:%M ET')}"
+        )
+        priority = PRIORITY_HIGH
+    else:  # extended
+        ext_pct = (price - vwap) / vwap * 100 if vwap > 0 else 0
+        title    = f"⚡ {ticker} — Extended {ext_pct:.1f}% above VWAP"
+        body     = (
+            f"Price: ${price:.4f}  VWAP: ${vwap:.4f}\n"
+            f"Extension: +{ext_pct:.1f}% above VWAP\n"
+            f"Day chg: {change_pct:+.1f}%  Overextended — watch for pullback\n"
+            f"Time: {datetime.now().strftime('%H:%M ET')}"
+        )
+        priority = PRIORITY_NORMAL
+    send_alert(
+        title=title,
+        message=body,
+        priority=priority,
+        url=f"https://finance.yahoo.com/quote/{ticker}",
+        url_title=f"View {ticker}",
+    )
