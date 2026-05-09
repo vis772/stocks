@@ -12,7 +12,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import DEFAULT_UNIVERSE, SCORING_WEIGHTS, RISK_FLAGS
-from db.database import initialize_db, upsert_holding, get_portfolio, get_connection
+from db.database import initialize_db, upsert_holding, delete_holding, get_portfolio, get_connection
 from core.scanner import scan_ticker, scan_universe
 from analysis.portfolio import analyze_holding, compute_portfolio_summary
 from data.market_data import fetch_ticker_snapshot, get_price_history
@@ -23,6 +23,16 @@ st.set_page_config(page_title="APEX Scanner", page_icon="⚡", layout="wide", in
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Bebas+Neue&family=JetBrains+Mono:wght@300;400;500;600&display=swap');
+/* Pulse animation for open trades */
+@keyframes pulse-amber {
+    0%,100% { box-shadow: 0 0 4px rgba(255,183,0,0.25); }
+    50%      { box-shadow: 0 0 14px rgba(255,183,0,0.6); }
+}
+@keyframes tab-glow {
+    0%,100% { text-shadow: 0 0 10px rgba(0,150,255,0.3); }
+    50%      { text-shadow: 0 0 28px rgba(0,150,255,0.75); }
+}
+@keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
 
 :root {
     --bg:       #04080f;
@@ -143,7 +153,7 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
 .stTabs [aria-selected="true"] {
     color: var(--blue2) !important;
     border-bottom-color: var(--blue) !important;
-    text-shadow: 0 0 20px rgba(0,150,255,0.5) !important;
+    animation: tab-glow 3s ease-in-out infinite !important;
 }
 
 /* ── Metrics ── */
@@ -283,6 +293,37 @@ h1,h2,h3 { color: var(--t1) !important; font-family: 'Bebas Neue', sans-serif !i
 
 /* Earnings warning */
 .earn-warn { background:rgba(155,89,255,0.08); border:1px solid rgba(155,89,255,0.3); border-radius:6px; padding:10px 14px; color:#b980ff; font-size:0.78em; font-family:'JetBrains Mono',monospace; margin-top:8px; line-height:1.6; }
+
+/* Holdings sidebar row */
+.holding-row { display:grid; grid-template-columns:58px 60px 65px; align-items:center; padding:5px 10px; border-bottom:1px solid rgba(255,255,255,0.03); font-family:'JetBrains Mono',monospace; font-size:0.72em; gap:4px; animation:fadeIn 0.2s ease; }
+.holding-row:hover { background:var(--bghover); }
+.holding-ticker { color:#5ba3d9; font-weight:600; }
+.holding-val { color:#3a5878; text-align:right; }
+
+/* Portfolio table row */
+.ptrow { display:grid; grid-template-columns:60px 70px 70px 80px 90px 80px 70px 50px; align-items:center; padding:6px 12px; border-bottom:1px solid rgba(255,255,255,0.03); font-family:'JetBrains Mono',monospace; font-size:0.72em; transition:background 0.15s; }
+.ptrow:hover { background:var(--bghover); }
+.pthdr { color:var(--t3); font-size:0.6em; letter-spacing:0.12em; text-transform:uppercase; }
+
+/* Trade blotter row */
+.trade-row { display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:4px; margin-bottom:3px; font-family:'JetBrains Mono',monospace; font-size:0.72em; transition:background 0.15s; flex-wrap:wrap; }
+.trade-row:hover { background:rgba(255,255,255,0.02); }
+.trade-open  { border-left:2px solid rgba(255,183,0,0.5);  background:rgba(255,183,0,0.04);  animation:pulse-amber 2.5s infinite; }
+.trade-win   { border-left:2px solid rgba(0,232,122,0.4);  background:rgba(0,232,122,0.03); }
+.trade-loss  { border-left:2px solid rgba(255,45,85,0.4);  background:rgba(255,45,85,0.03); }
+
+/* Scanner result column header */
+.result-hdr { display:grid; grid-template-columns:70px 140px 80px 65px 65px 1fr; padding:5px 18px; background:rgba(0,150,255,0.03); border-bottom:1px solid var(--border); font-family:'JetBrains Mono',monospace; font-size:0.58em; letter-spacing:0.12em; color:var(--t3); text-transform:uppercase; position:sticky; top:0; z-index:5; }
+
+/* Win-rate badge */
+.wr-badge { display:inline-flex; align-items:center; gap:5px; padding:4px 10px; border-radius:4px; font-family:'JetBrains Mono',monospace; font-size:0.78em; font-weight:600; }
+.wr-good  { background:rgba(0,232,122,0.08); border:1px solid rgba(0,232,122,0.2); color:#00e87a; }
+.wr-bad   { background:rgba(255,45,85,0.08);  border:1px solid rgba(255,45,85,0.2);  color:#ff2d55; }
+.wr-neu   { background:rgba(255,183,0,0.08);  border:1px solid rgba(255,183,0,0.2);  color:#ffb700; }
+
+/* Prediction direction chip */
+.dir-long  { background:rgba(0,232,122,0.06); border:1px solid rgba(0,232,122,0.2); color:#00c864; padding:1px 7px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; }
+.dir-short { background:rgba(255,45,85,0.06); border:1px solid rgba(255,45,85,0.2);  color:#ff4d6d; padding:1px 7px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -768,37 +809,49 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.markdown('<div class="disc">Research tool · Not financial advice</div>', unsafe_allow_html=True)
 
-    st.markdown('<div style="padding:0 4px;"><div class="sh" style="margin-top:14px;">💼 Portfolio</div></div>', unsafe_allow_html=True)
-    st.markdown('<div style="color:#112030;font-size:0.65em;font-family:\'JetBrains Mono\',monospace;margin-bottom:5px;padding:0 4px;">TICKER, SHARES, AVG_COST</div>', unsafe_allow_html=True)
+    # ── Live Holdings Manager ─────────────────────────────────────────────────
+    st.markdown('<div style="padding:0 4px;"><div class="sh" style="margin-top:14px;">💼 Holdings</div></div>', unsafe_allow_html=True)
 
-    portfolio_text = st.text_area("h", height=120,
-        placeholder="LAES, 100, 1.45\nWULF, 50, 4.20\nIREN, 25, 8.10",
-        label_visibility="collapsed")
+    _pf = get_portfolio()
+    if _pf.empty:
+        st.markdown('<div style="color:#1e3a52;font-size:0.68em;font-family:\'JetBrains Mono\',monospace;padding:4px 4px 8px;">No holdings saved yet.</div>', unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="display:grid;grid-template-columns:58px 60px 65px 28px;
+                    padding:3px 10px;gap:4px;font-family:'JetBrains Mono',monospace;
+                    font-size:0.58em;letter-spacing:0.1em;color:var(--t3);
+                    text-transform:uppercase;border-bottom:1px solid var(--border);">
+          <span>Ticker</span><span style="text-align:right">Shares</span>
+          <span style="text-align:right">Cost</span><span></span>
+        </div>""", unsafe_allow_html=True)
+        for _, row in _pf.iterrows():
+            hc1, hc2, hc3, hc4 = st.columns([2.2, 2, 2.2, 0.9])
+            hc1.markdown(f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.8em;color:#5ba3d9;font-weight:600;">{row["ticker"]}</span>', unsafe_allow_html=True)
+            hc2.markdown(f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.75em;color:#3a5878;">{row["shares"]:,.0f}</span>', unsafe_allow_html=True)
+            hc3.markdown(f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.75em;color:#2a4060;">${row["avg_cost"]:.2f}</span>', unsafe_allow_html=True)
+            if hc4.button("✕", key=f"del_{row['ticker']}", help=f"Remove {row['ticker']}"):
+                delete_holding(row["ticker"])
+                st.rerun()
 
-    col_save, col_clear = st.columns(2)
-    with col_save:
-        if st.button("SAVE", use_container_width=True):
-            lines = [l.strip() for l in portfolio_text.strip().split("\n") if l.strip()]
-            saved, errors = 0, []
-            for line in lines:
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 3:
-                    try:
-                        upsert_holding(parts[0].upper(), float(parts[1]), float(parts[2]))
-                        saved += 1
-                    except ValueError as e:
-                        errors.append(str(e))
+    # Add new holding form
+    st.markdown('<div style="margin-top:8px;padding:0 2px;"><div style="font-size:0.6em;color:var(--t3);font-family:\'JetBrains Mono\',monospace;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:4px;">Add Holding</div></div>', unsafe_allow_html=True)
+    with st.form("add_holding", clear_on_submit=True):
+        fa, fb, fc = st.columns([2, 1.8, 1.8])
+        new_tkr  = fa.text_input("Ticker", placeholder="SOUN",  label_visibility="collapsed")
+        new_sh   = fb.text_input("Shares", placeholder="100",   label_visibility="collapsed")
+        new_cost = fc.text_input("Cost",   placeholder="4.50",  label_visibility="collapsed")
+        fa.markdown('<div style="font-size:0.58em;color:var(--t3);font-family:\'JetBrains Mono\',monospace;">TICKER</div>', unsafe_allow_html=True)
+        fb.markdown('<div style="font-size:0.58em;color:var(--t3);font-family:\'JetBrains Mono\',monospace;">SHARES</div>', unsafe_allow_html=True)
+        fc.markdown('<div style="font-size:0.58em;color:var(--t3);font-family:\'JetBrains Mono\',monospace;">AVG COST</div>', unsafe_allow_html=True)
+        if st.form_submit_button("＋ Add Holding", use_container_width=True):
+            try:
+                if new_tkr and new_sh and new_cost:
+                    upsert_holding(new_tkr.strip().upper(), float(new_sh), float(new_cost))
+                    st.rerun()
                 else:
-                    errors.append(f"Bad format: {line}")
-            if saved: st.success(f"✓ {saved} saved")
-            for e in errors: st.error(e)
-    with col_clear:
-        if st.button("CLEAR", use_container_width=True):
-            conn = get_connection()
-            conn.execute("DELETE FROM portfolio")
-            conn.commit()
-            conn.close()
-            st.rerun()
+                    st.warning("Fill all three fields.")
+            except ValueError:
+                st.error("Shares and cost must be numbers.")
 
     st.markdown('<div style="padding:0 4px;"><div class="sh" style="margin-top:12px;">🔍 Scanner</div></div>', unsafe_allow_html=True)
     custom_tickers = st.text_input("t", placeholder="SOUN, BBAI, RGTI, IONQ",
@@ -867,7 +920,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["⚡  Scanner","💼  Portfolio","🔬  Deep Dive","🔔  Live Alerts","ℹ️  Info"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["⚡  Scanner","💼  Portfolio","🔬  Deep Dive","🤖  Predictions","🔔  Live Alerts","ℹ️  Info"])
 
 
 # ── TAB 1: SCANNER ────────────────────────────────────────────────────────────
@@ -921,7 +974,8 @@ with tab1:
             and (not sig_filter or r.get("signal") in sig_filter)
             and (not hide_crit or not has_crit(r.get("risk_flags",[])))]
 
-        st.markdown(f'<div style="color:#0e2040;font-size:0.68em;font-family:\'JetBrains Mono\',monospace;margin-bottom:10px;letter-spacing:0.08em;">SHOWING {len(filtered)} OF {len(valid)} · SORTED BY SCORE</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="color:#0e2040;font-size:0.68em;font-family:\'JetBrains Mono\',monospace;margin-bottom:6px;letter-spacing:0.08em;">SHOWING {len(filtered)} OF {len(valid)} · SORTED BY SCORE</div>', unsafe_allow_html=True)
+        st.markdown('<div class="result-hdr"><span>TICKER</span><span>COMPANY</span><span>SIGNAL</span><span>PRICE</span><span>1D</span><span>SCORE</span></div>', unsafe_allow_html=True)
 
         for r in filtered:
             render_result_card(r)
@@ -987,7 +1041,41 @@ with tab2:
 
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-        for h in sorted(holdings_analysis, key=lambda x: x["unrealized_pnl_pct"]):
+        # ── Summary table ─────────────────────────────────────────────────────
+        tbl_rows = []
+        for h in holdings_analysis:
+            tbl_rows.append({
+                "Ticker":   h["ticker"],
+                "Shares":   h["shares"],
+                "Avg Cost": h["avg_cost"],
+                "Price":    h["current_price"],
+                "P&L %":    round(h["unrealized_pnl_pct"], 2),
+                "P&L $":    round(h["unrealized_pnl"], 2),
+                "Value":    round(h["position_value"], 2),
+                "Score":    h.get("final_score", 50),
+                "Signal":   h.get("recommendation", "—"),
+            })
+        tbl_df = pd.DataFrame(tbl_rows).sort_values("P&L %", ascending=False)
+        st.dataframe(
+            tbl_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Ticker":   st.column_config.TextColumn("Ticker", width=70),
+                "Shares":   st.column_config.NumberColumn("Shares", format="%.0f", width=70),
+                "Avg Cost": st.column_config.NumberColumn("Avg Cost", format="$%.2f", width=85),
+                "Price":    st.column_config.NumberColumn("Price", format="$%.4f", width=85),
+                "P&L %":    st.column_config.NumberColumn("P&L %", format="%.2f%%", width=80),
+                "P&L $":    st.column_config.NumberColumn("P&L $", format="$%.2f", width=90),
+                "Value":    st.column_config.NumberColumn("Value", format="$%.2f", width=90),
+                "Score":    st.column_config.ProgressColumn("Score", min_value=0, max_value=100, width=90),
+                "Signal":   st.column_config.TextColumn("Signal", width=140),
+            },
+        )
+
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        with st.expander("📋 Holding Details", expanded=False):
+          for h in sorted(holdings_analysis, key=lambda x: x["unrealized_pnl_pct"]):
             render_holding_card(h)
 
         if len(holdings_analysis) > 1:
@@ -1039,8 +1127,170 @@ with tab3:
         </div>""", unsafe_allow_html=True)
 
 
-# ── TAB 4: LIVE ALERTS ────────────────────────────────────────────────────────
+# ── TAB 4: PREDICTIONS ───────────────────────────────────────────────────────
 with tab4:
+    st.markdown("## 🤖 Prediction Engine")
+    st.markdown('<p style="color:#2a4060;font-size:0.82em;font-family:\'JetBrains Mono\',monospace;">The scanner scores each watchlist stock every 30 min and auto-logs paper trades. Score ≥65 → LONG, Score ≤30 → SHORT. Track if the predictions are actually good.</p>', unsafe_allow_html=True)
+
+    try:
+        from db.database import get_paper_trades
+        pt_df = get_paper_trades(days=60)
+
+        if pt_df.empty:
+            st.markdown("""
+            <div class="empty">
+              <div class="ico">🤖</div>
+              <h3>NO PREDICTIONS YET</h3>
+              <p>The scanner auto-logs predictions every 30 minutes during market hours.<br>
+              Make sure the background scanner is running on Railway.</p>
+            </div>""", unsafe_allow_html=True)
+        else:
+            # Split prediction trades vs signal trades
+            pred_mask   = pt_df["source_type"].isin(["prediction_buy", "prediction_sell"])
+            pred_df     = pt_df[pred_mask].copy()
+            signal_df   = pt_df[~pred_mask].copy()
+
+            # ── Overall metrics ───────────────────────────────────────────────
+            closed_pred = pred_df[pred_df["outcome"] != "open"]
+            p_wins   = len(closed_pred[closed_pred["outcome"] == "win"])
+            p_losses = len(closed_pred[closed_pred["outcome"] == "loss"])
+            p_total  = p_wins + p_losses
+            p_wr     = p_wins / p_total * 100 if p_total > 0 else 0
+            p_avg    = closed_pred["pnl_pct"].mean() if not closed_pred.empty else 0
+
+            closed_sig = signal_df[signal_df["outcome"] != "open"]
+            s_wins   = len(closed_sig[closed_sig["outcome"] == "win"])
+            s_losses = len(closed_sig[closed_sig["outcome"] == "loss"])
+            s_total  = s_wins + s_losses
+            s_wr     = s_wins / s_total * 100 if s_total > 0 else 0
+            s_avg    = closed_sig["pnl_pct"].mean() if not closed_sig.empty else 0
+
+            pm1, pm2, pm3, pm4, pm5, pm6 = st.columns(6)
+            pm1.metric("Open Predictions", len(pred_df[pred_df["outcome"] == "open"]))
+            pm2.metric("Prediction WR",    f"{p_wr:.0f}%" if p_total > 0 else "—",
+                       delta=f"{p_wins}W {p_losses}L")
+            pm3.metric("Pred Avg P&L",     f"{p_avg:+.1f}%" if p_total > 0 else "—")
+            pm4.metric("Open Signals",     len(signal_df[signal_df["outcome"] == "open"]))
+            pm5.metric("Signal WR",        f"{s_wr:.0f}%" if s_total > 0 else "—",
+                       delta=f"{s_wins}W {s_losses}L")
+            pm6.metric("Signal Avg P&L",   f"{s_avg:+.1f}%" if s_total > 0 else "—")
+
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+            # ── Win-rate by score band chart ──────────────────────────────────
+            if not closed_pred.empty and "score_at_entry" in closed_pred.columns:
+                scored = closed_pred.dropna(subset=["score_at_entry"])
+                if not scored.empty:
+                    scored = scored.copy()
+                    scored["band"] = pd.cut(
+                        scored["score_at_entry"],
+                        bins=[0, 30, 45, 55, 65, 80, 100],
+                        labels=["0-30\n(Short)", "30-45", "45-55", "55-65", "65-80\n(Long)", "80-100\n(Strong)"]
+                    )
+                    band_stats = scored.groupby("band", observed=True).apply(
+                        lambda g: pd.Series({
+                            "wr": (g["outcome"] == "win").mean() * 100,
+                            "n":  len(g),
+                            "avg_pnl": g["pnl_pct"].mean()
+                        })
+                    ).reset_index()
+
+                    bar_colors = [
+                        "#00e87a" if wr >= 60 else "#ffb700" if wr >= 45 else "#ff2d55"
+                        for wr in band_stats["wr"]
+                    ]
+
+                    fig_wr = go.Figure()
+                    fig_wr.add_trace(go.Bar(
+                        x=band_stats["band"].astype(str),
+                        y=band_stats["wr"],
+                        marker_color=bar_colors,
+                        text=[f"{wr:.0f}%<br><span style='font-size:10px'>n={n}</span>"
+                              for wr, n in zip(band_stats["wr"], band_stats["n"])],
+                        textposition="inside",
+                        textfont=dict(family="JetBrains Mono", size=11, color="#e8f4ff"),
+                        name="Win Rate",
+                    ))
+                    fig_wr.add_hline(y=50, line_color="rgba(255,183,0,0.3)", line_dash="dot",
+                                     annotation_text="50% breakeven",
+                                     annotation_font_color="#ffb700", annotation_font_size=9)
+                    fig_wr.update_layout(
+                        title=dict(text="Prediction Win Rate by Score Band",
+                                   font=dict(family="Bebas Neue", size=16, color="#6b8caa"),
+                                   x=0),
+                        height=240,
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(8,15,26,0.8)",
+                        font=dict(family="JetBrains Mono", color="#2a4060"),
+                        xaxis=dict(gridcolor="rgba(255,255,255,0.02)", tickfont=dict(size=9)),
+                        yaxis=dict(gridcolor="rgba(255,255,255,0.03)", range=[0, 105],
+                                   ticksuffix="%", tickfont=dict(size=9)),
+                        margin=dict(l=0, r=0, t=40, b=0),
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig_wr, use_container_width=True)
+
+            # ── Trade blotters ────────────────────────────────────────────────
+            col_p, col_s = st.columns([3, 2])
+
+            def _trade_row_html(tr):
+                outcome   = tr["outcome"]
+                o_color   = {"win": "#00e87a", "loss": "#ff2d55", "open": "#ffb700"}.get(outcome, "#3a5878")
+                o_emoji   = {"win": "✅", "loss": "❌", "open": "⏳"}.get(outcome, "—")
+                src       = tr.get("source_type", "signal")
+                is_short  = src == "prediction_sell"
+                dir_chip  = '<span class="dir-short">SHORT</span>' if is_short else '<span class="dir-long">LONG</span>'
+                sig_map   = {"gap_up": "GAP UP", "vwap_reclaim": "VWAP RECLAIM",
+                             "prediction_buy": "PRED BUY", "prediction_sell": "PRED SELL"}
+                sig_label = sig_map.get(src, src.upper().replace("_", " "))
+                score_str = f'{tr["score_at_entry"]:.0f}pt' if pd.notna(tr.get("score_at_entry")) else ""
+                pnl_str   = f"{tr['pnl_pct']:+.1f}%" if pd.notna(tr.get("pnl_pct")) else "open"
+                exit_str  = f"→ ${tr['exit_price']:.4f}" if pd.notna(tr.get("exit_price")) else "→ open"
+                oc_class  = {"win": "trade-win", "loss": "trade-loss", "open": "trade-open"}.get(outcome, "")
+                return f"""
+                <div class="trade-row {oc_class}">
+                  <span style="color:#5ba3d9;font-weight:600;min-width:48px;font-size:0.78em;">{tr['ticker']}</span>
+                  {dir_chip}
+                  <span style="color:#2a4060;background:rgba(255,255,255,0.03);padding:1px 6px;border-radius:3px;font-size:0.65em;">{sig_label}</span>
+                  {f'<span style="color:#3a5878;font-size:0.65em;">{score_str}</span>' if score_str else ''}
+                  <span style="color:#2a4060;font-size:0.68em;">${tr['entry_price']:.4f} {exit_str}</span>
+                  <span style="color:{o_color};font-weight:600;margin-left:auto;font-size:0.75em;">{o_emoji} {pnl_str}</span>
+                  <span style="color:#0e2040;font-size:0.6em;">{tr['trade_date']}</span>
+                </div>"""
+
+            with col_p:
+                st.markdown('<div class="sh">🤖 Prediction Trades</div>', unsafe_allow_html=True)
+                if pred_df.empty:
+                    st.markdown('<div style="color:#1e3a52;font-size:0.75em;font-family:\'JetBrains Mono\',monospace;padding:8px 0;">No prediction trades yet — the scanner logs these automatically every 30 min.</div>', unsafe_allow_html=True)
+                else:
+                    wr_class = "wr-good" if p_wr >= 55 else "wr-bad" if p_wr < 40 else "wr-neu"
+                    st.markdown(
+                        f'<span class="wr-badge {wr_class}">Win Rate {p_wr:.0f}% ({p_total} closed)</span>',
+                        unsafe_allow_html=True)
+                    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+                    for _, tr in pred_df.head(30).iterrows():
+                        st.markdown(_trade_row_html(tr), unsafe_allow_html=True)
+
+            with col_s:
+                st.markdown('<div class="sh">📶 Signal Trades (Gap-up / VWAP)</div>', unsafe_allow_html=True)
+                if signal_df.empty:
+                    st.markdown('<div style="color:#1e3a52;font-size:0.75em;font-family:\'JetBrains Mono\',monospace;padding:8px 0;">No signal trades yet.</div>', unsafe_allow_html=True)
+                else:
+                    wr_class = "wr-good" if s_wr >= 55 else "wr-bad" if s_wr < 40 else "wr-neu"
+                    st.markdown(
+                        f'<span class="wr-badge {wr_class}">Win Rate {s_wr:.0f}% ({s_total} closed)</span>',
+                        unsafe_allow_html=True)
+                    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+                    for _, tr in signal_df.head(20).iterrows():
+                        st.markdown(_trade_row_html(tr), unsafe_allow_html=True)
+
+    except Exception as e:
+        st.error(f"Could not load predictions: {e}")
+
+    st.markdown('<div class="disc" style="margin-top:20px;">⚠ PAPER TRADES ONLY · NOT REAL MONEY · PREDICTIONS ARE EXPERIMENTAL</div>', unsafe_allow_html=True)
+
+
+# ── TAB 5: LIVE ALERTS ────────────────────────────────────────────────────────
+with tab5:
     st.markdown("## 🔔 Live Alert Feed")
     st.markdown('<p style="color:#2a4060;font-size:0.82em;font-family:\'JetBrains Mono\',monospace;">Real-time alerts from the background scanner. Refreshes every 30 seconds.</p>', unsafe_allow_html=True)
 
@@ -1248,50 +1498,6 @@ with tab4:
                 <span style="color:{color};font-family:'JetBrains Mono',monospace;font-size:0.8em;">{alert}</span>
             </div>""", unsafe_allow_html=True)
 
-    # ── Paper Trades ──────────────────────────────────────────────────────────
-    st.markdown('<div class="sh" style="margin-top:16px;">📝 Paper Trades</div>', unsafe_allow_html=True)
-    try:
-        from db.database import get_paper_trades
-        pt_df = get_paper_trades(days=30)
-        if pt_df.empty:
-            st.markdown('<div style="color:#1e3a52;font-size:0.78em;font-family:\'JetBrains Mono\',monospace;padding:8px 0;">No paper trades logged yet — trades are logged automatically on gap-up and VWAP reclaim alerts.</div>', unsafe_allow_html=True)
-        else:
-            closed = pt_df[pt_df["outcome"] != "open"]
-            wins   = len(closed[closed["outcome"] == "win"])
-            losses = len(closed[closed["outcome"] == "loss"])
-            total  = wins + losses
-            wr     = wins / total * 100 if total > 0 else 0
-            avg_pnl = closed["pnl_pct"].mean() if not closed.empty else 0
-
-            pm1, pm2, pm3, pm4 = st.columns(4)
-            pm1.metric("Open Trades",  len(pt_df[pt_df["outcome"] == "open"]))
-            pm2.metric("Win Rate",     f"{wr:.0f}%"  if total > 0 else "—")
-            pm3.metric("Closed W/L",   f"{wins}W / {losses}L")
-            pm4.metric("Avg P&L",      f"{avg_pnl:+.1f}%" if total > 0 else "—")
-
-            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-            for _, tr in pt_df.head(20).iterrows():
-                outcome  = tr["outcome"]
-                o_color  = {"win": "#00e87a", "loss": "#ff2d55", "open": "#ffb700"}.get(outcome, "#3a5878")
-                o_emoji  = {"win": "✅", "loss": "❌", "open": "⏳"}.get(outcome, "—")
-                sig_map  = {"gap_up": "GAP UP", "vwap_reclaim": "VWAP RECLAIM"}
-                sig_label = sig_map.get(tr["signal_type"], tr["signal_type"].upper())
-                pnl_str  = f"{tr['pnl_pct']:+.1f}%" if pd.notna(tr.get("pnl_pct")) else "—"
-                exit_str = f"→ ${tr['exit_price']:.4f}" if pd.notna(tr.get("exit_price")) else ""
-                st.markdown(f"""
-                <div style="display:flex;align-items:center;gap:10px;padding:6px 10px;
-                            border-left:2px solid {o_color}40;background:{o_color}08;
-                            border-radius:0 5px 5px 0;margin-bottom:3px;flex-wrap:wrap;">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.75em;color:#5ba3d9;font-weight:600;min-width:50px;">{tr['ticker']}</span>
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.65em;color:#2a4060;background:rgba(255,255,255,0.04);padding:1px 6px;border-radius:3px;">{sig_label}</span>
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#3a5878;">${tr['entry_price']:.4f} {exit_str}</span>
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.65em;color:#1e3a52;">stop ${tr['stop_price']:.4f} · t1 ${tr['target1']:.4f}</span>
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:{o_color};font-weight:600;margin-left:auto;">{o_emoji} {pnl_str}</span>
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.62em;color:#0e2040;">{tr['trade_date']} {tr['entry_time']}</span>
-                </div>""", unsafe_allow_html=True)
-    except Exception as e:
-        st.markdown(f'<div style="color:#1e3a52;font-size:0.75em;font-family:\'JetBrains Mono\',monospace;">Paper trades unavailable: {e}</div>', unsafe_allow_html=True)
-
     # Setup instructions
     with st.expander("⚙️ Setup Instructions — How to activate real-time alerts"):
         st.markdown("""
@@ -1324,8 +1530,8 @@ with tab4:
         - ☀️ Morning brief at 9:25 AM with today's active watchlist
         """)
 
-# ── TAB 5: INFO ───────────────────────────────────────────────────────────────
-with tab5:
+# ── TAB 6: INFO ───────────────────────────────────────────────────────────────
+with tab6:
     st.markdown("""
 ## How APEX Scanner Works
 
