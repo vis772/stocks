@@ -172,8 +172,15 @@ class ScannerState:
         self.save()
 
     def log_alert(self, msg: str):
-        et = now_et()
-        full_msg = f"{et.strftime('%H:%M ET')} {msg}"
+        try:
+            from zoneinfo import ZoneInfo
+            cst = ZoneInfo("America/Chicago")
+        except ImportError:
+            import pytz
+            cst = pytz.timezone("America/Chicago")
+        from datetime import datetime as _dt
+        now_cst = _dt.now(cst)
+        full_msg = f"{now_cst.strftime('%H:%M CST')} {msg}"
         self.alert_log.append(full_msg)
         if len(self.alert_log) > 100:
             self.alert_log = self.alert_log[-100:]
@@ -375,7 +382,7 @@ def _check_level_breaks(
         if not state.already_alerted(key):
             alert_level_break(ticker, price, sess_high, "Session High", change_pct)
             state.mark_alerted(key)
-            msg = f"🚀 {ticker} new session high ${price:.4f}"
+            msg = f"{ticker} new session high ${price:.4f}"
             state.log_alert(msg)
             fired.append(msg)
 
@@ -385,7 +392,7 @@ def _check_level_breaks(
         if not state.already_alerted(key):
             alert_level_break(ticker, price, sess_low, "Session Low", change_pct)
             state.mark_alerted(key)
-            msg = f"🔻 {ticker} new session low ${price:.4f}"
+            msg = f"{ticker} new session low ${price:.4f}"
             state.log_alert(msg)
             fired.append(msg)
 
@@ -396,7 +403,7 @@ def _check_level_breaks(
         if not state.already_alerted(key):
             alert_level_break(ticker, price, pm_high, "Pre-Market High", change_pct)
             state.mark_alerted(key)
-            msg = f"🚀 {ticker} broke pre-market high ${pm_high:.4f}"
+            msg = f"{ticker} broke pre-market high ${pm_high:.4f}"
             state.log_alert(msg)
             fired.append(msg)
 
@@ -509,8 +516,7 @@ def _check_vwap_alerts(
             direction = "above" if is_above else "below"
             alert_vwap_cross(ticker, price, vwap, direction, change_pct)
             state.mark_alerted(key)
-            emoji = "🟢" if is_above else "🔴"
-            msg   = f"{emoji} {ticker} crossed {direction} VWAP ${vwap:.4f}"
+            msg   = f"{ticker} crossed {direction} VWAP ${vwap:.4f}"
             state.log_alert(msg)
             fired.append(msg)
             # Log paper trade on VWAP reclaim (bullish cross only)
@@ -532,7 +538,7 @@ def _check_vwap_alerts(
             if not state.already_alerted(key):
                 alert_vwap_cross(ticker, price, vwap, "extended", change_pct)
                 state.mark_alerted(key)
-                msg = f"⚡ {ticker} extended {ext_pct:.1f}% above VWAP"
+                msg = f"{ticker} extended {ext_pct:.1f}% above VWAP"
                 state.log_alert(msg)
                 fired.append(msg)
 
@@ -598,7 +604,7 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                     if not state.already_alerted(key):
                         alert_volume_spike(ticker, rvol, price, change_pct)
                         state.mark_alerted(key)
-                        msg = f"⚡ {ticker} volume spike {rvol:.1f}x"
+                        msg = f"{ticker} volume spike {rvol:.1f}x"
                         state.log_alert(msg)
                         fired.append(msg)
         state.last_volumes[ticker] = volume
@@ -613,7 +619,7 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 if not state.already_alerted(key):
                     alert_price_move(ticker, price, move_pct, "1min")
                     state.mark_alerted(key)
-                    msg = f"{'🟢' if move_pct > 0 else '🔴'} {ticker} {move_pct:+.1f}% in 1min"
+                    msg = f"{ticker} {move_pct:+.1f}% in 1min"
                     state.log_alert(msg)
                     fired.append(msg)
 
@@ -627,7 +633,7 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 if not state.already_alerted(key):
                     alert_price_move(ticker, price, move_10min, "10min")
                     state.mark_alerted(key)
-                    msg = f"{'🔥' if move_10min > 0 else '🔴'} {ticker} {move_10min:+.1f}% in 10min"
+                    msg = f"{ticker} {move_10min:+.1f}% in 10min"
                     state.log_alert(msg)
                     fired.append(msg)
 
@@ -646,8 +652,8 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                     url=f"https://finance.yahoo.com/quote/{ticker}",
                 )
                 state.mark_alerted(gap_key)
-                state.log_alert(f"🚀 {ticker} gap-up {change_pct:+.1f}%")
-                fired.append(f"🚀 {ticker} gap-up {change_pct:+.1f}%")
+                state.log_alert(f"{ticker} gap-up {change_pct:+.1f}%")
+                fired.append(f"{ticker} gap-up {change_pct:+.1f}%")
                 # Log paper trade: entry at current price, stop -7%, targets +10% / +20%
                 try:
                     from db.database import log_paper_trade
@@ -697,8 +703,8 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                         url_title=f"{ticker} News",
                     )
                     state.mark_alerted(art_key)
-                    state.log_alert(f"📰 {ticker} news ({sentiment}): {headline[:50]}...")
-                    fired.append(f"📰 {ticker} news ({sentiment})")
+                    state.log_alert(f"{ticker} news ({sentiment}): {headline[:50]}...")
+                    fired.append(f"{ticker} news ({sentiment})")
                     break
 
     except Exception:
@@ -735,7 +741,7 @@ def check_sec_filings(watchlist: List[str], state: ScannerState):
                                 break
                         alert_sec_filing(ticker, form_type, 0, link, f"New {form_type} for {ticker}. Review immediately.")
                         state.mark_alerted(filing_key)
-                        state.log_alert(f"📋 {ticker} new {form_type} filing")
+                        state.log_alert(f"{ticker} new {form_type} filing")
                     break
         state.last_sec_check = now_et()
     except Exception as e:
@@ -791,7 +797,7 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
                                     url_title=f"{ticker} News",
                                 )
                                 state.mark_alerted(art_key)
-                                state.log_alert(f"📰 {ticker} fast news ({sentiment}/{significance}): {headline[:45]}...")
+                                state.log_alert(f"{ticker} fast news ({sentiment}/{significance}): {headline[:45]}...")
                             break
                         time.sleep(0.3)
                     except Exception:
@@ -853,7 +859,7 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
                 t2    = result.get("target_2")   or round(price * 1.20, 4)
                 log_paper_trade(ticker, "prediction_buy", price, stop_, t1, t2,
                                 source_type="prediction_buy", score_at_entry=round(score, 1))
-                state.log_alert(f"🤖 PRED BUY {ticker} ({score:.0f}pt)")
+                state.log_alert(f"PRED BUY {ticker} ({score:.0f}pt)")
                 print(f"  [prediction] 📈 BUY {ticker} score={score:.0f}")
 
             elif score <= PREDICTION_SELL_THRESHOLD:
@@ -862,7 +868,7 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
                 s_t2   = round(price * 0.80, 4)
                 log_paper_trade(ticker, "prediction_sell", price, s_stop, s_t1, s_t2,
                                 source_type="prediction_sell", score_at_entry=round(score, 1))
-                state.log_alert(f"🤖 PRED SELL {ticker} ({score:.0f}pt)")
+                state.log_alert(f"PRED SELL {ticker} ({score:.0f}pt)")
                 print(f"  [prediction] 📉 SELL {ticker} score={score:.0f}")
 
 
@@ -870,7 +876,7 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
 
 def run_scanner():
     print("\n" + "="*60)
-    print("APEX Real-Time Scanner Starting...")
+    print("Axiom Terminal Scanner Starting...")
     print(f"Time: {now_et().strftime('%Y-%m-%d %H:%M:%S ET')}")
     print("="*60 + "\n")
 
@@ -886,6 +892,11 @@ def run_scanner():
         try:
             et         = now_et()
             today_str  = et.strftime("%Y-%m-%d")
+
+            # Skip everything on weekends — market closed
+            if et.weekday() >= 5:
+                time.sleep(300)  # sleep 5 min and check again
+                continue
 
             # ── Morning screen at 6 AM ET ─────────────────────────────────────
             # Runs once per day even if pre-market scanning has already seeded
@@ -920,7 +931,7 @@ def run_scanner():
                     n_filings = 0
                 alert_morning_brief(watchlist, n_filings, gap_ups)
                 morning_brief_sent = True
-                state.log_alert(f"☀️ Morning brief sent — {len(watchlist)} stocks")
+                state.log_alert(f"Morning brief sent — {len(watchlist)} stocks")
 
             # ── Market hours scan ─────────────────────────────────────────────
             if is_market_hours():
@@ -972,7 +983,7 @@ def run_scanner():
                         from eod_report import run_eod_report
                         run_eod_report()
                         eod_report_sent = True
-                        state.log_alert("📊 EOD report generated and sent")
+                        state.log_alert("EOD report generated and sent")
                     except Exception as e:
                         print(f"  [EOD] Failed: {e}")
                     # Close open paper trades using last known prices

@@ -8,6 +8,17 @@ import requests
 from datetime import datetime
 from typing import Optional
 
+try:
+    from zoneinfo import ZoneInfo
+    _CST = ZoneInfo("America/Chicago")
+except ImportError:
+    import pytz
+    _CST = pytz.timezone("America/Chicago")
+
+def _now_cst():
+    from datetime import timezone
+    return datetime.now(_CST)
+
 PUSHOVER_API = "https://api.pushover.net/1/messages.json"
 
 # Alert priority levels
@@ -74,7 +85,7 @@ def alert_volume_spike(ticker: str, rvol: float, price: float, change_pct: float
         message=(
             f"${price:.4f} {arrow}{abs(change_pct):.1f}%\n"
             f"Volume: {rvol:.1f}x 20-day average\n"
-            f"Time: {datetime.now().strftime('%H:%M:%S ET')}\n"
+            f"Time: {_now_cst().strftime('%H:%M:%S CST')}\n"
             f"Action: Check for catalyst — news or SEC filing"
         ),
         priority=PRIORITY_HIGH,
@@ -92,7 +103,7 @@ def alert_price_move(ticker: str, price: float, change_pct: float, timeframe: st
         message=(
             f"Price: ${price:.4f}\n"
             f"Move: {arrow}{abs(change_pct):.1f}% in last {timeframe}\n"
-            f"Time: {datetime.now().strftime('%H:%M:%S ET')}"
+            f"Time: {_now_cst().strftime('%H:%M:%S CST')}"
         ),
         priority=priority,
         url=f"https://finance.yahoo.com/quote/{ticker}",
@@ -107,7 +118,7 @@ def alert_sec_filing(ticker: str, form_type: str, days_ago: int, filing_url: str
         message=(
             f"Filed: {days_ago} minutes ago\n"
             f"{summary[:300] if summary else 'Review filing for details'}\n"
-            f"Time: {datetime.now().strftime('%H:%M:%S ET')}"
+            f"Time: {_now_cst().strftime('%H:%M:%S CST')}"
         ),
         priority=PRIORITY_HIGH,
         url=filing_url,
@@ -124,7 +135,7 @@ def alert_news(ticker: str, headline: str, sentiment: str, price: float):
             f"Price: ${price:.4f}\n"
             f"Headline: {headline[:200]}\n"
             f"Sentiment: {sentiment.upper()}\n"
-            f"Time: {datetime.now().strftime('%H:%M:%S ET')}"
+            f"Time: {_now_cst().strftime('%H:%M:%S CST')}"
         ),
         priority=PRIORITY_NORMAL,
         url=f"https://finance.yahoo.com/quote/{ticker}/news",
@@ -136,7 +147,7 @@ def alert_morning_brief(watchlist: list, new_filings: int, gap_ups: list):
     """Send the daily morning briefing."""
     gap_str = ", ".join(gap_ups[:5]) if gap_ups else "None"
     send_alert(
-        title=f"☀️ APEX Morning Brief — {datetime.now().strftime('%b %d')}",
+        title=f"Axiom Morning Brief — {_now_cst().strftime('%b %d')}",
         message=(
             f"Today's watchlist: {len(watchlist)} stocks\n"
             f"Top names: {', '.join(watchlist[:8])}\n"
@@ -162,7 +173,7 @@ def alert_digest(alerts_summary: list, top_movers: list = None):
     if alerts_summary:
         parts.extend(alerts_summary[-6:])
     send_alert(
-        title=f"📊 APEX Digest — {datetime.now().strftime('%H:%M ET')}",
+        title=f"Axiom Digest — {_now_cst().strftime('%H:%M CST')}",
         message="\n".join(parts),
         priority=PRIORITY_LOW,
     )
@@ -180,7 +191,7 @@ def alert_level_break(ticker: str, price: float, level: float, level_name: str, 
             f"Price: ${price:.4f}  Level: ${level:.4f}\n"
             f"{color_word}: break of {level_name}\n"
             f"Day chg: {change_pct:+.1f}%\n"
-            f"Time: {datetime.now().strftime('%H:%M ET')}"
+            f"Time: {_now_cst().strftime('%H:%M CST')}"
         ),
         priority=PRIORITY_HIGH,
         url=f"https://finance.yahoo.com/quote/{ticker}",
@@ -196,7 +207,7 @@ def alert_vwap_cross(ticker: str, price: float, vwap: float, direction: str, cha
             f"Price: ${price:.4f}  VWAP: ${vwap:.4f}\n"
             f"Day chg: {change_pct:+.1f}%\n"
             f"Bullish: price crossed back above VWAP\n"
-            f"Time: {datetime.now().strftime('%H:%M ET')}"
+            f"Time: {_now_cst().strftime('%H:%M CST')}"
         )
         priority = PRIORITY_HIGH
     elif direction == "below":
@@ -205,7 +216,7 @@ def alert_vwap_cross(ticker: str, price: float, vwap: float, direction: str, cha
             f"Price: ${price:.4f}  VWAP: ${vwap:.4f}\n"
             f"Day chg: {change_pct:+.1f}%\n"
             f"Bearish: price dropped below VWAP\n"
-            f"Time: {datetime.now().strftime('%H:%M ET')}"
+            f"Time: {_now_cst().strftime('%H:%M CST')}"
         )
         priority = PRIORITY_HIGH
     else:  # extended
@@ -215,7 +226,7 @@ def alert_vwap_cross(ticker: str, price: float, vwap: float, direction: str, cha
             f"Price: ${price:.4f}  VWAP: ${vwap:.4f}\n"
             f"Extension: +{ext_pct:.1f}% above VWAP\n"
             f"Day chg: {change_pct:+.1f}%  Overextended — watch for pullback\n"
-            f"Time: {datetime.now().strftime('%H:%M ET')}"
+            f"Time: {_now_cst().strftime('%H:%M CST')}"
         )
         priority = PRIORITY_NORMAL
     send_alert(
