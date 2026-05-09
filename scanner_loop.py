@@ -16,7 +16,7 @@ from alerts import (
     alert_volume_spike, alert_price_move,
     alert_sec_filing, alert_news,
     alert_morning_brief, alert_digest,
-    alert_vwap_cross,
+    alert_vwap_cross, alert_level_break,
     PRIORITY_HIGH, PRIORITY_NORMAL,
     send_alert
 )
@@ -110,6 +110,12 @@ class ScannerState:
         # Intraday metrics for momentum ranking
         self.last_change_pct:   Dict[str, float] = {}
         self.last_rvol:         Dict[str, float] = {}
+        # Intraday key levels — reset each session day
+        self.session_high:      Dict[str, float] = {}
+        self.session_low:       Dict[str, float] = {}
+        self.premarket_high:    Dict[str, float] = {}
+        self.premarket_low:     Dict[str, float] = {}
+        self.level_session_date: str = ""
         self._load()
 
     def _load(self):
@@ -319,6 +325,83 @@ def _ensure_stream(watchlist: List[str]) -> None:
             print(f"  [tiingo] update_tickers failed: {e}")
 
 
+# ─── Intraday levels ──────────────────────────────────────────────────────────
+
+def _check_level_breaks(
+    ticker: str,
+    price: float,
+    change_pct: float,
+    state: ScannerState,
+    et,
+) -> List[str]:
+    """
+    Track session high/low and pre-market high/low.
+    Alert once per hour when price breaks above session high or below session low.
+    Alert once per day when price breaks the pre-market high.
+    Returns list of fired alert messages.
+    """
+    fired = []
+    today = et.strftime("%Y-%m-%d")
+
+    # Reset level state on new session day
+    if state.level_session_date != today:
+        state.session_high      = {}
+        state.session_low       = {}
+        state.premarket_high    = {}
+        state.premarket_low     = {}
+        state.level_session_date = today
+
+    if is_premarket():
+        pm_high = state.premarket_high.get(ticker, 0.0)
+        pm_low  = state.premarket_low.get(ticker, float("inf"))
+        state.premarket_high[ticker] = max(pm_high, price)
+        state.premarket_low[ticker]  = min(pm_low, price)
+        return fired
+
+    if not is_market_hours():
+        return fired
+
+    sess_high = state.session_high.get(ticker, 0.0)
+    sess_low  = state.session_low.get(ticker, float("inf"))
+
+    # ── Break above session high ───────────────────────────────────────────────
+    if sess_high > 0 and price > sess_high:
+        key = f"{ticker}_sess_high_{et.strftime('%Y-%m-%d-%H')}"
+        if not state.already_alerted(key):
+            alert_level_break(ticker, price, sess_high, "Session High", change_pct)
+            state.mark_alerted(key)
+            msg = f"🚀 {ticker} new session high ${price:.4f}"
+            state.log_alert(msg)
+            fired.append(msg)
+
+    # ── Break below session low ────────────────────────────────────────────────
+    if sess_low < float("inf") and price < sess_low:
+        key = f"{ticker}_sess_low_{et.strftime('%Y-%m-%d-%H')}"
+        if not state.already_alerted(key):
+            alert_level_break(ticker, price, sess_low, "Session Low", change_pct)
+            state.mark_alerted(key)
+            msg = f"🔻 {ticker} new session low ${price:.4f}"
+            state.log_alert(msg)
+            fired.append(msg)
+
+    # ── Break above pre-market high (once per day) ────────────────────────────
+    pm_high = state.premarket_high.get(ticker, 0.0)
+    if pm_high > 0 and price > pm_high:
+        key = f"{ticker}_pm_high_{today}"
+        if not state.already_alerted(key):
+            alert_level_break(ticker, price, pm_high, "Pre-Market High", change_pct)
+            state.mark_alerted(key)
+            msg = f"🚀 {ticker} broke pre-market high ${pm_high:.4f}"
+            state.log_alert(msg)
+            fired.append(msg)
+
+    # Update levels after checks so comparisons above see the old extremes
+    state.session_high[ticker] = max(sess_high, price)
+    state.session_low[ticker]  = min(sess_low, price) if sess_low < float("inf") else price
+
+    return fired
+
+
 # ─── Momentum ranking ─────────────────────────────────────────────────────────
 
 def _build_momentum_ranking(watchlist: List[str], state: ScannerState) -> List[dict]:
@@ -480,6 +563,9 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
             vwap = _update_vwap(ticker, price, volume, high, low, last_vol, state)
             if vwap is not None:
                 fired.extend(_check_vwap_alerts(ticker, price, vwap, change_pct, state, et))
+
+        # ── Intraday key levels ───────────────────────────────────────────────
+        fired.extend(_check_level_breaks(ticker, price, change_pct, state, et))
 
         # Record per-ticker intraday metrics for momentum ranking
         state.last_change_pct[ticker] = change_pct

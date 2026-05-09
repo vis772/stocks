@@ -168,6 +168,26 @@ def alert_digest(alerts_summary: list, top_movers: list = None):
     )
 
 
+def alert_level_break(ticker: str, price: float, level: float, level_name: str, change_pct: float):
+    """Alert for break of a key intraday level (session high/low, pre-market high/low)."""
+    is_up = price >= level
+    emoji  = "🚀" if is_up else "🔻"
+    arrow  = "above" if is_up else "below"
+    color_word = "Bullish" if is_up else "Bearish"
+    send_alert(
+        title=f"{emoji} {ticker} — Broke {arrow} {level_name}",
+        message=(
+            f"Price: ${price:.4f}  Level: ${level:.4f}\n"
+            f"{color_word}: break of {level_name}\n"
+            f"Day chg: {change_pct:+.1f}%\n"
+            f"Time: {datetime.now().strftime('%H:%M ET')}"
+        ),
+        priority=PRIORITY_HIGH,
+        url=f"https://finance.yahoo.com/quote/{ticker}",
+        url_title=f"View {ticker}",
+    )
+
+
 def alert_vwap_cross(ticker: str, price: float, vwap: float, direction: str, change_pct: float):
     """Alert for VWAP cross or extended move above VWAP."""
     if direction == "above":
