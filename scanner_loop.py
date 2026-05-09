@@ -24,6 +24,16 @@ from morning_screen import build_todays_watchlist, load_todays_watchlist, WATCHL
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 STATE_FILE   = "scanner_state.json"
 
+# Tiingo IEX real-time stream — module-level singleton, lazily started by
+# _ensure_stream() once the watchlist is known. No-op when TIINGO_TOKEN unset.
+try:
+    from data.tiingo_stream import TiingoStream
+except Exception as _tiingo_import_err:
+    TiingoStream = None
+    print(f"  [tiingo] import failed: {_tiingo_import_err}")
+_stream: Optional["TiingoStream"] = None
+TIINGO_FRESH_MS = 5000   # treat ticks newer than this as live; else fall back to Finnhub
+
 # ─── Alert thresholds ─────────────────────────────────────────────────────────
 VOLUME_SPIKE_THRESHOLD = 2.5
 PRICE_MOVE_THRESHOLD   = 5.0
@@ -228,18 +238,74 @@ def format_news_alert(ticker: str, headline: str, analysis: dict, price: float) 
     )
 
 
+# ─── Tiingo stream lifecycle ──────────────────────────────────────────────────
+
+def _stream_subscription_set(watchlist: List[str]) -> List[str]:
+    """Compose the union of watchlist + DEFAULT_UNIVERSE + portfolio tickers."""
+    from config import DEFAULT_UNIVERSE
+    tickers = set(t.upper() for t in watchlist if t)
+    tickers.update(DEFAULT_UNIVERSE)
+    try:
+        from db.database import get_portfolio
+        pf = get_portfolio()
+        if not pf.empty:
+            tickers.update(t.upper() for t in pf["ticker"].tolist())
+    except Exception:
+        pass
+    return sorted(tickers)
+
+
+def _ensure_stream(watchlist: List[str]) -> None:
+    """Lazily start the Tiingo WebSocket (no-op if token missing or lib unavailable).
+
+    Called whenever the watchlist changes (morning rebuild, fallback load).
+    Diff-subscribes against current state, so it's safe to call repeatedly.
+    """
+    global _stream
+    if TiingoStream is None:
+        return
+    token = os.environ.get("TIINGO_TOKEN", "")
+    if not token:
+        return
+    tickers = _stream_subscription_set(watchlist)
+    if _stream is None:
+        try:
+            _stream = TiingoStream(token)
+            _stream.start(tickers)
+        except Exception as e:
+            print(f"  [tiingo] start failed: {e}")
+            _stream = None
+    else:
+        try:
+            _stream.update_tickers(tickers)
+        except Exception as e:
+            print(f"  [tiingo] update_tickers failed: {e}")
+
+
 # ─── Single ticker scan ───────────────────────────────────────────────────────
 
 def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
     fired = []
     try:
+        # Finnhub REST quote is still required for cumulative day volume (.v)
+        # and previous close (.pc) — Tiingo IEX doesn't ship those per tick.
         quote = _fh_get("quote", {"symbol": ticker})
         if not quote or not quote.get("c") or quote["c"] <= 0:
             return fired
 
-        price      = quote["c"]
         prev_close = quote["pc"]
         volume     = quote.get("v", 0)
+
+        # Prefer the Tiingo last-tick if it's fresh; else fall back to Finnhub.
+        price = quote["c"]
+        if _stream is not None:
+            try:
+                if _stream.get_age_ms(ticker) < TIINGO_FRESH_MS:
+                    fresh = _stream.get_last(ticker)
+                    if fresh and fresh.get("price"):
+                        price = fresh["price"]
+            except Exception:
+                pass
 
         if prev_close <= 0:
             return fired
@@ -485,6 +551,7 @@ def run_scanner():
                 morning_brief_sent = False
                 eod_report_sent    = False
                 news_thread        = None
+                _ensure_stream(watchlist)
 
             # ── Load watchlist if empty ────────────────────────────────────────
             if not watchlist:
@@ -493,6 +560,7 @@ def run_scanner():
                     from config import DEFAULT_UNIVERSE
                     watchlist = DEFAULT_UNIVERSE
                     print(f"  Using default universe: {len(watchlist)} stocks")
+                _ensure_stream(watchlist)
 
             # ── Morning brief at 8:30 AM ET (7:30 CST) ────────────────────────
             if et.hour == 8 and et.minute >= 30 and not morning_brief_sent and watchlist:
