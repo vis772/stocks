@@ -278,3 +278,51 @@ def get_price_history(ticker: str, days: int = 90) -> pd.DataFrame:
         return t.history(period=f"{days}d", auto_adjust=True)
     except Exception:
         return pd.DataFrame()
+
+
+def get_intraday_candles(ticker: str, resolution: str = "1") -> pd.DataFrame:
+    """Fetch today's intraday candles from Finnhub (4 AM ET → now)."""
+    try:
+        import pytz
+        key = _fh_key()
+        if not key:
+            return pd.DataFrame()
+        et     = pytz.timezone("America/New_York")
+        now_et = datetime.now(et)
+        from_et = now_et.replace(hour=4, minute=0, second=0, microsecond=0)
+        resp = requests.get(
+            f"{FINNHUB_BASE}/stock/candle",
+            params={"symbol": ticker.upper(), "resolution": resolution,
+                    "from": int(from_et.timestamp()), "to": int(now_et.timestamp()),
+                    "token": key},
+            timeout=12,
+        )
+        data = resp.json()
+        if data.get("s") != "ok" or not data.get("t"):
+            return pd.DataFrame()
+        df = pd.DataFrame({
+            "Open": data["o"], "High": data["h"],
+            "Low":  data["l"], "Close": data["c"], "Volume": data["v"],
+        }, index=pd.to_datetime(data["t"], unit="s", utc=True).tz_convert(et))
+        return df
+    except Exception as e:
+        print(f"  [finnhub] intraday candle failed: {e}")
+        return pd.DataFrame()
+
+
+def get_chart_data(ticker: str, timeframe: str) -> pd.DataFrame:
+    """Return OHLCV DataFrame for the requested timeframe."""
+    if timeframe == "1D":
+        return get_intraday_candles(ticker, resolution="1")
+    elif timeframe == "5D":
+        try:
+            df = yf.Ticker(ticker.upper()).history(period="5d", interval="15m", auto_adjust=True)
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+        return get_intraday_candles(ticker, resolution="15")
+    elif timeframe == "1M":
+        return get_price_history(ticker, 30)
+    else:
+        return get_price_history(ticker, 90)

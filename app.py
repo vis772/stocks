@@ -6,8 +6,9 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots
 from datetime import datetime
-import sys, os
+import sys, os, time as _time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -15,67 +16,50 @@ from config import DEFAULT_UNIVERSE, SCORING_WEIGHTS, RISK_FLAGS
 from db.database import initialize_db, upsert_holding, delete_holding, get_portfolio, get_connection
 from core.scanner import scan_ticker, scan_universe
 from analysis.portfolio import analyze_holding, compute_portfolio_summary
-from data.market_data import fetch_ticker_snapshot, get_price_history
+from data.market_data import fetch_ticker_snapshot, get_price_history, get_chart_data
 from analysis.technicals import compute_technicals
 
 st.set_page_config(page_title="APEX Scanner", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Bebas+Neue&family=JetBrains+Mono:wght@300;400;500;600&display=swap');
-/* Pulse animation for open trades */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap');
 @keyframes pulse-amber {
-    0%,100% { box-shadow: 0 0 4px rgba(255,183,0,0.25); }
-    50%      { box-shadow: 0 0 14px rgba(255,183,0,0.6); }
+    0%,100% { box-shadow: 0 0 0 1px rgba(212,120,58,0.2); }
+    50%      { box-shadow: 0 0 0 3px rgba(212,120,58,0.35); }
 }
-@keyframes tab-glow {
-    0%,100% { text-shadow: 0 0 10px rgba(0,150,255,0.3); }
-    50%      { text-shadow: 0 0 28px rgba(0,150,255,0.75); }
-}
-@keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+@keyframes fadeIn { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:none; } }
+@keyframes live-dot { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
 
 :root {
-    --bg:       #04080f;
-    --bg2:      #080f1a;
-    --bg3:      #0c1520;
-    --bgcard:   #0a1220;
-    --bghover:  #0f1c30;
-    --border:   #0e2040;
-    --borderhi: #1a3a6a;
-    --borderglow: #1e4d8c;
-    --green:    #00e87a;
-    --green2:   #00ff88;
-    --blue:     #0096ff;
-    --blue2:    #33b3ff;
-    --amber:    #ffb700;
-    --red:      #ff2d55;
-    --red2:     #ff4d6d;
-    --purple:   #9b59ff;
-    --t1:       #e8f4ff;
-    --t2:       #6b8caa;
-    --t3:       #2a4060;
-    --tdim:     #112030;
+    --bg:       #0e0e11;
+    --bg2:      #111115;
+    --bg3:      #16161b;
+    --bgcard:   #131318;
+    --bghover:  #1a1a22;
+    --border:   #1e1e28;
+    --borderhi: #2a2a3a;
+    --green:    #22c55e;
+    --green2:   #4ade80;
+    --blue:     #3b82f6;
+    --blue2:    #60a5fa;
+    --amber:    #d4783a;
+    --amber2:   #f59e0b;
+    --red:      #ef4444;
+    --red2:     #f87171;
+    --purple:   #a78bfa;
+    --t1:       #f0ede8;
+    --t2:       #8a8698;
+    --t3:       #3a3848;
+    --tdim:     #232130;
 }
 
 /* ── Base ── */
 .stApp { background: var(--bg) !important; }
 .stApp > header { background: transparent !important; }
 .main .block-container { padding: 0 1.5rem 2rem; max-width: 100%; }
-* { font-family: 'Space Grotesk', sans-serif; }
+* { font-family: 'Inter', system-ui, sans-serif; }
 #MainMenu, footer, .stDeployButton { visibility: hidden; }
-
-/* ── Animated grid background ── */
-.stApp::before {
-    content: '';
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background-image:
-        linear-gradient(rgba(0,150,255,0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,150,255,0.03) 1px, transparent 1px);
-    background-size: 40px 40px;
-    pointer-events: none;
-    z-index: 0;
-}
 
 /* ── Sidebar ── */
 section[data-testid="stSidebar"] {
@@ -96,38 +80,36 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
 }
 .stTextInput input:focus, .stTextArea textarea:focus {
     border-color: var(--blue) !important;
-    box-shadow: 0 0 0 2px rgba(0,150,255,0.1) !important;
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.12) !important;
 }
 
 /* ── Buttons ── */
 .stButton > button {
     background: var(--bg3) !important;
-    border: 1px solid var(--borderhi) !important;
+    border: 1px solid var(--border) !important;
     color: var(--t2) !important;
-    font-family: 'Space Grotesk', sans-serif !important;
-    font-weight: 600 !important;
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 500 !important;
     font-size: 0.78em !important;
-    letter-spacing: 0.12em !important;
-    border-radius: 4px !important;
-    text-transform: uppercase !important;
+    letter-spacing: 0.04em !important;
+    border-radius: 6px !important;
     transition: all 0.15s !important;
-    padding: 0.4rem 0.8rem !important;
+    padding: 0.4rem 1rem !important;
 }
 .stButton > button:hover {
-    border-color: var(--blue) !important;
-    color: var(--blue) !important;
-    background: rgba(0,150,255,0.06) !important;
-    box-shadow: 0 0 12px rgba(0,150,255,0.15) !important;
+    border-color: var(--borderhi) !important;
+    color: var(--t1) !important;
+    background: var(--bghover) !important;
 }
 .stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, rgba(0,100,200,0.4), rgba(0,150,255,0.2)) !important;
-    border-color: var(--blue) !important;
-    color: var(--blue2) !important;
-    box-shadow: 0 0 20px rgba(0,150,255,0.2) !important;
+    background: var(--amber) !important;
+    border-color: var(--amber) !important;
+    color: #fff !important;
+    font-weight: 600 !important;
 }
 .stButton > button[kind="primary"]:hover {
-    box-shadow: 0 0 30px rgba(0,150,255,0.35) !important;
-    color: #fff !important;
+    background: #e8904e !important;
+    border-color: #e8904e !important;
 }
 
 /* ── Tabs ── */
@@ -138,22 +120,21 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
     padding: 0 !important;
 }
 .stTabs [data-baseweb="tab"] {
-    font-family: 'Space Grotesk', sans-serif !important;
-    font-weight: 600 !important;
-    font-size: 0.72em !important;
-    letter-spacing: 0.15em !important;
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 500 !important;
+    font-size: 0.8em !important;
+    letter-spacing: 0.01em !important;
     color: var(--t3) !important;
-    text-transform: uppercase !important;
-    padding: 12px 20px !important;
+    padding: 11px 20px !important;
     border-bottom: 2px solid transparent !important;
     background: transparent !important;
-    transition: all 0.2s !important;
+    transition: color 0.15s !important;
 }
 .stTabs [data-baseweb="tab"]:hover { color: var(--t2) !important; }
 .stTabs [aria-selected="true"] {
-    color: var(--blue2) !important;
-    border-bottom-color: var(--blue) !important;
-    animation: tab-glow 3s ease-in-out infinite !important;
+    color: var(--amber) !important;
+    border-bottom-color: var(--amber) !important;
+    font-weight: 600 !important;
 }
 
 /* ── Metrics ── */
@@ -161,23 +142,22 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
     background: var(--bgcard) !important;
     border: 1px solid var(--border) !important;
     border-radius: 8px !important;
-    padding: 10px 14px !important;
-    position: relative !important;
-    overflow: hidden !important;
-    transition: border-color 0.2s !important;
+    padding: 12px 16px !important;
+    transition: border-color 0.15s !important;
 }
 [data-testid="metric-container"]:hover { border-color: var(--borderhi) !important; }
 [data-testid="metric-container"] label {
     color: var(--t3) !important;
-    font-size: 0.65em !important;
-    letter-spacing: 0.12em !important;
+    font-size: 0.66em !important;
+    letter-spacing: 0.06em !important;
     text-transform: uppercase !important;
-    font-family: 'JetBrains Mono', monospace !important;
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 500 !important;
 }
 [data-testid="metric-container"] [data-testid="metric-value"] {
     color: var(--t1) !important;
     font-family: 'JetBrains Mono', monospace !important;
-    font-size: 1.1em !important;
+    font-size: 1.15em !important;
     font-weight: 500 !important;
 }
 [data-testid="stMetricDelta"] { font-family: 'JetBrains Mono', monospace !important; font-size: 0.75em !important; }
@@ -186,104 +166,119 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
 [data-testid="stExpander"] {
     background: var(--bgcard) !important;
     border: 1px solid var(--border) !important;
-    border-radius: 10px !important;
+    border-radius: 8px !important;
     margin-bottom: 6px !important;
-    transition: all 0.2s !important;
+    transition: border-color 0.15s !important;
     overflow: hidden !important;
 }
 [data-testid="stExpander"]:hover { border-color: var(--borderhi) !important; }
 [data-testid="stExpander"] summary {
-    color: var(--t1) !important;
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.8em !important;
+    color: var(--t2) !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.82em !important;
+    font-weight: 500 !important;
     padding: 12px 16px !important;
 }
-[data-testid="stExpander"] summary:hover { background: var(--bghover) !important; }
+[data-testid="stExpander"] summary:hover { background: var(--bghover) !important; color: var(--t1) !important; }
 
 /* ── Misc ── */
 hr { border-color: var(--border) !important; margin: 10px 0 !important; }
 .stCheckbox label { color: var(--t2) !important; font-size: 0.82em !important; }
 .stSlider { padding: 0 !important; }
-p, li { color: var(--t2); }
-h1,h2,h3 { color: var(--t1) !important; font-family: 'Bebas Neue', sans-serif !important; letter-spacing: 0.08em !important; }
+p, li { color: var(--t2); line-height: 1.7; }
+h1,h2,h3 { color: var(--t1) !important; font-family: 'Inter', sans-serif !important; font-weight: 700 !important; letter-spacing: -0.02em !important; }
+
+/* ── Radio (used as toggle) ── */
+[data-testid="stRadio"] > div { gap: 4px !important; }
+[data-testid="stRadio"] label {
+    background: var(--bg3) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 5px !important;
+    padding: 4px 12px !important;
+    font-size: 0.75em !important;
+    font-weight: 500 !important;
+    color: var(--t2) !important;
+    cursor: pointer !important;
+    transition: all 0.15s !important;
+}
+[data-testid="stRadio"] label:hover { border-color: var(--borderhi) !important; color: var(--t1) !important; }
+[data-testid="stRadio"] label[data-checked="true"],
+[data-testid="stRadio"] label:has(input:checked) {
+    background: var(--bghover) !important;
+    border-color: var(--amber) !important;
+    color: var(--amber) !important;
+}
 
 /* ── Custom components ── */
 
 /* Score pill */
-.pill { display:inline-flex; align-items:center; padding:3px 10px; border-radius:20px; font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:0.68em; letter-spacing:0.1em; text-transform:uppercase; gap:4px; }
-.p-sb  { background:rgba(0,232,122,0.1); color:#00e87a; border:1px solid rgba(0,232,122,0.25); }
-.p-sp  { background:rgba(0,200,100,0.1); color:#00c864; border:1px solid rgba(0,200,100,0.25); }
-.p-wl  { background:rgba(255,183,0,0.1); color:#ffb700; border:1px solid rgba(255,183,0,0.25); }
-.p-ho  { background:rgba(255,160,0,0.08); color:#ffa000; border:1px solid rgba(255,160,0,0.2); }
-.p-tr  { background:rgba(255,100,0,0.08); color:#ff6400; border:1px solid rgba(255,100,0,0.2); }
-.p-se  { background:rgba(255,45,85,0.08); color:#ff2d55; border:1px solid rgba(255,45,85,0.2); }
-.p-av  { background:rgba(200,20,50,0.1); color:#c81432; border:1px solid rgba(200,20,50,0.3); }
+.pill { display:inline-flex; align-items:center; padding:2px 9px; border-radius:4px; font-family:'Inter',sans-serif; font-weight:600; font-size:0.68em; letter-spacing:0.03em; }
+.p-sb  { background:rgba(34,197,94,0.1);  color:#22c55e; border:1px solid rgba(34,197,94,0.25); }
+.p-sp  { background:rgba(74,222,128,0.1); color:#4ade80; border:1px solid rgba(74,222,128,0.25); }
+.p-wl  { background:rgba(245,158,11,0.1); color:#f59e0b; border:1px solid rgba(245,158,11,0.25); }
+.p-ho  { background:rgba(212,120,58,0.1); color:#d4783a; border:1px solid rgba(212,120,58,0.2); }
+.p-tr  { background:rgba(249,115,22,0.1); color:#f97316; border:1px solid rgba(249,115,22,0.2); }
+.p-se  { background:rgba(239,68,68,0.1);  color:#ef4444; border:1px solid rgba(239,68,68,0.2); }
+.p-av  { background:rgba(220,38,38,0.1);  color:#dc2626; border:1px solid rgba(220,38,38,0.3); }
 
 /* Risk flag chips */
-.flag { display:inline-flex; align-items:center; background:rgba(255,183,0,0.06); border:1px solid rgba(255,183,0,0.2); color:#ffb700; padding:2px 8px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; margin:2px 2px 2px 0; letter-spacing:0.05em; }
-.flag.crit { background:rgba(255,45,85,0.07); border-color:rgba(255,45,85,0.25); color:#ff2d55; }
-.flag.earn { background:rgba(155,89,255,0.07); border-color:rgba(155,89,255,0.25); color:#9b59ff; }
+.flag { display:inline-flex; align-items:center; background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.18); color:#d4783a; padding:1px 7px; border-radius:3px; font-size:0.64em; font-family:'JetBrains Mono',monospace; margin:2px 2px 2px 0; }
+.flag.crit { background:rgba(239,68,68,0.07); border-color:rgba(239,68,68,0.2); color:#ef4444; }
+.flag.earn { background:rgba(167,139,250,0.07); border-color:rgba(167,139,250,0.2); color:#a78bfa; }
 
 /* Score bar */
-.sbar-track { background:rgba(255,255,255,0.04); border-radius:3px; height:4px; width:100%; position:relative; overflow:hidden; }
-.sbar-fill { border-radius:3px; height:4px; position:relative; }
-.sbar-fill::after { content:''; position:absolute; top:0; right:0; width:4px; height:4px; border-radius:50%; background:inherit; box-shadow:0 0 6px currentColor; }
+.sbar-track { background:rgba(255,255,255,0.05); border-radius:2px; height:3px; width:100%; }
+.sbar-fill { border-radius:2px; height:3px; }
 
 /* Stat rows */
-.stat-row { display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.03); }
-.slbl { color:var(--t3); font-size:0.68em; letter-spacing:0.08em; text-transform:uppercase; font-family:'JetBrains Mono',monospace; }
+.stat-row { display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.04); }
+.slbl { color:var(--t3); font-size:0.68em; letter-spacing:0.04em; font-family:'Inter',sans-serif; font-weight:500; }
 .sval { color:var(--t1); font-size:0.8em; font-family:'JetBrains Mono',monospace; font-weight:500; }
 .sval.g { color:var(--green); } .sval.r { color:var(--red); } .sval.a { color:var(--amber); } .sval.b { color:var(--blue2); } .sval.p { color:var(--purple); }
 
 /* Section headers */
-.sh { font-family:'Space Grotesk',sans-serif; font-size:0.62em; font-weight:700; letter-spacing:0.2em; text-transform:uppercase; color:var(--t3); margin:14px 0 8px; padding-bottom:5px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px; }
+.sh { font-family:'Inter',sans-serif; font-size:0.68em; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; color:var(--t3); margin:16px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px; }
 
 /* Info boxes */
 .box { background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:8px; padding:12px 16px; color:var(--t2); font-size:0.85em; line-height:1.75; }
-.box-blue { border-color:rgba(0,150,255,0.3); background:rgba(0,150,255,0.04); }
-.box-green { border-color:rgba(0,232,122,0.3); background:rgba(0,232,122,0.03); }
-.box-red { border-color:rgba(255,45,85,0.3); background:rgba(255,45,85,0.04); }
-.box-amber { border-color:rgba(255,183,0,0.3); background:rgba(255,183,0,0.04); }
-.box-purple { border-color:rgba(155,89,255,0.3); background:rgba(155,89,255,0.04); }
+.box-blue   { border-color:rgba(59,130,246,0.25);  background:rgba(59,130,246,0.04); }
+.box-green  { border-color:rgba(34,197,94,0.25);   background:rgba(34,197,94,0.03); }
+.box-red    { border-color:rgba(239,68,68,0.25);   background:rgba(239,68,68,0.04); }
+.box-amber  { border-color:rgba(212,120,58,0.25);  background:rgba(212,120,58,0.04); }
+.box-purple { border-color:rgba(167,139,250,0.25); background:rgba(167,139,250,0.04); }
 
 /* Disclaimer */
-.disc { background:rgba(255,183,0,0.03); border:1px solid rgba(255,183,0,0.1); border-radius:4px; padding:6px 12px; color:rgba(255,183,0,0.4); font-size:0.62em; font-family:'JetBrains Mono',monospace; letter-spacing:0.06em; text-align:center; margin:8px 0; }
+.disc { background:transparent; border:1px solid rgba(212,120,58,0.12); border-radius:4px; padding:6px 12px; color:rgba(212,120,58,0.35); font-size:0.62em; font-family:'JetBrains Mono',monospace; letter-spacing:0.05em; text-align:center; margin:8px 0; }
 
 /* Empty states */
 .empty { text-align:center; padding:80px 20px; color:var(--t3); }
-.empty .ico { font-size:3em; margin-bottom:16px; opacity:0.5; }
-.empty h3 { font-family:'Bebas Neue',sans-serif; color:var(--t2) !important; letter-spacing:0.12em; font-size:1.6em; }
-.empty p { color:var(--t3); font-size:0.8em; font-family:'JetBrains Mono',monospace; }
-
-/* Glow number */
-.glow-green { color:var(--green2); text-shadow:0 0 20px rgba(0,255,136,0.4); }
-.glow-red   { color:var(--red2); text-shadow:0 0 20px rgba(255,77,109,0.4); }
-.glow-blue  { color:var(--blue2); text-shadow:0 0 20px rgba(51,179,255,0.4); }
-.glow-amber { color:var(--amber); text-shadow:0 0 20px rgba(255,183,0,0.4); }
+.empty .ico { font-size:2.5em; margin-bottom:16px; opacity:0.4; }
+.empty h3 { color:var(--t2) !important; letter-spacing:0.04em; font-size:1.3em; font-weight:600; }
+.empty p { color:var(--t3); font-size:0.82em; line-height:1.7; }
 
 /* Ticker header */
-.ticker-hero { padding:20px 0 16px; border-bottom:1px solid var(--border); margin-bottom:20px; }
+.ticker-hero { padding:16px 0 14px; border-bottom:1px solid var(--border); margin-bottom:20px; }
 
 /* News item */
 .news-item { display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.03); }
-.news-dot { width:6px; height:6px; border-radius:50%; margin-top:6px; flex-shrink:0; }
+.news-dot { width:5px; height:5px; border-radius:50%; margin-top:7px; flex-shrink:0; }
 
 /* Summary text */
-.summary-block { background:rgba(255,255,255,0.02); border-left:2px solid var(--borderhi); border-radius:0 8px 8px 0; padding:14px 16px; color:var(--t2); font-size:0.83em; line-height:1.8; white-space:pre-line; }
+.summary-block { background:rgba(255,255,255,0.02); border-left:2px solid var(--borderhi); border-radius:0 8px 8px 0; padding:14px 16px; color:var(--t2); font-size:0.83em; line-height:1.85; white-space:pre-line; }
 
 /* Score ring */
 .score-ring-wrap { position:relative; display:inline-flex; align-items:center; justify-content:center; }
 
 /* Sidebar logo */
 .apex-logo { padding:20px 16px 12px; border-bottom:1px solid var(--border); margin-bottom:4px; }
-.apex-logo .name { font-family:'Bebas Neue',sans-serif; font-size:2em; color:var(--t1); letter-spacing:0.15em; line-height:1; }
-.apex-logo .sub { font-family:'JetBrains Mono',monospace; font-size:0.58em; color:var(--t3); letter-spacing:0.25em; margin-top:2px; }
+.apex-logo .name { font-family:'Inter',sans-serif; font-size:1.4em; font-weight:700; color:var(--t1); letter-spacing:-0.02em; line-height:1; }
+.apex-logo .sub { font-family:'JetBrains Mono',monospace; font-size:0.58em; color:var(--t3); letter-spacing:0.2em; margin-top:4px; }
 
 /* Signal count card */
-.sig-count { text-align:center; padding:10px 6px; background:var(--bgcard); border:1px solid var(--border); border-radius:8px; transition:all 0.2s; }
-.sig-count:hover { border-color:var(--borderhi); transform:translateY(-1px); }
-.sig-count .num { font-family:'Bebas Neue',sans-serif; font-size:1.8em; line-height:1; }
-.sig-count .lbl { font-family:'JetBrains Mono',monospace; font-size:0.55em; color:var(--t3); letter-spacing:0.1em; margin-top:2px; }
+.sig-count { text-align:center; padding:10px 6px; background:var(--bgcard); border:1px solid var(--border); border-radius:8px; transition:border-color 0.15s; }
+.sig-count:hover { border-color:var(--borderhi); }
+.sig-count .num { font-family:'JetBrains Mono',monospace; font-size:1.6em; font-weight:600; line-height:1; }
+.sig-count .lbl { font-family:'Inter',sans-serif; font-size:0.55em; color:var(--t3); letter-spacing:0.08em; text-transform:uppercase; margin-top:3px; }
 
 /* Portfolio card */
 .port-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:10px; }
@@ -292,38 +287,42 @@ h1,h2,h3 { color: var(--t1) !important; font-family: 'Bebas Neue', sans-serif !i
 .rs-badge { display:inline-flex; align-items:center; gap:6px; padding:5px 12px; border-radius:4px; font-family:'JetBrains Mono',monospace; font-size:0.72em; font-weight:600; }
 
 /* Earnings warning */
-.earn-warn { background:rgba(155,89,255,0.08); border:1px solid rgba(155,89,255,0.3); border-radius:6px; padding:10px 14px; color:#b980ff; font-size:0.78em; font-family:'JetBrains Mono',monospace; margin-top:8px; line-height:1.6; }
+.earn-warn { background:rgba(167,139,250,0.06); border:1px solid rgba(167,139,250,0.2); border-radius:6px; padding:10px 14px; color:#a78bfa; font-size:0.78em; font-family:'JetBrains Mono',monospace; margin-top:8px; line-height:1.6; }
 
 /* Holdings sidebar row */
 .holding-row { display:grid; grid-template-columns:58px 60px 65px; align-items:center; padding:5px 10px; border-bottom:1px solid rgba(255,255,255,0.03); font-family:'JetBrains Mono',monospace; font-size:0.72em; gap:4px; animation:fadeIn 0.2s ease; }
 .holding-row:hover { background:var(--bghover); }
-.holding-ticker { color:#5ba3d9; font-weight:600; }
-.holding-val { color:#3a5878; text-align:right; }
+.holding-ticker { color:#60a5fa; font-weight:600; }
+.holding-val { color:var(--t3); text-align:right; }
 
 /* Portfolio table row */
 .ptrow { display:grid; grid-template-columns:60px 70px 70px 80px 90px 80px 70px 50px; align-items:center; padding:6px 12px; border-bottom:1px solid rgba(255,255,255,0.03); font-family:'JetBrains Mono',monospace; font-size:0.72em; transition:background 0.15s; }
 .ptrow:hover { background:var(--bghover); }
-.pthdr { color:var(--t3); font-size:0.6em; letter-spacing:0.12em; text-transform:uppercase; }
+.pthdr { color:var(--t3); font-size:0.6em; letter-spacing:0.08em; text-transform:uppercase; }
 
 /* Trade blotter row */
-.trade-row { display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:4px; margin-bottom:3px; font-family:'JetBrains Mono',monospace; font-size:0.72em; transition:background 0.15s; flex-wrap:wrap; }
-.trade-row:hover { background:rgba(255,255,255,0.02); }
-.trade-open  { border-left:2px solid rgba(255,183,0,0.5);  background:rgba(255,183,0,0.04);  animation:pulse-amber 2.5s infinite; }
-.trade-win   { border-left:2px solid rgba(0,232,122,0.4);  background:rgba(0,232,122,0.03); }
-.trade-loss  { border-left:2px solid rgba(255,45,85,0.4);  background:rgba(255,45,85,0.03); }
+.trade-row { display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:5px; margin-bottom:3px; font-family:'JetBrains Mono',monospace; font-size:0.72em; transition:background 0.15s; flex-wrap:wrap; }
+.trade-open  { border-left:2px solid rgba(212,120,58,0.6); background:rgba(212,120,58,0.05); animation:pulse-amber 3s infinite; }
+.trade-win   { border-left:2px solid rgba(34,197,94,0.4);  background:rgba(34,197,94,0.04); }
+.trade-loss  { border-left:2px solid rgba(239,68,68,0.4);  background:rgba(239,68,68,0.04); }
 
 /* Scanner result column header */
-.result-hdr { display:grid; grid-template-columns:70px 140px 80px 65px 65px 1fr; padding:5px 18px; background:rgba(0,150,255,0.03); border-bottom:1px solid var(--border); font-family:'JetBrains Mono',monospace; font-size:0.58em; letter-spacing:0.12em; color:var(--t3); text-transform:uppercase; position:sticky; top:0; z-index:5; }
+.result-hdr { display:grid; grid-template-columns:70px 140px 80px 65px 65px 1fr; padding:5px 18px; background:rgba(255,255,255,0.015); border-bottom:1px solid var(--border); font-family:'Inter',sans-serif; font-size:0.6em; letter-spacing:0.08em; color:var(--t3); text-transform:uppercase; font-weight:600; }
 
 /* Win-rate badge */
-.wr-badge { display:inline-flex; align-items:center; gap:5px; padding:4px 10px; border-radius:4px; font-family:'JetBrains Mono',monospace; font-size:0.78em; font-weight:600; }
-.wr-good  { background:rgba(0,232,122,0.08); border:1px solid rgba(0,232,122,0.2); color:#00e87a; }
-.wr-bad   { background:rgba(255,45,85,0.08);  border:1px solid rgba(255,45,85,0.2);  color:#ff2d55; }
-.wr-neu   { background:rgba(255,183,0,0.08);  border:1px solid rgba(255,183,0,0.2);  color:#ffb700; }
+.wr-badge { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:4px; font-family:'JetBrains Mono',monospace; font-size:0.78em; font-weight:600; }
+.wr-good  { background:rgba(34,197,94,0.08);  border:1px solid rgba(34,197,94,0.2);  color:#22c55e; }
+.wr-bad   { background:rgba(239,68,68,0.08);  border:1px solid rgba(239,68,68,0.2);  color:#ef4444; }
+.wr-neu   { background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.2); color:#f59e0b; }
 
 /* Prediction direction chip */
-.dir-long  { background:rgba(0,232,122,0.06); border:1px solid rgba(0,232,122,0.2); color:#00c864; padding:1px 7px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; }
-.dir-short { background:rgba(255,45,85,0.06); border:1px solid rgba(255,45,85,0.2);  color:#ff4d6d; padding:1px 7px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; }
+.dir-long  { background:rgba(34,197,94,0.07);  border:1px solid rgba(34,197,94,0.2);  color:#22c55e; padding:1px 7px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; }
+.dir-short { background:rgba(239,68,68,0.07);  border:1px solid rgba(239,68,68,0.2);  color:#f87171; padding:1px 7px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; }
+
+/* Live chart controls */
+.chart-bar { display:flex; align-items:center; justify-content:space-between; padding:8px 0 12px; gap:12px; flex-wrap:wrap; }
+.live-badge { display:inline-flex; align-items:center; gap:5px; font-family:'JetBrains Mono',monospace; font-size:0.68em; color:#22c55e; }
+.live-dot { width:6px; height:6px; border-radius:50%; background:#22c55e; animation:live-dot 1.4s ease-in-out infinite; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -596,6 +595,128 @@ def render_holding_card(h):
             st.markdown("<div style='margin-top:8px;'>" + flag_chips(flags) + "</div>", unsafe_allow_html=True)
 
 
+def _build_live_chart(hist, chart_type, tf, r):
+    """Build Plotly figure with price + volume subplots."""
+    if hist.empty:
+        return None
+
+    entry = r.get("entry_zone")
+    stop_ = r.get("stop_loss")
+    t1    = r.get("target_1")
+    t2    = r.get("target_2")
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.78, 0.22], vertical_spacing=0.02,
+    )
+
+    # ── Price trace ──────────────────────────────────────────────────────────
+    if chart_type == "Candle":
+        fig.add_trace(go.Candlestick(
+            x=hist.index, open=hist["Open"], high=hist["High"],
+            low=hist["Low"], close=hist["Close"], name="Price",
+            increasing_line_color="#22c55e", increasing_fillcolor="rgba(34,197,94,0.08)",
+            decreasing_line_color="#ef4444", decreasing_fillcolor="rgba(239,68,68,0.08)",
+            line=dict(width=1),
+        ), row=1, col=1)
+    else:
+        close_vals = hist["Close"]
+        area_color = "#d4783a"
+        fig.add_trace(go.Scatter(
+            x=hist.index, y=close_vals, name="Price",
+            line=dict(color=area_color, width=2),
+            fill="tozeroy",
+            fillcolor="rgba(212,120,58,0.06)",
+        ), row=1, col=1)
+
+    # ── Overlays ─────────────────────────────────────────────────────────────
+    if tf == "1D" and "Volume" in hist.columns:
+        # VWAP
+        tp = (hist["High"] + hist["Low"] + hist["Close"]) / 3
+        cum_tpv = (tp * hist["Volume"]).cumsum()
+        cum_vol = hist["Volume"].cumsum()
+        vwap = cum_tpv / cum_vol.replace(0, float("nan"))
+        fig.add_trace(go.Scatter(
+            x=hist.index, y=vwap, name="VWAP",
+            line=dict(color="#f59e0b", width=1.5, dash="dot"),
+            opacity=0.85,
+        ), row=1, col=1)
+    elif len(hist) >= 20:
+        # SMA20
+        sma20 = hist["Close"].rolling(20).mean()
+        fig.add_trace(go.Scatter(
+            x=hist.index, y=sma20, name="SMA20",
+            line=dict(color="#60a5fa", width=1, dash="dot"),
+            opacity=0.6,
+        ), row=1, col=1)
+    if len(hist) >= 9:
+        ema9 = hist["Close"].ewm(span=9).mean()
+        fig.add_trace(go.Scatter(
+            x=hist.index, y=ema9, name="EMA9",
+            line=dict(color="#a78bfa", width=1),
+            opacity=0.5,
+        ), row=1, col=1)
+
+    # ── Zones ────────────────────────────────────────────────────────────────
+    if entry:
+        fig.add_hline(y=entry, line_color="rgba(96,165,250,0.5)", line_dash="dash",
+                      annotation_text="Entry", annotation_font_color="#60a5fa",
+                      annotation_font_size=10, row=1, col=1)
+    if stop_:
+        fig.add_hline(y=stop_, line_color="rgba(239,68,68,0.45)", line_dash="dash",
+                      annotation_text="Stop", annotation_font_color="#ef4444",
+                      annotation_font_size=10, row=1, col=1)
+    if t1:
+        fig.add_hline(y=t1, line_color="rgba(34,197,94,0.35)", line_dash="dot",
+                      annotation_text="T1", annotation_font_color="#22c55e",
+                      annotation_font_size=10, row=1, col=1)
+    if t2:
+        fig.add_hline(y=t2, line_color="rgba(34,197,94,0.2)", line_dash="dot",
+                      annotation_text="T2", annotation_font_color="#4ade80",
+                      annotation_font_size=10, row=1, col=1)
+
+    # ── Volume bars ──────────────────────────────────────────────────────────
+    if "Volume" in hist.columns:
+        vol_colors = [
+            "rgba(34,197,94,0.25)" if c >= o else "rgba(239,68,68,0.25)"
+            for c, o in zip(hist["Close"], hist["Open"])
+        ]
+        fig.add_trace(go.Bar(
+            x=hist.index, y=hist["Volume"],
+            marker_color=vol_colors, name="Vol", showlegend=False,
+        ), row=2, col=1)
+
+    # ── Layout ───────────────────────────────────────────────────────────────
+    axis_style = dict(
+        gridcolor="rgba(255,255,255,0.04)", showgrid=True, zeroline=False,
+        showline=False, tickfont=dict(size=9, family="JetBrains Mono", color="#3a3848"),
+    )
+    fig.update_layout(
+        height=420,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(10,10,16,0.95)",
+        font=dict(family="Inter", color="#3a3848"),
+        xaxis=dict(**axis_style, rangeslider_visible=False),
+        xaxis2=dict(**axis_style, rangeslider_visible=False),
+        yaxis=dict(**axis_style, side="right"),
+        yaxis2=dict(**axis_style, side="right"),
+        legend=dict(
+            bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#3a3848", size=9, family="JetBrains Mono"),
+            orientation="h", y=1.02, x=0,
+        ),
+        margin=dict(l=0, r=0, t=4, b=0),
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="#131318", font_color="#f0ede8",
+                        font_family="JetBrains Mono", font_size=11),
+    )
+    if tf == "1D":
+        fig.update_xaxes(
+            rangebreaks=[dict(bounds=["sat","mon"]), dict(bounds=[20,4], pattern="hour")],
+        )
+    return fig
+
+
 def render_deep_dive(r):
     if r.get("error"):
         st.error(f"Could not analyze {r.get('ticker')}: {r['error']}")
@@ -604,191 +725,212 @@ def render_deep_dive(r):
         st.warning(f"{r['ticker']} filtered out: {r.get('filter_reason')}")
         return
 
-    ticker = r["ticker"]
-    name   = r.get("company_name", ticker)
-    price  = r.get("price", 0)
-    signal = r.get("signal", "—")
-    score  = r.get("final_score", 0)
-    flags  = r.get("risk_flags", [])
-    sc     = score_col(score)
-    pc     = pill_class(signal)
-    sclr   = sig_color(signal)
+    ticker  = r["ticker"]
+    name    = r.get("company_name", ticker)
+    price   = r.get("price", 0)
+    signal  = r.get("signal", "—")
+    score   = r.get("final_score", 0)
+    flags   = r.get("risk_flags", [])
+    sc      = score_col(score)
+    pc      = pill_class(signal)
+    ret1d   = r.get("return_1d", 0) or 0
+    ret_c   = "#22c55e" if ret1d >= 0 else "#ef4444"
+    ret_arr = "▲" if ret1d >= 0 else "▼"
+    fetched = r.get("data_fetched_at", "")
+    fetched_t = fetched[11:16] if fetched else "—"
 
-    # ── Hero header ──────────────────────────────────────────────────────────
-    col_hero, col_ring = st.columns([5, 1])
-    with col_hero:
+    # ── Hero bar ─────────────────────────────────────────────────────────────
+    h1, h2 = st.columns([6, 1])
+    with h1:
         st.markdown(f"""
-        <div class="ticker-hero">
-          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
-            <span style="font-family:'Bebas Neue',sans-serif;font-size:2.8em;color:#e8f4ff;letter-spacing:0.1em;line-height:1;">{ticker}</span>
-            <div>
-              <div style="color:#3a5878;font-size:0.88em;margin-bottom:4px;">{name}</div>
-              <span class="pill {pc}">{signal}</span>
-              <span style="margin-left:8px;">{flag_chips(flags)}</span>
+        <div style="padding:18px 0 14px;border-bottom:1px solid var(--border);margin-bottom:18px;animation:fadeIn 0.3s ease;">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:10px;">
+            <span style="font-size:2.4em;font-weight:700;color:var(--t1);letter-spacing:-0.03em;line-height:1;">{ticker}</span>
+            <div style="display:flex;flex-direction:column;gap:4px;">
+              <span style="color:var(--t3);font-size:0.82em;font-weight:400;">{name[:52]}</span>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span class="pill {pc}">{signal}</span>
+                {flag_chips(flags)}
+              </div>
+            </div>
+            <div class="live-badge" style="margin-left:auto;">
+              <span class="live-dot"></span>
+              <span>Updated {fetched_t}</span>
             </div>
           </div>
-          <div style="display:flex;align-items:baseline;gap:20px;margin-top:12px;flex-wrap:wrap;">
-            <span style="font-family:'Bebas Neue',sans-serif;font-size:2.2em;color:#e8f4ff;letter-spacing:0.05em;">{fp(price)}</span>
-            <span style="font-family:'JetBrains Mono',monospace;font-size:0.85em;color:{sc};font-weight:600;">{score:.0f}/100</span>
+          <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;">
+            <span style="font-size:2.2em;font-weight:700;color:var(--t1);letter-spacing:-0.02em;font-family:'JetBrains Mono',monospace;">{fp(price)}</span>
+            <span style="font-size:1em;font-weight:600;color:{ret_c};font-family:'JetBrains Mono',monospace;">{ret_arr} {abs(ret1d):.2f}%</span>
+            <span style="font-size:0.85em;color:{sc};font-family:'JetBrains Mono',monospace;font-weight:500;">{score:.0f}<span style="color:var(--t3);font-weight:400;">/100</span></span>
           </div>
         </div>
         """, unsafe_allow_html=True)
-    with col_ring:
-        st.markdown(score_ring_svg(score, sc, 90), unsafe_allow_html=True)
+    with h2:
+        st.markdown(score_ring_svg(score, sc, 88), unsafe_allow_html=True)
 
-    # ── Price Chart ───────────────────────────────────────────────────────────
-    hist = get_price_history(ticker, 60)
-    if not hist.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=hist.index, open=hist["Open"], high=hist["High"],
-            low=hist["Low"], close=hist["Close"], name=ticker,
-            increasing_line_color="#00e87a", increasing_fillcolor="rgba(0,232,122,0.1)",
-            decreasing_line_color="#ff2d55", decreasing_fillcolor="rgba(255,45,85,0.1)",
-        ))
-        if len(hist) >= 20:
-            sma20 = hist["Close"].rolling(20).mean()
-            fig.add_trace(go.Scatter(x=hist.index, y=sma20, name="SMA20",
-                line=dict(color="#ffb700", width=1, dash="dot"), opacity=0.7))
-        entry = r.get("entry_zone"); stop_ = r.get("stop_loss")
-        t1 = r.get("target_1")
-        if entry: fig.add_hline(y=entry, line_color="rgba(0,150,255,0.4)", line_dash="dash",
-                                annotation_text="Entry", annotation_font_color="#33b3ff", annotation_font_size=10)
-        if stop_: fig.add_hline(y=stop_, line_color="rgba(255,45,85,0.4)", line_dash="dash",
-                                annotation_text="Stop", annotation_font_color="#ff2d55", annotation_font_size=10)
-        if t1:    fig.add_hline(y=t1, line_color="rgba(0,232,122,0.3)", line_dash="dot",
-                                annotation_text="T1", annotation_font_color="#00e87a", annotation_font_size=10)
+    # ── Chart controls ────────────────────────────────────────────────────────
+    cc1, cc2, cc3 = st.columns([3, 2, 1])
+    with cc1:
+        tf = st.radio("Timeframe", ["1D", "5D", "1M", "3M"],
+                      horizontal=True, label_visibility="collapsed",
+                      key=f"dd_tf_{ticker}")
+    with cc2:
+        ctype = st.radio("Chart type", ["Candle", "Line"],
+                         horizontal=True, label_visibility="collapsed",
+                         key=f"dd_ct_{ticker}")
+    with cc3:
+        do_refresh = st.button("⟳ Refresh", key=f"dd_ref_{ticker}", use_container_width=True)
 
-        fig.update_layout(
-            height=310,
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(8,15,26,0.8)",
-            font_color="#2a4060", font_family="JetBrains Mono",
-            xaxis=dict(gridcolor="rgba(255,255,255,0.03)", showgrid=True, zeroline=False,
-                      showline=False, tickfont=dict(size=9)),
-            yaxis=dict(gridcolor="rgba(255,255,255,0.03)", showgrid=True, zeroline=False,
-                      showline=False, tickfont=dict(size=9)),
-            xaxis_rangeslider_visible=False,
-            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#2a4060", size=9)),
-            margin=dict(l=0,r=0,t=8,b=0),
+    # ── Fetch & render chart ──────────────────────────────────────────────────
+    chart_key = f"chart_{ticker}_{tf}"
+    if chart_key not in st.session_state or do_refresh:
+        with st.spinner("Loading chart data…"):
+            st.session_state[chart_key] = get_chart_data(ticker, tf)
+    hist = st.session_state[chart_key]
+
+    fig = _build_live_chart(hist, ctype, tf, r)
+    if fig:
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        rows_shown = len(hist)
+        lbl = "candles" if ctype == "Candle" else "points"
+        st.markdown(
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.62em;'
+            f'color:var(--t3);text-align:right;margin-top:-8px;">'
+            f'{tf} · {rows_shown} {lbl}</div>',
+            unsafe_allow_html=True,
         )
-        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info(f"No {tf} chart data available — market may be closed or API limit reached.")
 
-    # ── Radar + Stats ─────────────────────────────────────────────────────────
-    cr, cs = st.columns([1,1])
-    with cr:
-        st.markdown('<div class="sh">Score Radar</div>', unsafe_allow_html=True)
-        cats = ["Technical","Catalyst","Fundamental","Risk inv.","Sentiment"]
-        vals = [r.get("technical_score",50), r.get("catalyst_score",50),
-                r.get("fundamental_score",50), 100-r.get("risk_score",50), r.get("sentiment_score",50)]
-        fig_r = go.Figure(go.Scatterpolar(
-            r=vals+[vals[0]], theta=cats+[cats[0]], fill="toself",
-            fillcolor="rgba(0,150,255,0.06)",
-            line=dict(color="#0096ff", width=2),
-            marker=dict(color="#0096ff", size=5),
-        ))
-        fig_r.update_layout(
-            polar=dict(
-                bgcolor="rgba(0,0,0,0)",
-                radialaxis=dict(visible=True, range=[0,100], gridcolor="rgba(255,255,255,0.04)",
-                                tickfont=dict(color="#112030",size=8,family="JetBrains Mono"),
-                                linecolor="rgba(255,255,255,0.05)"),
-                angularaxis=dict(gridcolor="rgba(255,255,255,0.04)",
-                                 tickfont=dict(color="#2a4060",size=9,family="JetBrains Mono"),
-                                 linecolor="rgba(255,255,255,0.05)"),
-            ),
-            paper_bgcolor="rgba(0,0,0,0)", font_color="#2a4060",
-            showlegend=False, height=250, margin=dict(l=20,r=20,t=15,b=15),
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    # ── Three-column stats ────────────────────────────────────────────────────
+    ca, cb, cc = st.columns(3)
+
+    with ca:
+        st.markdown('<div class="sh">Price & Volume</div>', unsafe_allow_html=True)
+        rvol = r.get("relative_volume", 0) or 0
+        rsi  = r.get("rsi")
+        vl   = r.get("volatility")
+        mc   = r.get("market_cap", 0)
+        st.markdown(
+            stat_row("Market Cap",    fm(mc)) +
+            stat_row("RVOL",          f"{rvol:.2f}×", "b" if rvol > 2 else "") +
+            stat_row("RSI (14)",      f"{rsi:.1f}" if rsi else "—") +
+            stat_row("1D / 5D / 20D", f"{r.get('return_1d',0):+.1f}% / {r.get('return_5d',0):+.1f}% / {r.get('return_20d',0):+.1f}%") +
+            stat_row("Volatility",    f"{vl:.0f}% ann." if vl else "—", "a" if vl and vl > 100 else "") +
+            stat_row("Short % Float", fpct(r.get("short_percent_float")), "a" if (r.get("short_percent_float") or 0) > 0.2 else "") +
+            stat_row("Avg Volume",    f"{r.get('avg_volume',0):,}" if r.get("avg_volume") else "—"),
+            unsafe_allow_html=True,
         )
-        st.plotly_chart(fig_r, use_container_width=True)
 
-    with cs:
-        st.markdown('<div class="sh">Key Data</div>', unsafe_allow_html=True)
-        rw = r.get("runway_months"); rv = r.get("revenue_growth"); vl = r.get("volatility")
-        rows = [
-            ("Market Cap",    fm(r.get("market_cap")),                              ""),
-            ("Rel. Volume",   f"{r.get('relative_volume',0):.2f}×",                 "b" if (r.get("relative_volume") or 0)>2 else ""),
-            ("RSI (14)",      f"{r.get('rsi',0):.1f}" if r.get("rsi") else "—",    ""),
-            ("1D/5D/20D",     f"{r.get('return_1d',0):+.1f}% / {r.get('return_5d',0):+.1f}% / {r.get('return_20d',0):+.1f}%",""),
-            ("Volatility",    f"{vl:.0f}% ann." if vl else "—",                    "a" if vl and vl>100 else ""),
-            ("Short % Float", fpct(r.get("short_percent_float")),                   "a" if (r.get("short_percent_float") or 0)>0.2 else ""),
-            ("Rev Growth",    fpct(rv) if rv else "—",                              "g" if rv and rv>0.2 else "r" if rv and rv<0 else ""),
-            ("Cash Runway",   f"~{rw:.0f} mo" if rw else "—",                      "r" if rw and rw<12 else "g" if rw and rw>24 else ""),
-            ("Entry Zone",    fp(r.get("entry_zone")),                              "b"),
-            ("Stop Loss",     fp(r.get("stop_loss")),                               "r"),
-            ("Target 1",      fp(r.get("target_1")),                                "g"),
-            ("Target 2",      fp(r.get("target_2")),                                "g"),
-            ("Analyst",       (r.get("analyst_recommendation") or "—").upper(),     "g" if r.get("analyst_recommendation") in ("buy","strong_buy") else ""),
-        ]
-        for lbl, val, cls in rows:
-            st.markdown(stat_row(lbl, val, cls), unsafe_allow_html=True)
-
-        # Option A: Earnings
+    with cb:
+        st.markdown('<div class="sh">Trade Zones</div>', unsafe_allow_html=True)
+        rw = r.get("runway_months"); rv = r.get("revenue_growth")
+        st.markdown(
+            stat_row("Entry Zone",   fp(r.get("entry_zone")), "b") +
+            stat_row("Stop Loss",    fp(r.get("stop_loss")), "r") +
+            stat_row("Target 1",     fp(r.get("target_1")), "g") +
+            stat_row("Target 2",     fp(r.get("target_2")), "g") +
+            stat_row("Rev Growth",   fpct(rv) if rv else "—", "g" if rv and rv > 0.2 else "r" if rv and rv < 0 else "") +
+            stat_row("Cash Runway",  f"~{rw:.0f} mo" if rw else "—", "r" if rw and rw < 12 else "g" if rw and rw > 24 else "") +
+            stat_row("Analyst",      (r.get("analyst_recommendation") or "—").upper(), "g" if r.get("analyst_recommendation") in ("buy","strong_buy") else ""),
+            unsafe_allow_html=True,
+        )
         ed = r.get("earnings_date"); dte = r.get("days_to_earnings")
         if ed:
-            earn_cls = "r" if r.get("earnings_warning") else "p"
             earn_str = f"{ed} ({dte}d)" if dte is not None else ed
-            st.markdown(stat_row("Earnings Date", earn_str, earn_cls), unsafe_allow_html=True)
+            st.markdown(stat_row("Earnings", earn_str, "r" if r.get("earnings_warning") else "p"), unsafe_allow_html=True)
             if r.get("earnings_warning"):
-                st.markdown(f'<div class="earn-warn">⚠ EARNINGS IN {dte} DAYS — Binary event. Can move ±20-50%. Do not enter blindly.</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="earn-warn">⚠ Earnings in {dte} days — binary event risk</div>', unsafe_allow_html=True)
 
-        # Option C: Sector RS
-        rs = r.get("sector_rs_label")
-        if rs:
-            is_out = "outperform" in rs.lower()
-            is_under = "underperform" in rs.lower()
-            rs_color = "#00e87a" if is_out else "#ff2d55" if is_under else "#ffb700"
-            rs_bg    = "rgba(0,232,122,0.07)" if is_out else "rgba(255,45,85,0.07)" if is_under else "rgba(255,183,0,0.07)"
+    with cc:
+        st.markdown('<div class="sh">Score Breakdown</div>', unsafe_allow_html=True)
+        comps = [
+            ("Technical",   r.get("technical_score",0),   SCORING_WEIGHTS["technical"]),
+            ("Catalyst",    r.get("catalyst_score",0),    SCORING_WEIGHTS["catalyst"]),
+            ("Fundamental", r.get("fundamental_score",0), SCORING_WEIGHTS["fundamental"]),
+            ("Risk adj.",   100-r.get("risk_score",50),   SCORING_WEIGHTS["risk"]),
+            ("Sentiment",   r.get("sentiment_score",50),  SCORING_WEIGHTS["sentiment"]),
+        ]
+        for lbl, val, wt in comps:
+            c = score_col(val)
             st.markdown(f"""
-            <div style="margin-top:8px;padding:7px 10px;background:{rs_bg};border:1px solid {rs_color}30;
-                        border-radius:5px;color:{rs_color};font-size:0.7em;font-family:'JetBrains Mono',monospace;">
-                RS: {rs}
+            <div style="margin-bottom:10px;">
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                <span style="font-size:0.7em;color:var(--t3);font-family:'Inter',sans-serif;">{lbl}</span>
+                <span style="font-size:0.7em;color:{c};font-family:'JetBrains Mono',monospace;font-weight:600;">{val:.0f} <span style="color:var(--t3);font-weight:400;">×{wt:.0%}</span></span>
+              </div>
+              {sbar(val, c)}
             </div>""", unsafe_allow_html=True)
 
-    # ── Full Analysis ─────────────────────────────────────────────────────────
-    st.markdown('<div class="sh">Full Analysis</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="summary-block">{r.get("summary","")}</div>', unsafe_allow_html=True)
+        rs = r.get("sector_rs_label")
+        if rs:
+            is_out   = "outperform" in rs.lower()
+            is_under = "underperform" in rs.lower()
+            rs_color = "#22c55e" if is_out else "#ef4444" if is_under else "#f59e0b"
+            rs_bg    = "0.06" if is_out or is_under else "0.05"
+            st.markdown(f"""
+            <div style="margin-top:10px;padding:7px 10px;
+                        background:rgba({
+                            '34,197,94' if is_out else '239,68,68' if is_under else '245,158,11'
+                        },{rs_bg});
+                        border:1px solid {rs_color}30;border-radius:5px;
+                        color:{rs_color};font-size:0.68em;font-family:'JetBrains Mono',monospace;">
+              RS: {rs}
+            </div>""", unsafe_allow_html=True)
 
-    # ── Catalysts & SEC ───────────────────────────────────────────────────────
-    cat_notes = r.get("catalyst_notes",[]); fsumm = r.get("filing_summary",[])
+    # ── Analysis block ────────────────────────────────────────────────────────
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+    summary = r.get("summary", "")
+    if summary:
+        st.markdown('<div class="sh">Analysis</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="summary-block">{summary}</div>', unsafe_allow_html=True)
+
+    # ── Catalysts + SEC ───────────────────────────────────────────────────────
+    cat_notes = r.get("catalyst_notes", []); fsumm = r.get("filing_summary", [])
     if cat_notes or fsumm:
-        st.markdown('<div class="sh">Catalysts & SEC Filings</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sh">Catalysts & Filings</div>', unsafe_allow_html=True)
         for n in cat_notes:
-            st.markdown(f'<div style="color:#00c864;font-size:0.82em;padding:4px 0;display:flex;align-items:center;gap:8px;"><span style="color:#00e87a;">✓</span> {n}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="color:#22c55e;font-size:0.82em;padding:4px 0;display:flex;align-items:center;gap:8px;"><span>✓</span>{n}</div>', unsafe_allow_html=True)
         for f in fsumm:
-            st.markdown(f'<div style="color:#2a4060;font-size:0.78em;padding:4px 0;font-family:\'JetBrains Mono\',monospace;border-bottom:1px solid rgba(255,255,255,0.02);">{f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="color:var(--t3);font-size:0.76em;padding:4px 0;font-family:\'JetBrains Mono\',monospace;border-bottom:1px solid rgba(255,255,255,0.03);">{f}</div>', unsafe_allow_html=True)
 
     # ── AI Filing Summary ─────────────────────────────────────────────────────
-    ai_sum = r.get("filing_ai_summary","")
+    ai_sum = r.get("filing_ai_summary", "")
     if ai_sum:
-        st.markdown('<div class="sh">⚡ AI Filing Analysis</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sh">AI Filing Analysis</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="box box-blue">{ai_sum}</div>', unsafe_allow_html=True)
 
-    # ── Risk Flags ────────────────────────────────────────────────────────────
+    # ── Risk flags ────────────────────────────────────────────────────────────
     if flags:
         st.markdown('<div class="sh">Risk Flags</div>', unsafe_allow_html=True)
         for flag in flags:
             crit  = flag in {"going_concern","reverse_split_risk"}
             earn  = flag == "earnings_imminent"
-            color = "#ff2d55" if crit else "#9b59ff" if earn else "#ffb700"
-            st.markdown(f'<div style="color:{color};font-size:0.82em;padding:4px 0;display:flex;align-items:center;gap:6px;"><span>⚠</span> {RISK_FLAGS.get(flag,flag)}</div>', unsafe_allow_html=True)
+            color = "#ef4444" if crit else "#a78bfa" if earn else "#d4783a"
+            st.markdown(f'<div style="color:{color};font-size:0.82em;padding:4px 0;display:flex;align-items:center;gap:6px;">⚠ {RISK_FLAGS.get(flag,flag)}</div>', unsafe_allow_html=True)
 
-    # ── Headlines ─────────────────────────────────────────────────────────────
-    headlines = r.get("recent_headlines",[])
+    # ── News ──────────────────────────────────────────────────────────────────
+    headlines = r.get("recent_headlines", [])
     if headlines:
-        st.markdown('<div class="sh">News Headlines</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sh">News</div>', unsafe_allow_html=True)
         for h in headlines:
-            sent = h.get("sentiment","neutral")
-            dc   = {"positive":"#00e87a","negative":"#ff2d55"}.get(sent,"#2a4060")
+            sent = h.get("sentiment", "neutral")
+            dc   = {"positive":"#22c55e","negative":"#ef4444"}.get(sent,"#3a3848")
             st.markdown(f"""
             <div class="news-item">
-              <div class="news-dot" style="background:{dc};box-shadow:0 0 6px {dc}80;"></div>
+              <div class="news-dot" style="background:{dc};"></div>
               <div>
-                <a href="{h.get('url','#')}" target="_blank" style="color:#4a90c4;font-size:0.82em;text-decoration:none;line-height:1.5;">{h.get('title','')}</a>
-                <div style="color:#1a3050;font-size:0.68em;margin-top:2px;font-family:'JetBrains Mono',monospace;">{h.get('date','')} · {sent.upper()}</div>
+                <a href="{h.get('url','#')}" target="_blank"
+                   style="color:#60a5fa;font-size:0.82em;text-decoration:none;line-height:1.5;">{h.get('title','')}</a>
+                <div style="color:var(--t3);font-size:0.67em;margin-top:2px;font-family:'JetBrains Mono',monospace;">
+                  {h.get('date','')} · {sent.upper()}
+                </div>
               </div>
             </div>""", unsafe_allow_html=True)
 
-    st.markdown('<div class="disc" style="margin-top:16px;">⚠ RESEARCH TOOL ONLY · NOT FINANCIAL ADVICE · VERIFY ALL DATA INDEPENDENTLY BEFORE ACTING</div>', unsafe_allow_html=True)
+    st.markdown('<div class="disc" style="margin-top:20px;">Research tool only · Not financial advice · Verify all data independently</div>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
