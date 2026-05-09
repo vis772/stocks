@@ -1068,23 +1068,30 @@ with tab4:
     except Exception:
         pass
 
-    # Load alert log
+    # Load alert log from shared DB
     alert_log = []
     try:
-        import json as _json
-        with open("alert_log.json") as f:
-            alert_log = _json.load(f)
-        alert_log = list(reversed(alert_log))  # newest first
+        from db.database import load_alerts
+        alert_log = list(reversed(load_alerts(100)))
     except Exception:
-        pass
+        try:
+            import json as _json
+            with open("alert_log.json") as f:
+                alert_log = list(reversed(_json.load(f)))
+        except Exception:
+            pass
 
-    # Load scanner state
+    # Load scanner state from shared DB
     scanner_state = {}
     try:
-        with open("scanner_state.json") as f:
-            scanner_state = _json.load(f)
+        from db.database import load_scanner_state
+        scanner_state = load_scanner_state()
     except Exception:
-        pass
+        try:
+            with open("scanner_state.json") as f:
+                scanner_state = _json.load(f)
+        except Exception:
+            pass
 
     # Status bar
     scan_count   = scanner_state.get("scan_count", 0)
@@ -1098,10 +1105,10 @@ with tab4:
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-    # Load today's watchlist
+    # Load today's watchlist from shared DB
     try:
-        with open("watchlist_today.json") as f:
-            wl_data = _json.load(f)
+        from db.database import load_watchlist
+        wl_data    = load_watchlist()
         wl_tickers = wl_data.get("tickers", [])
         wl_stats   = wl_data.get("stats", {})
 
