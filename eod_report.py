@@ -609,7 +609,7 @@ def run_eod_report():
 
         # Re-collect summaries for notification stats
         summaries = []
-        for ticker in watchlist[:5]:  # Just top 5 for stats
+        for ticker in watchlist:  # All stocks for accurate stats
             s = get_stock_day_summary(ticker)
             if s:
                 summaries.append(s)
