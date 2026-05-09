@@ -46,9 +46,12 @@ MARKET_OPEN_HOUR    = 9
 MARKET_OPEN_MIN     = 25
 MARKET_CLOSE_HOUR   = 16
 MARKET_CLOSE_MIN    = 30
-PREMARKET_HOUR      = 6
-SCAN_INTERVAL_SEC   = 60
-AFTERHOURS_INTERVAL = 300
+PREMARKET_HOUR          = 4         # IEX pre-market opens at 04:00 ET
+MORNING_SCREEN_HOUR     = 6         # Watchlist rebuild kicks off here
+SCAN_INTERVAL_SEC       = 60
+PREMARKET_SCAN_INTERVAL = 90        # Slower cadence — thinner pre-market book
+PREMARKET_SEC_INTERVAL  = 300       # SEC EDGAR poll every 5 min pre-market
+AFTERHOURS_INTERVAL     = 300
 
 
 def now_et():
@@ -165,17 +168,23 @@ def is_market_hours() -> bool:
 
 
 def is_premarket() -> bool:
+    """Pre-market window: [04:00, 09:25) ET on weekdays."""
     et = now_et()
     if et.weekday() >= 5:
         return False
-    return PREMARKET_HOUR <= et.hour < MARKET_OPEN_HOUR
+    h, m = et.hour, et.minute
+    if h < PREMARKET_HOUR:
+        return False
+    if h < MARKET_OPEN_HOUR:
+        return True
+    return h == MARKET_OPEN_HOUR and m < MARKET_OPEN_MIN
 
 
 def is_morning_screen_time() -> bool:
     et = now_et()
     if et.weekday() >= 5:
         return False
-    return et.hour == PREMARKET_HOUR and et.minute < 10
+    return et.hour == MORNING_SCREEN_HOUR and et.minute < 10
 
 
 # ─── Claude News Analysis ─────────────────────────────────────────────────────
@@ -467,7 +476,7 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
     def news_loop():
         while True:
             try:
-                if not is_market_hours():
+                if not is_market_hours() and not is_premarket():
                     time.sleep(60)
                     continue
 
@@ -539,15 +548,20 @@ def run_scanner():
     last_digest_time   = now_et()
     eod_report_sent    = False
     news_thread        = None
+    last_screen_date: Optional[str] = None
 
     while True:
         try:
-            et = now_et()
+            et         = now_et()
+            today_str  = et.strftime("%Y-%m-%d")
 
             # ── Morning screen at 6 AM ET ─────────────────────────────────────
-            if is_morning_screen_time() and not watchlist:
+            # Runs once per day even if pre-market scanning has already seeded
+            # `watchlist` with DEFAULT_UNIVERSE since 4 AM.
+            if is_morning_screen_time() and last_screen_date != today_str:
                 print("\n[MORNING SCREEN] Building today's watchlist...")
                 watchlist          = build_todays_watchlist(max_stocks=50)
+                last_screen_date   = today_str
                 morning_brief_sent = False
                 eod_report_sent    = False
                 news_thread        = None
@@ -625,10 +639,37 @@ def run_scanner():
                 time.sleep(SCAN_INTERVAL_SEC)
 
             elif is_premarket():
-                print(f"  [PRE-MARKET] {et.strftime('%H:%M ET')} — light scan")
-                if watchlist and (et - state.last_sec_check).total_seconds() >= 600:
+                state.scan_count += 1
+                print(f"\n[PRE-MARKET SCAN #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
+
+                # News monitor covers pre-market too (PRs land 06:00–09:00 ET)
+                if news_thread is None or not news_thread.is_alive():
+                    news_thread = run_news_monitor(watchlist, state)
+
+                all_alerts = []
+
+                if (et - state.last_sec_check).total_seconds() >= PREMARKET_SEC_INTERVAL:
+                    print("  Checking SEC EDGAR...")
                     check_sec_filings(watchlist, state)
-                time.sleep(AFTERHOURS_INTERVAL)
+
+                # Same parallel ticker fan-out as market hours. Volume-spike
+                # branch inside scan_one_ticker self-skips because
+                # expected_pct < 0.05 before 09:30, so we just get gap, 1-min,
+                # 10-min, and news alerts — exactly what's useful pre-market.
+                with ThreadPoolExecutor(max_workers=15) as executor:
+                    futures = {executor.submit(scan_one_ticker, t, state): t for t in watchlist}
+                    for future in as_completed(futures, timeout=45):
+                        try:
+                            all_alerts.extend(future.result())
+                        except Exception:
+                            pass
+
+                if all_alerts:
+                    print(f"  🔔 {len(all_alerts)} alert(s) fired")
+                else:
+                    print(f"  ✓ No alerts this scan")
+
+                time.sleep(PREMARKET_SCAN_INTERVAL)
 
             else:
                 print(f"  [CLOSED] {et.strftime('%H:%M ET')} — sleeping 10 min")
