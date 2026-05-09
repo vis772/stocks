@@ -1211,7 +1211,7 @@ with tab2:
                 "P&L %":    st.column_config.NumberColumn("P&L %", format="%.2f%%", width=80),
                 "P&L $":    st.column_config.NumberColumn("P&L $", format="$%.2f", width=90),
                 "Value":    st.column_config.NumberColumn("Value", format="$%.2f", width=90),
-                "Score":    st.column_config.ProgressColumn("Score", min_value=0, max_value=100, width=90),
+                "Score":    st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d", width=90),
                 "Signal":   st.column_config.TextColumn("Signal", width=140),
             },
         )
