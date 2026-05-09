@@ -115,6 +115,25 @@ def _init_postgres():
             last_updated    TEXT
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id           SERIAL PRIMARY KEY,
+            trade_date   TEXT NOT NULL,
+            ticker       TEXT NOT NULL,
+            signal_type  TEXT NOT NULL,
+            entry_price  REAL NOT NULL,
+            stop_price   REAL NOT NULL,
+            target1      REAL NOT NULL,
+            target2      REAL NOT NULL,
+            entry_time   TEXT NOT NULL,
+            exit_price   REAL,
+            exit_time    TEXT,
+            outcome      TEXT DEFAULT 'open',
+            pnl_pct      REAL,
+            created_at   TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
     # Migration-safe: add new columns to existing deployments
     cur.execute("ALTER TABLE scanner_state ADD COLUMN IF NOT EXISTS vwap_snapshot     TEXT DEFAULT '{}'")
     cur.execute("ALTER TABLE scanner_state ADD COLUMN IF NOT EXISTS momentum_ranking  TEXT DEFAULT '[]'")
@@ -194,6 +213,25 @@ def _init_sqlite():
             last_updated  TEXT
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_date   TEXT NOT NULL,
+            ticker       TEXT NOT NULL,
+            signal_type  TEXT NOT NULL,
+            entry_price  REAL NOT NULL,
+            stop_price   REAL NOT NULL,
+            target1      REAL NOT NULL,
+            target2      REAL NOT NULL,
+            entry_time   TEXT NOT NULL,
+            exit_price   REAL,
+            exit_time    TEXT,
+            outcome      TEXT DEFAULT 'open',
+            pnl_pct      REAL,
+            created_at   TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     for col_sql in [
         "ALTER TABLE scanner_state ADD COLUMN vwap_snapshot    TEXT DEFAULT '{}'",
         "ALTER TABLE scanner_state ADD COLUMN momentum_ranking TEXT DEFAULT '[]'",
@@ -568,3 +606,125 @@ def save_scanner_state(state_dict: dict):
             json.dump(state_dict, f)
     except Exception:
         pass
+
+
+# ─── Paper Trades ──────────────────────────────────────────────────────────────
+
+def log_paper_trade(ticker: str, signal_type: str, entry_price: float,
+                    stop_price: float, target1: float, target2: float) -> Optional[int]:
+    """Log a new paper trade entry. Returns the row id or None on failure."""
+    trade_date = datetime.now().strftime("%Y-%m-%d")
+    entry_time = datetime.now().strftime("%H:%M ET")
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                INSERT INTO paper_trades
+                    (trade_date, ticker, signal_type, entry_price, stop_price,
+                     target1, target2, entry_time)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (trade_date, ticker, signal_type, entry_price, stop_price,
+                  target1, target2, entry_time))
+            row_id = cur.fetchone()[0]
+            conn.commit(); cur.close(); conn.close()
+            return row_id
+        else:
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                INSERT INTO paper_trades
+                    (trade_date, ticker, signal_type, entry_price, stop_price,
+                     target1, target2, entry_time)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, (trade_date, ticker, signal_type, entry_price, stop_price,
+                  target1, target2, entry_time))
+            row_id = cur.lastrowid
+            conn.commit(); conn.close()
+            return row_id
+    except Exception as e:
+        print(f"  [db] Paper trade log failed: {e}")
+        return None
+
+
+def close_paper_trades_eod(exit_prices: dict):
+    """
+    Called at EOD with {ticker: exit_price}. Closes all open trades from today.
+    Marks win/loss based on whether exit >= target1 or exit <= stop.
+    """
+    trade_date = datetime.now().strftime("%Y-%m-%d")
+    exit_time  = datetime.now().strftime("%H:%M ET")
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT id, ticker, entry_price, stop_price, target1
+                FROM paper_trades
+                WHERE trade_date = %s AND outcome = 'open'
+            """, (trade_date,))
+            rows = cur.fetchall()
+            for row_id, ticker, entry, stop, t1 in rows:
+                exit_p = exit_prices.get(ticker, entry)
+                pnl    = (exit_p - entry) / entry * 100
+                outcome = "win" if exit_p >= t1 else "loss" if exit_p <= stop else "open"
+                cur.execute("""
+                    UPDATE paper_trades
+                    SET exit_price=%s, exit_time=%s, outcome=%s, pnl_pct=%s
+                    WHERE id=%s
+                """, (exit_p, exit_time, outcome, round(pnl, 2), row_id))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT id, ticker, entry_price, stop_price, target1
+                FROM paper_trades WHERE trade_date=? AND outcome='open'
+            """, (trade_date,))
+            rows = cur.fetchall()
+            for row_id, ticker, entry, stop, t1 in rows:
+                exit_p = exit_prices.get(ticker, entry)
+                pnl    = (exit_p - entry) / entry * 100
+                outcome = "win" if exit_p >= t1 else "loss" if exit_p <= stop else "open"
+                cur.execute("""
+                    UPDATE paper_trades
+                    SET exit_price=?, exit_time=?, outcome=?, pnl_pct=?
+                    WHERE id=?
+                """, (exit_p, exit_time, outcome, round(pnl, 2), row_id))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] EOD paper trade close failed: {e}")
+
+
+def get_paper_trades(days: int = 30) -> pd.DataFrame:
+    """Return paper trades from the last N days, most recent first."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT id, trade_date, ticker, signal_type, entry_price, stop_price,
+                       target1, target2, entry_time, exit_price, exit_time, outcome, pnl_pct
+                FROM paper_trades
+                WHERE trade_date >= NOW() - INTERVAL '%s days'
+                ORDER BY created_at DESC
+            """, (days,))
+            rows = cur.fetchall()
+            cols = ["id","trade_date","ticker","signal_type","entry_price","stop_price",
+                    "target1","target2","entry_time","exit_price","exit_time","outcome","pnl_pct"]
+            cur.close(); conn.close()
+            return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+        else:
+            conn = _get_sqlite_conn()
+            df = pd.read_sql(f"""
+                SELECT id, trade_date, ticker, signal_type, entry_price, stop_price,
+                       target1, target2, entry_time, exit_price, exit_time, outcome, pnl_pct
+                FROM paper_trades
+                WHERE date(trade_date) >= date('now', '-{days} days')
+                ORDER BY created_at DESC
+            """, conn)
+            conn.close()
+            return df
+    except Exception as e:
+        print(f"  [db] Paper trades load failed: {e}")
+        return pd.DataFrame()

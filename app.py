@@ -1248,6 +1248,50 @@ with tab4:
                 <span style="color:{color};font-family:'JetBrains Mono',monospace;font-size:0.8em;">{alert}</span>
             </div>""", unsafe_allow_html=True)
 
+    # ── Paper Trades ──────────────────────────────────────────────────────────
+    st.markdown('<div class="sh" style="margin-top:16px;">📝 Paper Trades</div>', unsafe_allow_html=True)
+    try:
+        from db.database import get_paper_trades
+        pt_df = get_paper_trades(days=30)
+        if pt_df.empty:
+            st.markdown('<div style="color:#1e3a52;font-size:0.78em;font-family:\'JetBrains Mono\',monospace;padding:8px 0;">No paper trades logged yet — trades are logged automatically on gap-up and VWAP reclaim alerts.</div>', unsafe_allow_html=True)
+        else:
+            closed = pt_df[pt_df["outcome"] != "open"]
+            wins   = len(closed[closed["outcome"] == "win"])
+            losses = len(closed[closed["outcome"] == "loss"])
+            total  = wins + losses
+            wr     = wins / total * 100 if total > 0 else 0
+            avg_pnl = closed["pnl_pct"].mean() if not closed.empty else 0
+
+            pm1, pm2, pm3, pm4 = st.columns(4)
+            pm1.metric("Open Trades",  len(pt_df[pt_df["outcome"] == "open"]))
+            pm2.metric("Win Rate",     f"{wr:.0f}%"  if total > 0 else "—")
+            pm3.metric("Closed W/L",   f"{wins}W / {losses}L")
+            pm4.metric("Avg P&L",      f"{avg_pnl:+.1f}%" if total > 0 else "—")
+
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            for _, tr in pt_df.head(20).iterrows():
+                outcome  = tr["outcome"]
+                o_color  = {"win": "#00e87a", "loss": "#ff2d55", "open": "#ffb700"}.get(outcome, "#3a5878")
+                o_emoji  = {"win": "✅", "loss": "❌", "open": "⏳"}.get(outcome, "—")
+                sig_map  = {"gap_up": "GAP UP", "vwap_reclaim": "VWAP RECLAIM"}
+                sig_label = sig_map.get(tr["signal_type"], tr["signal_type"].upper())
+                pnl_str  = f"{tr['pnl_pct']:+.1f}%" if pd.notna(tr.get("pnl_pct")) else "—"
+                exit_str = f"→ ${tr['exit_price']:.4f}" if pd.notna(tr.get("exit_price")) else ""
+                st.markdown(f"""
+                <div style="display:flex;align-items:center;gap:10px;padding:6px 10px;
+                            border-left:2px solid {o_color}40;background:{o_color}08;
+                            border-radius:0 5px 5px 0;margin-bottom:3px;flex-wrap:wrap;">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.75em;color:#5ba3d9;font-weight:600;min-width:50px;">{tr['ticker']}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.65em;color:#2a4060;background:rgba(255,255,255,0.04);padding:1px 6px;border-radius:3px;">{sig_label}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#3a5878;">${tr['entry_price']:.4f} {exit_str}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.65em;color:#1e3a52;">stop ${tr['stop_price']:.4f} · t1 ${tr['target1']:.4f}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:{o_color};font-weight:600;margin-left:auto;">{o_emoji} {pnl_str}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.62em;color:#0e2040;">{tr['trade_date']} {tr['entry_time']}</span>
+                </div>""", unsafe_allow_html=True)
+    except Exception as e:
+        st.markdown(f'<div style="color:#1e3a52;font-size:0.75em;font-family:\'JetBrains Mono\',monospace;">Paper trades unavailable: {e}</div>', unsafe_allow_html=True)
+
     # Setup instructions
     with st.expander("⚙️ Setup Instructions — How to activate real-time alerts"):
         st.markdown("""

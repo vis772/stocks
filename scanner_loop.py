@@ -508,6 +508,16 @@ def _check_vwap_alerts(
             msg   = f"{emoji} {ticker} crossed {direction} VWAP ${vwap:.4f}"
             state.log_alert(msg)
             fired.append(msg)
+            # Log paper trade on VWAP reclaim (bullish cross only)
+            if is_above:
+                try:
+                    from db.database import log_paper_trade
+                    log_paper_trade(ticker, "vwap_reclaim", price,
+                                    round(price * 0.95, 4),
+                                    round(price * 1.08, 4),
+                                    round(price * 1.15, 4))
+                except Exception:
+                    pass
 
     # Extended above VWAP — once per hour
     if is_above and vwap > 0:
@@ -633,6 +643,15 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 state.mark_alerted(gap_key)
                 state.log_alert(f"🚀 {ticker} gap-up {change_pct:+.1f}%")
                 fired.append(f"🚀 {ticker} gap-up {change_pct:+.1f}%")
+                # Log paper trade: entry at current price, stop -7%, targets +10% / +20%
+                try:
+                    from db.database import log_paper_trade
+                    log_paper_trade(ticker, "gap_up", price,
+                                    round(price * 0.93, 4),
+                                    round(price * 1.10, 4),
+                                    round(price * 1.20, 4))
+                except Exception:
+                    pass
             elif change_pct <= -GAP_UP_THRESHOLD:
                 send_alert(
                     title=f"📉 {ticker} Gap-Down {change_pct:.1f}%",
@@ -885,6 +904,15 @@ def run_scanner():
                         state.log_alert("📊 EOD report generated and sent")
                     except Exception as e:
                         print(f"  [EOD] Failed: {e}")
+                    # Close open paper trades using last known prices
+                    try:
+                        from db.database import close_paper_trades_eod
+                        close_paper_trades_eod(
+                            {t: p for t, p in state.last_prices.items() if p > 0}
+                        )
+                        print("  ✓ Paper trades closed for EOD")
+                    except Exception as e:
+                        print(f"  [paper] EOD close failed: {e}")
 
                 if et.hour == 6 and et.minute < 5:
                     eod_report_sent = False
