@@ -725,8 +725,9 @@ def render_deep_dive(r):
         st.warning(f"{r['ticker']} filtered out: {r.get('filter_reason')}")
         return
 
+    import html as _html
     ticker  = r["ticker"]
-    name    = r.get("company_name", ticker)
+    name    = _html.escape(r.get("company_name", ticker))
     price   = r.get("price", 0)
     signal  = r.get("signal", "—")
     score   = r.get("final_score", 0)
@@ -761,7 +762,7 @@ def render_deep_dive(r):
           <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;">
             <span style="font-size:2.2em;font-weight:700;color:var(--t1);letter-spacing:-0.02em;font-family:'JetBrains Mono',monospace;">{fp(price)}</span>
             <span style="font-size:1em;font-weight:600;color:{ret_c};font-family:'JetBrains Mono',monospace;">{ret_arr} {abs(ret1d):.2f}%</span>
-            <span style="font-size:0.85em;color:{sc};font-family:'JetBrains Mono',monospace;font-weight:500;">{score:.0f}<span style="color:var(--t3);font-weight:400;">/100</span></span>
+            <span style="font-size:0.85em;color:{sc};font-family:'JetBrains Mono',monospace;font-weight:500;">{score:.0f}/100</span>
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -1251,13 +1252,15 @@ with tab3:
     if run_dive and dive_ticker:
         with st.spinner(f"Running full analysis on {dive_ticker}..."):
             result = scan_ticker(dive_ticker, save=False)
-            st.session_state["dive_result"] = result
-            st.session_state["dive_ticker"] = dive_ticker
+            if result:
+                st.session_state["dive_result"] = result
+                st.session_state["dive_ticker"] = dive_ticker
+            else:
+                st.error(f"Could not fetch data for {dive_ticker}. Check the ticker and try again.")
 
     dive_res = st.session_state.get("dive_result")
-    dive_key = st.session_state.get("dive_ticker","")
 
-    if dive_res and dive_key == dive_ticker and dive_ticker:
+    if dive_res:
         render_deep_dive(dive_res)
     elif not dive_ticker:
         st.markdown("""
