@@ -135,8 +135,13 @@ def _init_postgres():
     """)
 
     # Migration-safe: add new columns to existing deployments
-    cur.execute("ALTER TABLE scanner_state ADD COLUMN IF NOT EXISTS vwap_snapshot     TEXT DEFAULT '{}'")
-    cur.execute("ALTER TABLE scanner_state ADD COLUMN IF NOT EXISTS momentum_ranking  TEXT DEFAULT '[]'")
+    for ddl in [
+        "ALTER TABLE scanner_state  ADD COLUMN IF NOT EXISTS vwap_snapshot     TEXT DEFAULT '{}'",
+        "ALTER TABLE scanner_state  ADD COLUMN IF NOT EXISTS momentum_ranking  TEXT DEFAULT '[]'",
+        "ALTER TABLE paper_trades   ADD COLUMN IF NOT EXISTS source_type       TEXT DEFAULT 'signal'",
+        "ALTER TABLE paper_trades   ADD COLUMN IF NOT EXISTS score_at_entry    REAL",
+    ]:
+        cur.execute(ddl)
 
     conn.commit()
     cur.close()
@@ -235,6 +240,8 @@ def _init_sqlite():
     for col_sql in [
         "ALTER TABLE scanner_state ADD COLUMN vwap_snapshot    TEXT DEFAULT '{}'",
         "ALTER TABLE scanner_state ADD COLUMN momentum_ranking TEXT DEFAULT '[]'",
+        "ALTER TABLE paper_trades  ADD COLUMN source_type      TEXT DEFAULT 'signal'",
+        "ALTER TABLE paper_trades  ADD COLUMN score_at_entry   REAL",
     ]:
         try:
             cur.execute(col_sql)
@@ -611,7 +618,8 @@ def save_scanner_state(state_dict: dict):
 # ─── Paper Trades ──────────────────────────────────────────────────────────────
 
 def log_paper_trade(ticker: str, signal_type: str, entry_price: float,
-                    stop_price: float, target1: float, target2: float) -> Optional[int]:
+                    stop_price: float, target1: float, target2: float,
+                    source_type: str = "signal", score_at_entry: float = None) -> Optional[int]:
     """Log a new paper trade entry. Returns the row id or None on failure."""
     trade_date = datetime.now().strftime("%Y-%m-%d")
     entry_time = datetime.now().strftime("%H:%M ET")
@@ -622,10 +630,10 @@ def log_paper_trade(ticker: str, signal_type: str, entry_price: float,
             cur.execute("""
                 INSERT INTO paper_trades
                     (trade_date, ticker, signal_type, entry_price, stop_price,
-                     target1, target2, entry_time)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                     target1, target2, entry_time, source_type, score_at_entry)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
             """, (trade_date, ticker, signal_type, entry_price, stop_price,
-                  target1, target2, entry_time))
+                  target1, target2, entry_time, source_type, score_at_entry))
             row_id = cur.fetchone()[0]
             conn.commit(); cur.close(); conn.close()
             return row_id
@@ -635,10 +643,10 @@ def log_paper_trade(ticker: str, signal_type: str, entry_price: float,
             cur.execute("""
                 INSERT INTO paper_trades
                     (trade_date, ticker, signal_type, entry_price, stop_price,
-                     target1, target2, entry_time)
-                VALUES (?,?,?,?,?,?,?,?)
+                     target1, target2, entry_time, source_type, score_at_entry)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
             """, (trade_date, ticker, signal_type, entry_price, stop_price,
-                  target1, target2, entry_time))
+                  target1, target2, entry_time, source_type, score_at_entry))
             row_id = cur.lastrowid
             conn.commit(); conn.close()
             return row_id
@@ -659,15 +667,18 @@ def close_paper_trades_eod(exit_prices: dict):
             conn = _get_pg_conn()
             cur  = conn.cursor()
             cur.execute("""
-                SELECT id, ticker, entry_price, stop_price, target1
-                FROM paper_trades
-                WHERE trade_date = %s AND outcome = 'open'
+                SELECT id, ticker, entry_price, stop_price, target1, source_type
+                FROM paper_trades WHERE trade_date = %s AND outcome = 'open'
             """, (trade_date,))
             rows = cur.fetchall()
-            for row_id, ticker, entry, stop, t1 in rows:
-                exit_p = exit_prices.get(ticker, entry)
-                pnl    = (exit_p - entry) / entry * 100
-                outcome = "win" if exit_p >= t1 else "loss" if exit_p <= stop else "open"
+            for row_id, ticker, entry, stop, t1, src in rows:
+                exit_p  = exit_prices.get(ticker, entry)
+                is_short = src == "prediction_sell"
+                pnl     = (exit_p - entry) / entry * 100 * (-1 if is_short else 1)
+                if is_short:
+                    outcome = "win" if exit_p <= t1 else "loss" if exit_p >= stop else "open"
+                else:
+                    outcome = "win" if exit_p >= t1 else "loss" if exit_p <= stop else "open"
                 cur.execute("""
                     UPDATE paper_trades
                     SET exit_price=%s, exit_time=%s, outcome=%s, pnl_pct=%s
@@ -678,14 +689,18 @@ def close_paper_trades_eod(exit_prices: dict):
             conn = _get_sqlite_conn()
             cur  = conn.cursor()
             cur.execute("""
-                SELECT id, ticker, entry_price, stop_price, target1
+                SELECT id, ticker, entry_price, stop_price, target1, source_type
                 FROM paper_trades WHERE trade_date=? AND outcome='open'
             """, (trade_date,))
             rows = cur.fetchall()
-            for row_id, ticker, entry, stop, t1 in rows:
-                exit_p = exit_prices.get(ticker, entry)
-                pnl    = (exit_p - entry) / entry * 100
-                outcome = "win" if exit_p >= t1 else "loss" if exit_p <= stop else "open"
+            for row_id, ticker, entry, stop, t1, src in rows:
+                exit_p   = exit_prices.get(ticker, entry)
+                is_short = (src or "") == "prediction_sell"
+                pnl      = (exit_p - entry) / entry * 100 * (-1 if is_short else 1)
+                if is_short:
+                    outcome = "win" if exit_p <= t1 else "loss" if exit_p >= stop else "open"
+                else:
+                    outcome = "win" if exit_p >= t1 else "loss" if exit_p <= stop else "open"
                 cur.execute("""
                     UPDATE paper_trades
                     SET exit_price=?, exit_time=?, outcome=?, pnl_pct=?
@@ -696,35 +711,44 @@ def close_paper_trades_eod(exit_prices: dict):
         print(f"  [db] EOD paper trade close failed: {e}")
 
 
+_PAPER_TRADE_COLS = [
+    "id", "trade_date", "ticker", "signal_type", "entry_price", "stop_price",
+    "target1", "target2", "entry_time", "exit_price", "exit_time",
+    "outcome", "pnl_pct", "source_type", "score_at_entry",
+]
+
+
 def get_paper_trades(days: int = 30) -> pd.DataFrame:
     """Return paper trades from the last N days, most recent first."""
     try:
+        col_list = ", ".join(_PAPER_TRADE_COLS)
         if _is_postgres():
             conn = _get_pg_conn()
             cur  = conn.cursor()
-            cur.execute("""
-                SELECT id, trade_date, ticker, signal_type, entry_price, stop_price,
-                       target1, target2, entry_time, exit_price, exit_time, outcome, pnl_pct
+            cur.execute(f"""
+                SELECT {col_list}
                 FROM paper_trades
-                WHERE trade_date >= NOW() - INTERVAL '%s days'
+                WHERE trade_date >= NOW() - INTERVAL '{days} days'
                 ORDER BY created_at DESC
-            """, (days,))
+            """)
             rows = cur.fetchall()
-            cols = ["id","trade_date","ticker","signal_type","entry_price","stop_price",
-                    "target1","target2","entry_time","exit_price","exit_time","outcome","pnl_pct"]
             cur.close(); conn.close()
-            return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+            df = pd.DataFrame(rows, columns=_PAPER_TRADE_COLS) if rows else pd.DataFrame(columns=_PAPER_TRADE_COLS)
         else:
             conn = _get_sqlite_conn()
             df = pd.read_sql(f"""
-                SELECT id, trade_date, ticker, signal_type, entry_price, stop_price,
-                       target1, target2, entry_time, exit_price, exit_time, outcome, pnl_pct
+                SELECT {col_list}
                 FROM paper_trades
                 WHERE date(trade_date) >= date('now', '-{days} days')
                 ORDER BY created_at DESC
             """, conn)
             conn.close()
-            return df
+        # Fallback: ensure source_type column exists even on old DBs
+        if "source_type" not in df.columns:
+            df["source_type"] = "signal"
+        if "score_at_entry" not in df.columns:
+            df["score_at_entry"] = None
+        return df
     except Exception as e:
         print(f"  [db] Paper trades load failed: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=_PAPER_TRADE_COLS)
