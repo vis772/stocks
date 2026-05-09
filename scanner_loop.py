@@ -90,26 +90,27 @@ class ScannerState:
 
     def _load(self):
         try:
-            with open(STATE_FILE) as f:
-                data = json.load(f)
+            from db.database import load_scanner_state
+            data = load_scanner_state()
             if data.get("date") == now_et().strftime("%Y-%m-%d"):
                 self.alerted_today = set(data.get("alerted_today", []))
                 self.known_filings = set(data.get("known_filings", []))
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+                self.scan_count    = data.get("scan_count", 0)
+        except Exception as e:
+            print(f"  [state] Load failed: {e}")
 
     def save(self):
         try:
-            with open(STATE_FILE, "w") as f:
-                json.dump({
-                    "date":          now_et().strftime("%Y-%m-%d"),
-                    "alerted_today": list(self.alerted_today),
-                    "known_filings": list(self.known_filings),
-                    "scan_count":    self.scan_count,
-                    "last_updated":  now_et().isoformat(),
-                }, f, indent=2)
-        except Exception:
-            pass
+            from db.database import save_scanner_state
+            save_scanner_state({
+                "date":          now_et().strftime("%Y-%m-%d"),
+                "alerted_today": list(self.alerted_today),
+                "known_filings": list(self.known_filings),
+                "scan_count":    self.scan_count,
+                "last_updated":  now_et().isoformat(),
+            })
+        except Exception as e:
+            print(f"  [state] Save failed: {e}")
 
     def already_alerted(self, key: str) -> bool:
         return key in self.alerted_today
@@ -120,12 +121,23 @@ class ScannerState:
 
     def log_alert(self, msg: str):
         et = now_et()
-        self.alert_log.append(f"{et.strftime('%H:%M ET')} {msg}")
+        full_msg = f"{et.strftime('%H:%M ET')} {msg}"
+        self.alert_log.append(full_msg)
         if len(self.alert_log) > 100:
             self.alert_log = self.alert_log[-100:]
+        # Save to shared DB so dashboard can read it
+        try:
+            from db.database import save_alert
+            # Extract ticker from message if present
+            ticker = msg.split(" ")[1] if len(msg.split(" ")) > 1 else ""
+            save_alert(msg, ticker=ticker)
+        except Exception:
+            pass
+        # Also write local JSON as fallback
         try:
             with open("alert_log.json", "w") as f:
-                json.dump(self.alert_log, f)
+                import json as _json
+                _json.dump(self.alert_log, f)
         except Exception:
             pass
 
