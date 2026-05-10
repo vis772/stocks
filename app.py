@@ -1063,7 +1063,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Info"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info"])
 
 
 # ── TAB 1: SCANNER ────────────────────────────────────────────────────────────
@@ -1678,6 +1678,180 @@ with tab5:
 
 # ── TAB 6: INFO ───────────────────────────────────────────────────────────────
 with tab6:
+    # ── Accuracy Tab ──────────────────────────────────────────────────────────
+    st.markdown('<div class="sh" style="margin-top:4px;">Signal Accuracy Tracker</div>', unsafe_allow_html=True)
+
+    try:
+        from db.database import get_signal_log, get_signal_stats
+        stats  = get_signal_stats()
+        sig_df = get_signal_log(days=30)
+    except Exception as _acc_e:
+        stats  = {}
+        sig_df = pd.DataFrame()
+        st.error(f"Could not load accuracy data: {_acc_e}")
+
+    total    = stats.get("total", 0)
+    resolved = stats.get("resolved", 0)
+
+    if total == 0:
+        st.markdown("""
+        <div class="empty">
+          <div class="ico">--</div>
+          <h3>NO SIGNALS LOGGED YET</h3>
+          <p>The scanner logs prediction_buy / prediction_sell signals automatically.<br>
+          Outcomes fill in over 1hr / 1day / 5day windows via yfinance.</p>
+        </div>""", unsafe_allow_html=True)
+    else:
+        need_more = resolved < 20
+        if need_more:
+            st.markdown(
+                f'<div class="box box-amber" style="margin-bottom:14px;">'
+                f'Only {resolved} resolved signal(s) so far — statistics become reliable after 20+. '
+                f'Pending signals fill in automatically each hour during market hours.</div>',
+                unsafe_allow_html=True
+            )
+
+        # ── Top metrics ───────────────────────────────────────────────────────
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        wr = stats.get("overall_win_rate")
+        ag = stats.get("avg_5day_gain")
+        mc1.metric("Total Signals", total)
+        mc2.metric("Resolved (5-day)", resolved)
+        mc3.metric("Overall Win Rate", f"{wr:.1f}%" if wr is not None else "—")
+        mc4.metric("Avg 5-day Gain (wins)", f"{ag:+.2f}%" if ag is not None else "—")
+
+        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+        # ── Win rate by signal type ────────────────────────────────────────────
+        by_signal = stats.get("by_signal", {})
+        if by_signal:
+            st.markdown('<div class="sh">Win Rate by Signal Type</div>', unsafe_allow_html=True)
+            _order = ["Strong Buy Candidate", "Speculative Buy", "Gap-Up", "Watchlist",
+                      "Hold", "Trim", "Sell", "Avoid"]
+            rows_html = ""
+            for lbl in _order + [l for l in by_signal if l not in _order]:
+                d = by_signal.get(lbl)
+                if not d:
+                    continue
+                wr_v = d["win_rate"]
+                if wr_v >= 55:
+                    badge_cls = "wr-good"
+                elif wr_v <= 40:
+                    badge_cls = "wr-bad"
+                else:
+                    badge_cls = "wr-neu"
+                ag_v  = d["avg_gain"]
+                al_v  = d["avg_loss"]
+                ag_s  = f'+{ag_v:.1f}%' if ag_v is not None else "—"
+                al_s  = f'{al_v:.1f}%'  if al_v is not None else "—"
+                rows_html += (
+                    f'<div class="stat-row">'
+                    f'<span class="slbl" style="width:180px;flex-shrink:0;">{lbl}</span>'
+                    f'<span class="sval" style="width:60px;text-align:center;">{d["count"]}</span>'
+                    f'<span style="width:110px;">'
+                    f'<span class="wr-badge {badge_cls}">{wr_v:.1f}%</span>'
+                    f'</span>'
+                    f'<span class="sval g" style="width:80px;">{ag_s}</span>'
+                    f'<span class="sval r" style="width:80px;">{al_s}</span>'
+                    f'</div>'
+                )
+            st.markdown(
+                '<div style="background:var(--bgcard);border:1px solid var(--border);border-radius:8px;padding:10px 16px;">'
+                + '<div class="stat-row" style="margin-bottom:4px;">'
+                + '<span class="slbl" style="width:180px;font-weight:600;">Signal Type</span>'
+                + '<span class="slbl" style="width:60px;text-align:center;"># Signals</span>'
+                + '<span class="slbl" style="width:110px;">Win Rate</span>'
+                + '<span class="slbl" style="width:80px;">Avg Gain</span>'
+                + '<span class="slbl" style="width:80px;">Avg Loss</span>'
+                + '</div>'
+                + rows_html
+                + '</div>',
+                unsafe_allow_html=True
+            )
+
+        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+        # ── Component correlation bar chart ────────────────────────────────────
+        comp_corr = stats.get("component_corr", {})
+        if comp_corr and resolved >= 5:
+            st.markdown('<div class="sh">Component Score: Wins vs Losses (5-day avg)</div>', unsafe_allow_html=True)
+            comp_names = ["technical", "catalyst", "fundamental", "risk", "sentiment"]
+            win_means  = [comp_corr.get(c, {}).get("win_mean")  for c in comp_names]
+            loss_means = [comp_corr.get(c, {}).get("loss_mean") for c in comp_names]
+            fig_corr = go.Figure()
+            fig_corr.add_trace(go.Bar(
+                name="Wins",
+                x=[c.title() for c in comp_names],
+                y=win_means,
+                marker_color="rgba(22,163,74,0.7)",
+                text=[f"{v:.1f}" if v is not None else "" for v in win_means],
+                textposition="outside",
+            ))
+            fig_corr.add_trace(go.Bar(
+                name="Losses",
+                x=[c.title() for c in comp_names],
+                y=loss_means,
+                marker_color="rgba(220,38,38,0.7)",
+                text=[f"{v:.1f}" if v is not None else "" for v in loss_means],
+                textposition="outside",
+            ))
+            fig_corr.update_layout(
+                barmode="group",
+                height=300,
+                margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Inter", size=11, color="#334155"),
+                legend=dict(orientation="h", y=1.12, x=0),
+                yaxis=dict(range=[0, 100], gridcolor="rgba(0,0,0,0.06)"),
+                xaxis=dict(showgrid=False),
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+        # ── Recent signal log with outcomes ───────────────────────────────────
+        st.markdown('<div class="sh">Recent Signals (30 days)</div>', unsafe_allow_html=True)
+        if sig_df.empty:
+            st.markdown('<div class="box">No signals logged yet.</div>', unsafe_allow_html=True)
+        else:
+            _outcome_color = {"win": "#16a34a", "loss": "#dc2626", "neutral": "#94a3b8", "pending": "#c2610f"}
+            rows_html = ""
+            for _, row in sig_df.head(40).iterrows():
+                ol  = row.get("outcome_label") or "pending"
+                col = _outcome_color.get(ol, "#94a3b8")
+                p5  = row.get("pct_change_5day")
+                p5s = f'{p5:+.1f}%' if p5 is not None and not (isinstance(p5, float) and p5 != p5) else "—"
+                p1  = row.get("pct_change_1day")
+                p1s = f'{p1:+.1f}%' if p1 is not None and not (isinstance(p1, float) and p1 != p1) else "—"
+                ts  = str(row.get("created_at", ""))[:16]
+                rows_html += (
+                    f'<div class="stat-row">'
+                    f'<span class="sval b" style="width:60px;">{row["ticker"]}</span>'
+                    f'<span class="slbl" style="width:170px;">{row.get("signal_label","")}</span>'
+                    f'<span class="sval" style="width:50px;">{row.get("score","")}</span>'
+                    f'<span style="width:80px;font-family:\'JetBrains Mono\',monospace;font-size:0.72em;color:{col};font-weight:600;">{ol.upper()}</span>'
+                    f'<span class="sval" style="width:70px;color:{"#16a34a" if p5 and p5 > 0 else "#dc2626" if p5 and p5 < 0 else "#94a3b8"};">{p5s}</span>'
+                    f'<span class="sval" style="width:70px;color:{"#16a34a" if p1 and p1 > 0 else "#dc2626" if p1 and p1 < 0 else "#94a3b8"};">{p1s}</span>'
+                    f'<span class="slbl" style="width:110px;text-align:right;">{ts}</span>'
+                    f'</div>'
+                )
+            st.markdown(
+                '<div style="background:var(--bgcard);border:1px solid var(--border);border-radius:8px;padding:10px 16px;">'
+                + '<div class="stat-row" style="margin-bottom:4px;">'
+                + '<span class="slbl" style="width:60px;">Ticker</span>'
+                + '<span class="slbl" style="width:170px;">Signal</span>'
+                + '<span class="slbl" style="width:50px;">Score</span>'
+                + '<span class="slbl" style="width:80px;">Outcome</span>'
+                + '<span class="slbl" style="width:70px;">5-day %</span>'
+                + '<span class="slbl" style="width:70px;">1-day %</span>'
+                + '<span class="slbl" style="width:110px;text-align:right;">Time</span>'
+                + '</div>'
+                + rows_html
+                + '</div>',
+                unsafe_allow_html=True
+            )
+
+
+with tab7:
     st.markdown("""
 ## How Axiom Terminal Works
 

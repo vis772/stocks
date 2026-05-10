@@ -656,11 +656,20 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 fired.append(f"{ticker} gap-up {change_pct:+.1f}%")
                 # Log paper trade: entry at current price, stop -7%, targets +10% / +20%
                 try:
-                    from db.database import log_paper_trade
+                    from db.database import log_paper_trade, log_signal
                     log_paper_trade(ticker, "gap_up", price,
                                     round(price * 0.93, 4),
                                     round(price * 1.10, 4),
                                     round(price * 1.20, 4))
+                    log_signal(
+                        ticker           = ticker,
+                        signal_label     = "Gap-Up",
+                        score            = round(change_pct, 1),
+                        score_breakdown  = {},
+                        price_at_signal  = price,
+                        volume_at_signal = volume,
+                        alert_type       = "gap_up",
+                    )
                 except Exception:
                     pass
             elif change_pct <= -GAP_UP_THRESHOLD:
@@ -859,6 +868,25 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
                 t2    = result.get("target_2")   or round(price * 1.20, 4)
                 log_paper_trade(ticker, "prediction_buy", price, stop_, t1, t2,
                                 source_type="prediction_buy", score_at_entry=round(score, 1))
+                try:
+                    from db.database import log_signal
+                    log_signal(
+                        ticker       = ticker,
+                        signal_label = result.get("signal", "Strong Buy Candidate"),
+                        score        = round(score, 1),
+                        score_breakdown = {
+                            "technical":   result.get("technical_score", 0),
+                            "catalyst":    result.get("catalyst_score", 0),
+                            "fundamental": result.get("fundamental_score", 0),
+                            "risk":        result.get("risk_score", 0),
+                            "sentiment":   result.get("sentiment_score", 0),
+                        },
+                        price_at_signal  = price,
+                        volume_at_signal = result.get("volume", 0),
+                        alert_type       = "prediction_buy",
+                    )
+                except Exception as _e:
+                    print(f"  [prediction] signal_log failed: {_e}")
                 state.log_alert(f"PRED BUY {ticker} ({score:.0f}pt)")
                 print(f"  [prediction] 📈 BUY {ticker} score={score:.0f}")
 
@@ -868,6 +896,25 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
                 s_t2   = round(price * 0.80, 4)
                 log_paper_trade(ticker, "prediction_sell", price, s_stop, s_t1, s_t2,
                                 source_type="prediction_sell", score_at_entry=round(score, 1))
+                try:
+                    from db.database import log_signal
+                    log_signal(
+                        ticker       = ticker,
+                        signal_label = result.get("signal", "Sell"),
+                        score        = round(score, 1),
+                        score_breakdown = {
+                            "technical":   result.get("technical_score", 0),
+                            "catalyst":    result.get("catalyst_score", 0),
+                            "fundamental": result.get("fundamental_score", 0),
+                            "risk":        result.get("risk_score", 0),
+                            "sentiment":   result.get("sentiment_score", 0),
+                        },
+                        price_at_signal  = price,
+                        volume_at_signal = result.get("volume", 0),
+                        alert_type       = "prediction_sell",
+                    )
+                except Exception as _e:
+                    print(f"  [prediction] signal_log failed: {_e}")
                 state.log_alert(f"PRED SELL {ticker} ({score:.0f}pt)")
                 print(f"  [prediction] 📉 SELL {ticker} score={score:.0f}")
 
@@ -887,6 +934,12 @@ def run_scanner():
     eod_report_sent    = False
     news_thread        = None
     last_screen_date: Optional[str] = None
+
+    try:
+        from analysis.outcome_tracker import start_outcome_tracker
+        start_outcome_tracker()
+    except Exception as _e:
+        print(f"  [scanner] outcome tracker failed to start: {_e}")
 
     while True:
         try:

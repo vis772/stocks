@@ -134,6 +134,35 @@ def _init_postgres():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS signal_log (
+            id               SERIAL PRIMARY KEY,
+            ticker           TEXT NOT NULL,
+            signal_label     TEXT NOT NULL,
+            score            REAL,
+            score_breakdown  TEXT,
+            price_at_signal  REAL,
+            volume_at_signal REAL,
+            alert_type       TEXT,
+            created_at       TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS signal_outcomes (
+            id                 SERIAL PRIMARY KEY,
+            signal_id          INTEGER REFERENCES signal_log(id),
+            price_1hr          REAL,
+            price_1day         REAL,
+            price_5day         REAL,
+            pct_change_1hr     REAL,
+            pct_change_1day    REAL,
+            pct_change_5day    REAL,
+            outcome_label      TEXT DEFAULT 'pending',
+            outcome_updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
     # Migration-safe: add new columns to existing deployments
     for ddl in [
         "ALTER TABLE scanner_state  ADD COLUMN IF NOT EXISTS vwap_snapshot     TEXT DEFAULT '{}'",
@@ -234,6 +263,35 @@ def _init_sqlite():
             outcome      TEXT DEFAULT 'open',
             pnl_pct      REAL,
             created_at   TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS signal_log (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker           TEXT NOT NULL,
+            signal_label     TEXT NOT NULL,
+            score            REAL,
+            score_breakdown  TEXT,
+            price_at_signal  REAL,
+            volume_at_signal REAL,
+            alert_type       TEXT,
+            created_at       TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS signal_outcomes (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id          INTEGER REFERENCES signal_log(id),
+            price_1hr          REAL,
+            price_1day         REAL,
+            price_5day         REAL,
+            pct_change_1hr     REAL,
+            pct_change_1day    REAL,
+            pct_change_5day    REAL,
+            outcome_label      TEXT DEFAULT 'pending',
+            outcome_updated_at TEXT DEFAULT (datetime('now'))
         )
     """)
 
@@ -752,3 +810,250 @@ def get_paper_trades(days: int = 30) -> pd.DataFrame:
     except Exception as e:
         print(f"  [db] Paper trades load failed: {e}")
         return pd.DataFrame(columns=_PAPER_TRADE_COLS)
+
+
+# ─── Signal Log ────────────────────────────────────────────────────────────────
+
+def log_signal(ticker: str, signal_label: str, score: float,
+               score_breakdown: dict, price_at_signal: float,
+               volume_at_signal: float, alert_type: str) -> Optional[int]:
+    """Log a scanner signal. Returns the signal_log row id or None on failure."""
+    breakdown_json = json.dumps(score_breakdown)
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                INSERT INTO signal_log
+                    (ticker, signal_label, score, score_breakdown,
+                     price_at_signal, volume_at_signal, alert_type)
+                VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (ticker, signal_label, score, breakdown_json,
+                  price_at_signal, volume_at_signal, alert_type))
+            sig_id = cur.fetchone()[0]
+            # Insert a pending outcome row so the tracker can find it
+            cur.execute("""
+                INSERT INTO signal_outcomes (signal_id) VALUES (%s)
+            """, (sig_id,))
+            conn.commit(); cur.close(); conn.close()
+            return sig_id
+        else:
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                INSERT INTO signal_log
+                    (ticker, signal_label, score, score_breakdown,
+                     price_at_signal, volume_at_signal, alert_type)
+                VALUES (?,?,?,?,?,?,?)
+            """, (ticker, signal_label, score, breakdown_json,
+                  price_at_signal, volume_at_signal, alert_type))
+            sig_id = cur.lastrowid
+            cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (?)", (sig_id,))
+            conn.commit(); conn.close()
+            return sig_id
+    except Exception as e:
+        print(f"  [db] Signal log failed: {e}")
+        return None
+
+
+def get_pending_signals(max_age_days: int = 8) -> List[dict]:
+    """Return signal_log rows whose outcomes are still incomplete (missing 5-day price)."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT sl.id, sl.ticker, sl.price_at_signal, sl.created_at,
+                       so.price_1hr, so.price_1day, so.price_5day
+                FROM signal_log sl
+                JOIN signal_outcomes so ON so.signal_id = sl.id
+                WHERE so.price_5day IS NULL
+                  AND sl.created_at >= NOW() - INTERVAL '%s days'
+                ORDER BY sl.created_at ASC
+            """, (max_age_days,))
+            rows = cur.fetchall()
+            cur.close(); conn.close()
+            return [{"id": r[0], "ticker": r[1], "price_at_signal": r[2],
+                     "created_at": r[3], "price_1hr": r[4],
+                     "price_1day": r[5], "price_5day": r[6]} for r in rows]
+        else:
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT sl.id, sl.ticker, sl.price_at_signal, sl.created_at,
+                       so.price_1hr, so.price_1day, so.price_5day
+                FROM signal_log sl
+                JOIN signal_outcomes so ON so.signal_id = sl.id
+                WHERE so.price_5day IS NULL
+                  AND sl.created_at >= datetime('now', ?)
+                ORDER BY sl.created_at ASC
+            """, (f"-{max_age_days} days",))
+            rows = cur.fetchall()
+            conn.close()
+            return [{"id": r[0], "ticker": r[1], "price_at_signal": r[2],
+                     "created_at": r[3], "price_1hr": r[4],
+                     "price_1day": r[5], "price_5day": r[6]} for r in rows]
+    except Exception as e:
+        print(f"  [db] get_pending_signals failed: {e}")
+        return []
+
+
+def update_signal_outcome(signal_id: int, price_1hr: Optional[float] = None,
+                          price_1day: Optional[float] = None,
+                          price_5day: Optional[float] = None,
+                          price_at_signal: Optional[float] = None):
+    """Fill in available price outcomes and compute outcome_label when 5-day is known."""
+    try:
+        pct_1hr  = (price_1hr  / price_at_signal - 1) * 100 if price_1hr  and price_at_signal else None
+        pct_1day = (price_1day / price_at_signal - 1) * 100 if price_1day and price_at_signal else None
+        pct_5day = (price_5day / price_at_signal - 1) * 100 if price_5day and price_at_signal else None
+
+        if pct_5day is not None:
+            if pct_5day >= 5.0:
+                label = "win"
+            elif pct_5day <= -5.0:
+                label = "loss"
+            else:
+                label = "neutral"
+        else:
+            label = "pending"
+
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                UPDATE signal_outcomes SET
+                    price_1hr          = COALESCE(%s, price_1hr),
+                    price_1day         = COALESCE(%s, price_1day),
+                    price_5day         = COALESCE(%s, price_5day),
+                    pct_change_1hr     = COALESCE(%s, pct_change_1hr),
+                    pct_change_1day    = COALESCE(%s, pct_change_1day),
+                    pct_change_5day    = COALESCE(%s, pct_change_5day),
+                    outcome_label      = %s,
+                    outcome_updated_at = NOW()
+                WHERE signal_id = %s
+            """, (price_1hr, price_1day, price_5day,
+                  pct_1hr, pct_1day, pct_5day, label, signal_id))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("""
+                UPDATE signal_outcomes SET
+                    price_1hr          = COALESCE(?, price_1hr),
+                    price_1day         = COALESCE(?, price_1day),
+                    price_5day         = COALESCE(?, price_5day),
+                    pct_change_1hr     = COALESCE(?, pct_change_1hr),
+                    pct_change_1day    = COALESCE(?, pct_change_1day),
+                    pct_change_5day    = COALESCE(?, pct_change_5day),
+                    outcome_label      = ?,
+                    outcome_updated_at = datetime('now')
+                WHERE signal_id = ?
+            """, (price_1hr, price_1day, price_5day,
+                  pct_1hr, pct_1day, pct_5day, label, signal_id))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] update_signal_outcome failed: {e}")
+
+
+def get_signal_log(days: int = 30) -> pd.DataFrame:
+    """Return recent signal_log rows joined with outcomes for the dashboard."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT sl.id, sl.ticker, sl.signal_label, sl.score,
+                       sl.score_breakdown, sl.price_at_signal, sl.alert_type,
+                       sl.created_at,
+                       so.pct_change_1hr, so.pct_change_1day, so.pct_change_5day,
+                       so.outcome_label
+                FROM signal_log sl
+                LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
+                WHERE sl.created_at >= NOW() - INTERVAL '%s days'
+                ORDER BY sl.created_at DESC
+            """, (days,))
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            cur.close(); conn.close()
+            df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
+        else:
+            conn = _get_sqlite_conn()
+            df = pd.read_sql(f"""
+                SELECT sl.id, sl.ticker, sl.signal_label, sl.score,
+                       sl.score_breakdown, sl.price_at_signal, sl.alert_type,
+                       sl.created_at,
+                       so.pct_change_1hr, so.pct_change_1day, so.pct_change_5day,
+                       so.outcome_label
+                FROM signal_log sl
+                LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
+                WHERE sl.created_at >= datetime('now', '-{days} days')
+                ORDER BY sl.created_at DESC
+            """, conn)
+            conn.close()
+        if not df.empty and "score_breakdown" in df.columns:
+            df["score_breakdown"] = df["score_breakdown"].apply(
+                lambda x: json.loads(x) if x else {}
+            )
+        return df
+    except Exception as e:
+        print(f"  [db] get_signal_log failed: {e}")
+        return pd.DataFrame()
+
+
+def get_signal_stats() -> dict:
+    """Aggregate win-rate and component correlation stats for the Accuracy tab."""
+    try:
+        df = get_signal_log(days=90)
+        if df.empty or "outcome_label" not in df.columns:
+            return {}
+
+        resolved = df[df["outcome_label"].isin(["win", "loss", "neutral"])].copy()
+        if resolved.empty:
+            return {"total": len(df), "resolved": 0}
+
+        resolved["is_win"] = resolved["outcome_label"] == "win"
+
+        by_signal = {}
+        for label, grp in resolved.groupby("signal_label"):
+            wins = grp["is_win"].sum()
+            total = len(grp)
+            avg_gain = grp.loc[grp["is_win"], "pct_change_5day"].mean()
+            avg_loss = grp.loc[~grp["is_win"], "pct_change_5day"].mean()
+            by_signal[label] = {
+                "count":    total,
+                "wins":     int(wins),
+                "win_rate": round(wins / total * 100, 1),
+                "avg_gain": round(float(avg_gain), 2) if pd.notna(avg_gain) else None,
+                "avg_loss": round(float(avg_loss), 2) if pd.notna(avg_loss) else None,
+            }
+
+        # Component correlation: mean component score for wins vs losses
+        component_corr = {}
+        components = ["technical", "catalyst", "fundamental", "risk", "sentiment"]
+        for comp in components:
+            win_scores  = []
+            loss_scores = []
+            for _, row in resolved.iterrows():
+                bd = row.get("score_breakdown") or {}
+                val = bd.get(comp)
+                if val is None:
+                    continue
+                (win_scores if row["is_win"] else loss_scores).append(val)
+            if win_scores or loss_scores:
+                component_corr[comp] = {
+                    "win_mean":  round(sum(win_scores)  / len(win_scores),  1) if win_scores  else None,
+                    "loss_mean": round(sum(loss_scores) / len(loss_scores), 1) if loss_scores else None,
+                }
+
+        return {
+            "total":          len(df),
+            "resolved":       len(resolved),
+            "overall_win_rate": round(resolved["is_win"].mean() * 100, 1),
+            "avg_5day_gain":  round(float(resolved.loc[resolved["is_win"], "pct_change_5day"].mean()), 2)
+                              if resolved["is_win"].any() else None,
+            "by_signal":      by_signal,
+            "component_corr": component_corr,
+        }
+    except Exception as e:
+        print(f"  [db] get_signal_stats failed: {e}")
+        return {}
