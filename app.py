@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime
-import sys, os, time as _time
+import sys, os, time as _time, json
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -22,6 +22,23 @@ from core.scanner import scan_ticker, scan_universe
 from analysis.portfolio import analyze_holding, compute_portfolio_summary
 from data.market_data import fetch_ticker_snapshot, get_price_history, get_chart_data
 from analysis.technicals import compute_technicals
+
+_CONFIG_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_overrides.json")
+
+def _load_config_overrides():
+    if os.path.exists(_CONFIG_OVERRIDES_FILE):
+        try:
+            return json.load(open(_CONFIG_OVERRIDES_FILE))
+        except Exception:
+            pass
+    return {}
+
+def _save_config_overrides(data):
+    try:
+        with open(_CONFIG_OVERRIDES_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
 
 st.set_page_config(page_title="Axiom Terminal", page_icon="A", layout="wide", initial_sidebar_state="expanded")
 
@@ -1121,7 +1138,7 @@ with st.sidebar:
             for i, t in enumerate(tickers):
                 prog.progress((i+1)/len(tickers), text=f"Scanning {t}... {i+1}/{len(tickers)}")
                 try:
-                    res = scan_ticker(t)
+                    res = scan_ticker(t, weights=st.session_state.get("scoring_weights"))
                     if res: results.append(res)
                 except Exception:
                     pass
@@ -1160,10 +1177,15 @@ with st.sidebar:
         """, unsafe_allow_html=True)
 
 
+# ── Session-state: scoring weights (loaded from saved config or defaults) ─────
+if "scoring_weights" not in st.session_state:
+    _overrides = _load_config_overrides()
+    st.session_state["scoring_weights"] = _overrides.get("scoring_weights", dict(SCORING_WEIGHTS))
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info", "Config"])
 
 
 # ── TAB 1: SCANNER ────────────────────────────────────────────────────────────
@@ -1351,7 +1373,7 @@ with tab3:
 
     if run_dive and dive_ticker:
         with st.spinner(f"Running full analysis on {dive_ticker}..."):
-            result = scan_ticker(dive_ticker, save=False)
+            result = scan_ticker(dive_ticker, save=False, weights=st.session_state.get("scoring_weights"))
             if result:
                 st.session_state["dive_result"] = result
                 st.session_state["dive_ticker"] = dive_ticker
@@ -1952,19 +1974,25 @@ with tab6:
 
 
 with tab7:
-    st.markdown("""
+    _w = st.session_state.get("scoring_weights", SCORING_WEIGHTS)
+    _wt = int(round(_w["technical"]   * 100))
+    _wc = int(round(_w["catalyst"]    * 100))
+    _wf = int(round(_w["fundamental"] * 100))
+    _wr = int(round(_w["risk"]        * 100))
+    _ws = int(round(_w["sentiment"]   * 100))
+    st.markdown(f"""
 ## How Axiom Terminal Works
 
 ### Scoring Model
-Each stock scores 0–100 across five components. Edit `config.py` to change weights.
+Each stock scores 0–100 across five components. Adjust weights in the **Config** tab.
 
 | Component | Weight | What it measures |
 |-----------|--------|-----------------|
-| Technical | 30% | RSI, MACD, moving averages, volume, momentum |
-| Catalyst | 25% | SEC 8-K events, news, keyword signals |
-| Fundamental | 20% | Revenue growth, cash, burn rate, margins |
-| Risk (inverted) | 15% | Dilution, short interest, volatility, liquidity |
-| Sentiment | 10% | News tone, analyst coverage, hype detection |
+| Technical | {_wt}% | RSI, MACD, moving averages, volume, momentum |
+| Catalyst | {_wc}% | SEC 8-K events, news, keyword signals |
+| Fundamental | {_wf}% | Revenue growth, cash, burn rate, margins |
+| Risk (inverted) | {_wr}% | Dilution, short interest, volatility, liquidity |
+| Sentiment | {_ws}% | News tone, analyst coverage, hype detection |
 
 ### New Features
 - **Earnings Calendar** — flags stocks with earnings within 7 days (binary event warning)
@@ -2031,3 +2059,67 @@ Each stock scores 0–100 across five components. Edit `config.py` to change wei
             )
         except Exception as _adm_e:
             st.error(f"Admin panel error: {_adm_e}")
+
+
+# ── TAB 8: CONFIG ─────────────────────────────────────────────────────────────
+with tab8:
+    st.markdown('<div class="sh">Scoring Weights</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="color:var(--t3);font-size:0.82em;margin-bottom:16px;">'
+        'Drag each slider to set how much weight each component carries in the final 0–100 score. '
+        'Values are auto-normalized to 100% when you apply.</p>',
+        unsafe_allow_html=True,
+    )
+
+    _cur = st.session_state.get("scoring_weights", SCORING_WEIGHTS)
+
+    _sections = [
+        ("technical",   "Technical",       "RSI, MACD, moving averages, volume, momentum"),
+        ("catalyst",    "Catalyst",        "SEC 8-K events, news, insider activity"),
+        ("fundamental", "Fundamental",     "Revenue growth, cash runway, burn rate, margins"),
+        ("risk",        "Risk (inverted)", "Dilution, short interest, volatility, liquidity"),
+        ("sentiment",   "Sentiment",       "News tone, analyst coverage, hype detection"),
+    ]
+
+    _raw = {}
+    for _key, _label, _desc in _sections:
+        _raw[_key] = st.slider(
+            _label,
+            min_value=0, max_value=100,
+            value=int(round(_cur.get(_key, SCORING_WEIGHTS[_key]) * 100)),
+            help=_desc,
+            key=f"cfg_{_key}",
+        )
+
+    _total = sum(_raw.values())
+    _pct_color = "#16a34a" if _total == 100 else "#c2610f"
+    st.markdown(
+        f'<p style="font-size:0.83em;font-family:\'JetBrains Mono\',monospace;'
+        f'color:{_pct_color};font-weight:600;margin-top:4px;">'
+        f'Total: {_total}%'
+        f'{"" if _total == 100 else " — will be normalized to 100% on apply"}'
+        f'</p>',
+        unsafe_allow_html=True,
+    )
+
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        if st.button("Apply Weights", type="primary", use_container_width=True):
+            if _total == 0:
+                st.error("All weights are zero — set at least one above 0.")
+            else:
+                _normalized = {k: v / _total for k, v in _raw.items()}
+                st.session_state["scoring_weights"] = _normalized
+                _ov = _load_config_overrides()
+                _ov["scoring_weights"] = _normalized
+                _save_config_overrides(_ov)
+                st.success("Weights saved. Next scan will use these values.")
+                st.rerun()
+    with _c2:
+        if st.button("Reset to Defaults", use_container_width=True):
+            st.session_state["scoring_weights"] = dict(SCORING_WEIGHTS)
+            _ov = _load_config_overrides()
+            _ov.pop("scoring_weights", None)
+            _save_config_overrides(_ov)
+            st.success("Reset to config.py defaults.")
+            st.rerun()

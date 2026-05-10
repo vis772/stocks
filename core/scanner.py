@@ -13,7 +13,7 @@ from analysis.fundamentals import score_fundamentals, score_risk, score_catalyst
 from db.database import save_scan_result
 
 
-def scan_ticker(ticker: str, save: bool = True) -> Optional[Dict]:
+def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) -> Optional[Dict]:
     ticker = ticker.upper().strip()
     print(f"  → Scanning {ticker}...")
 
@@ -100,7 +100,7 @@ def scan_ticker(ticker: str, save: bool = True) -> Optional[Dict]:
     sent_score       = news_sentiment.get("sentiment_score", 50)
 
     # Step 7: Final Score
-    w = SCORING_WEIGHTS
+    w = weights if weights is not None else SCORING_WEIGHTS
     final_score = round(
         tech_score        * w["technical"]   +
         cat_score         * w["catalyst"]    +
