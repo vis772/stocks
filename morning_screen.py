@@ -178,7 +178,7 @@ def build_todays_watchlist(max_stocks: int = 50) -> List[str]:
     5. Return top N by activity score
     """
     print(f"\n{'='*50}")
-    print(f"APEX Morning Screen — {datetime.now().strftime('%Y-%m-%d %H:%M ET')}")
+    print(f"Axiom Terminal Morning Screen — {datetime.now().strftime('%Y-%m-%d %H:%M ET')}")
     print(f"{'='*50}")
 
     # Step 1: Get universe

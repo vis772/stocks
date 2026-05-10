@@ -63,7 +63,7 @@ def _footer(canvas, doc):
     canvas.setFont("Helvetica", 7)
     canvas.setFillColor(C_LGRAY)
     canvas.drawString(L_MARGIN, 0.38 * inch,
-                      "APEX SmallCap Scanner — Confidential Research Tool")
+                      "Axiom Terminal — Confidential Research Tool")
     canvas.drawRightString(PAGE_W - R_MARGIN, 0.38 * inch, f"Page {doc.page}")
     canvas.restoreState()
 
@@ -269,7 +269,7 @@ def _make_watchpoints(summaries: List[Dict], sec_filings: List[Dict]) -> List[st
 
 def generate_eod_report(watchlist: List[str]) -> Optional[str]:
     print(f"\n{'='*55}")
-    print(f"APEX EOD Report — {datetime.now().strftime('%Y-%m-%d %H:%M ET')}")
+    print(f"Axiom Terminal EOD Report — {datetime.now().strftime('%Y-%m-%d %H:%M ET')}")
     print(f"{'='*55}")
 
     os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -320,7 +320,7 @@ def generate_eod_report(watchlist: List[str]) -> Optional[str]:
 
     # Header
     hdr = Table([[
-        Paragraph("APEX Capital — Daily Scanner Report", ST["title"]),
+        Paragraph("Axiom Terminal — Daily Scanner Report", ST["title"]),
         Paragraph(date_long, ST["date"]),
     ]], colWidths=[4.5 * inch, 2.5 * inch])
     hdr.setStyle(TableStyle([

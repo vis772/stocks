@@ -67,7 +67,7 @@ def _footer(canvas, doc):
     canvas.saveState()
     canvas.setFont("Helvetica", 7)
     canvas.setFillColor(C_LGRAY)
-    canvas.drawString(L_MARGIN, 0.38 * inch, "APEX SmallCap Scanner — Confidential Research Tool")
+    canvas.drawString(L_MARGIN, 0.38 * inch, "Axiom Terminal — Confidential Research Tool")
     canvas.drawRightString(PAGE_W - R_MARGIN, 0.38 * inch, f"Page {doc.page}")
     canvas.restoreState()
 
@@ -303,7 +303,7 @@ def generate_checkpoint_15(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
                                topMargin=0.65 * inch, bottomMargin=0.65 * inch)
     story = []
 
-    story.append(_header_table("APEX Capital — 15 Day Sanity Check"))
+    story.append(_header_table("Axiom Terminal — 15 Day Sanity Check"))
     story.append(_hr())
     story.append(Spacer(1, 8))
     story.append(_verdict_box(verdict, v_color))
@@ -412,7 +412,7 @@ def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
                                topMargin=0.65 * inch, bottomMargin=0.65 * inch)
     story = []
 
-    story.append(_header_table("APEX Capital — 30 Day Preliminary Assessment"))
+    story.append(_header_table("Axiom Terminal — 30 Day Preliminary Assessment"))
     story.append(_hr())
     story.append(Spacer(1, 8))
     story.append(_verdict_box(verdict, v_color))
@@ -581,7 +581,7 @@ def generate_checkpoint_60(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
                                topMargin=0.65 * inch, bottomMargin=0.65 * inch)
     story = []
 
-    story.append(_header_table("APEX Capital — 60 Day Accuracy Assessment"))
+    story.append(_header_table("Axiom Terminal — 60 Day Accuracy Assessment"))
     story.append(_hr())
     story.append(Spacer(1, 8))
     story.append(_verdict_box(verdict, v_color))
@@ -754,11 +754,11 @@ def check_and_run_checkpoints() -> None:
 
     CHECKPOINTS = [
         (15, "checkpoint_15", generate_checkpoint_15,
-         "APEX Scanner — 15 Day Sanity Check"),
+         "Axiom Terminal — 15 Day Sanity Check"),
         (30, "checkpoint_30", generate_checkpoint_30,
-         "APEX Scanner — 30 Day Preliminary Assessment"),
+         "Axiom Terminal — 30 Day Preliminary Assessment"),
         (60, "checkpoint_60", generate_checkpoint_60,
-         "APEX Scanner — 60 Day Accuracy Assessment"),
+         "Axiom Terminal — 60 Day Accuracy Assessment"),
     ]
 
     for days, rtype, gen_fn, title in CHECKPOINTS:
