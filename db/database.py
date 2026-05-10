@@ -135,6 +135,28 @@ def _init_postgres():
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id            SERIAL PRIMARY KEY,
+            username      TEXT NOT NULL UNIQUE,
+            email         TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role          TEXT NOT NULL DEFAULT 'user',
+            created_at    TIMESTAMP DEFAULT NOW(),
+            last_login    TIMESTAMP
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_token TEXT PRIMARY KEY,
+            user_id       INTEGER NOT NULL REFERENCES users(id),
+            created_at    TIMESTAMP DEFAULT NOW(),
+            expires_at    TIMESTAMP NOT NULL,
+            is_active     BOOLEAN DEFAULT TRUE
+        )
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS signal_log (
             id               SERIAL PRIMARY KEY,
             ticker           TEXT NOT NULL,
@@ -169,13 +191,26 @@ def _init_postgres():
         "ALTER TABLE scanner_state  ADD COLUMN IF NOT EXISTS momentum_ranking  TEXT DEFAULT '[]'",
         "ALTER TABLE paper_trades   ADD COLUMN IF NOT EXISTS source_type       TEXT DEFAULT 'signal'",
         "ALTER TABLE paper_trades   ADD COLUMN IF NOT EXISTS score_at_entry    REAL",
+        "ALTER TABLE portfolio      ADD COLUMN IF NOT EXISTS user_id           INTEGER DEFAULT 1",
     ]:
         cur.execute(ddl)
+
+    # Migrate existing portfolio rows to admin (user_id=1)
+    cur.execute("UPDATE portfolio SET user_id = 1 WHERE user_id IS NULL")
+
+    # Add composite unique constraint for per-user portfolio (idempotent via DO NOTHING)
+    cur.execute("""
+        DO $$ BEGIN
+            ALTER TABLE portfolio ADD CONSTRAINT portfolio_ticker_user_uq UNIQUE (ticker, user_id);
+        EXCEPTION WHEN duplicate_table OR duplicate_object THEN NULL;
+        END $$
+    """)
 
     conn.commit()
     cur.close()
     conn.close()
     print("  ✓ PostgreSQL tables initialized")
+    _seed_admin_user_pg()
 
 
 def _init_sqlite():
@@ -267,6 +302,28 @@ def _init_sqlite():
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            username      TEXT NOT NULL UNIQUE,
+            email         TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role          TEXT NOT NULL DEFAULT 'user',
+            created_at    TEXT DEFAULT (datetime('now')),
+            last_login    TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_token TEXT PRIMARY KEY,
+            user_id       INTEGER NOT NULL REFERENCES users(id),
+            created_at    TEXT DEFAULT (datetime('now')),
+            expires_at    TEXT NOT NULL,
+            is_active     INTEGER DEFAULT 1
+        )
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS signal_log (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker           TEXT NOT NULL,
@@ -300,69 +357,81 @@ def _init_sqlite():
         "ALTER TABLE scanner_state ADD COLUMN momentum_ranking TEXT DEFAULT '[]'",
         "ALTER TABLE paper_trades  ADD COLUMN source_type      TEXT DEFAULT 'signal'",
         "ALTER TABLE paper_trades  ADD COLUMN score_at_entry   REAL",
+        "ALTER TABLE portfolio     ADD COLUMN user_id          INTEGER DEFAULT 1",
     ]:
         try:
             cur.execute(col_sql)
         except Exception:
             pass  # Column already exists
 
+    cur.execute("UPDATE portfolio SET user_id = 1 WHERE user_id IS NULL")
+
     conn.commit()
     conn.close()
+    _seed_admin_user_sqlite()
 
 
 # ─── Portfolio ─────────────────────────────────────────────────────────────────
 
-def upsert_holding(ticker: str, shares: float, avg_cost: float, notes: str = ""):
+def upsert_holding(ticker: str, shares: float, avg_cost: float, notes: str = "", user_id: int = 1):
     ticker = ticker.upper()
     if _is_postgres():
         conn = _get_pg_conn()
         cur  = conn.cursor()
         cur.execute("""
-            INSERT INTO portfolio (ticker, shares, avg_cost, notes)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (ticker) DO UPDATE SET
+            INSERT INTO portfolio (ticker, shares, avg_cost, notes, user_id)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (ticker, user_id) DO UPDATE SET
                 shares   = EXCLUDED.shares,
                 avg_cost = EXCLUDED.avg_cost,
                 notes    = EXCLUDED.notes
-        """, (ticker, shares, avg_cost, notes))
+        """, (ticker, shares, avg_cost, notes, user_id))
         conn.commit()
         cur.close()
         conn.close()
     else:
         conn = _get_sqlite_conn()
-        conn.execute("""
-            INSERT INTO portfolio (ticker, shares, avg_cost, notes)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(ticker) DO UPDATE SET
-                shares   = excluded.shares,
-                avg_cost = excluded.avg_cost,
-                notes    = excluded.notes
-        """, (ticker, shares, avg_cost, notes))
+        exists = conn.execute(
+            "SELECT 1 FROM portfolio WHERE ticker = ? AND user_id = ?", (ticker, user_id)
+        ).fetchone()
+        if exists:
+            conn.execute(
+                "UPDATE portfolio SET shares=?, avg_cost=?, notes=? WHERE ticker=? AND user_id=?",
+                (shares, avg_cost, notes, ticker, user_id)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO portfolio (ticker, shares, avg_cost, notes, user_id) VALUES (?,?,?,?,?)",
+                (ticker, shares, avg_cost, notes, user_id)
+            )
         conn.commit()
         conn.close()
 
 
-def delete_holding(ticker: str):
+def delete_holding(ticker: str, user_id: int = 1):
     ticker = ticker.upper()
     if _is_postgres():
         conn = _get_pg_conn()
         cur  = conn.cursor()
-        cur.execute("DELETE FROM portfolio WHERE ticker = %s", (ticker,))
+        cur.execute("DELETE FROM portfolio WHERE ticker = %s AND user_id = %s", (ticker, user_id))
         conn.commit()
         cur.close()
         conn.close()
     else:
         conn = _get_sqlite_conn()
-        conn.execute("DELETE FROM portfolio WHERE ticker = ?", (ticker,))
+        conn.execute("DELETE FROM portfolio WHERE ticker = ? AND user_id = ?", (ticker, user_id))
         conn.commit()
         conn.close()
 
 
-def get_portfolio() -> pd.DataFrame:
+def get_portfolio(user_id: int = 1) -> pd.DataFrame:
     if _is_postgres():
         conn = _get_pg_conn()
         cur  = conn.cursor()
-        cur.execute("SELECT ticker, shares, avg_cost, notes, added_at FROM portfolio ORDER BY ticker")
+        cur.execute(
+            "SELECT ticker, shares, avg_cost, notes, added_at FROM portfolio WHERE user_id = %s ORDER BY ticker",
+            (user_id,)
+        )
         rows = cur.fetchall()
         cur.close()
         conn.close()
@@ -371,7 +440,7 @@ def get_portfolio() -> pd.DataFrame:
         return pd.DataFrame(rows, columns=["ticker","shares","avg_cost","notes","added_at"])
     else:
         conn = _get_sqlite_conn()
-        df   = pd.read_sql("SELECT * FROM portfolio ORDER BY ticker", conn)
+        df   = pd.read_sql("SELECT * FROM portfolio WHERE user_id = ? ORDER BY ticker", conn, params=(user_id,))
         conn.close()
         return df
 
@@ -1057,3 +1126,225 @@ def get_signal_stats() -> dict:
     except Exception as e:
         print(f"  [db] get_signal_stats failed: {e}")
         return {}
+
+
+# ─── Users & Sessions ──────────────────────────────────────────────────────────
+
+def _seed_admin_user_pg():
+    """Create the admin account from env vars on first run (Postgres)."""
+    import os
+    username = os.environ.get("ADMIN_USERNAME", "").strip()
+    password = os.environ.get("ADMIN_PASSWORD", "").strip()
+    if not username or not password:
+        return
+    try:
+        from auth import hash_password
+        conn = _get_pg_conn()
+        cur  = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username = %s", (username,))
+        if cur.fetchone() is None:
+            cur.execute("""
+                INSERT INTO users (username, email, password_hash, role)
+                VALUES (%s, %s, %s, 'admin')
+            """, (username, f"{username}@admin.local", hash_password(password)))
+            conn.commit()
+            print(f"  ✓ Admin user '{username}' seeded")
+        cur.close(); conn.close()
+    except Exception as e:
+        print(f"  [db] Admin seed failed: {e}")
+
+
+def _seed_admin_user_sqlite():
+    """Create the admin account from env vars on first run (SQLite)."""
+    import os
+    username = os.environ.get("ADMIN_USERNAME", "").strip()
+    password = os.environ.get("ADMIN_PASSWORD", "").strip()
+    if not username or not password:
+        return
+    try:
+        from auth import hash_password
+        conn = _get_sqlite_conn()
+        cur  = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username = ?", (username,))
+        if cur.fetchone() is None:
+            cur.execute("""
+                INSERT INTO users (username, email, password_hash, role)
+                VALUES (?, ?, ?, 'admin')
+            """, (username, f"{username}@admin.local", hash_password(password)))
+            conn.commit()
+            print(f"  ✓ Admin user '{username}' seeded")
+        conn.close()
+    except Exception as e:
+        print(f"  [db] Admin seed failed: {e}")
+
+
+def create_user(username: str, email: str, password_hash: str, role: str = "user") -> int:
+    """Insert a new user. Returns the new user id. Raises on duplicate username/email."""
+    if _is_postgres():
+        conn = _get_pg_conn()
+        cur  = conn.cursor()
+        cur.execute("""
+            INSERT INTO users (username, email, password_hash, role)
+            VALUES (%s, %s, %s, %s) RETURNING id
+        """, (username.strip(), email.strip().lower(), password_hash, role))
+        uid = cur.fetchone()[0]
+        conn.commit(); cur.close(); conn.close()
+        return uid
+    else:
+        conn = _get_sqlite_conn()
+        cur  = conn.cursor()
+        cur.execute("""
+            INSERT INTO users (username, email, password_hash, role)
+            VALUES (?, ?, ?, ?)
+        """, (username.strip(), email.strip().lower(), password_hash, role))
+        uid = cur.lastrowid
+        conn.commit(); conn.close()
+        return uid
+
+
+def get_user_by_username(username: str) -> Optional[dict]:
+    if _is_postgres():
+        conn = _get_pg_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT id, username, email, password_hash, role, last_login FROM users WHERE username = %s",
+            (username.strip(),)
+        )
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if not row:
+            return None
+        return {"id": row[0], "username": row[1], "email": row[2],
+                "password_hash": row[3], "role": row[4], "last_login": row[5]}
+    else:
+        conn = _get_sqlite_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT id, username, email, password_hash, role, last_login FROM users WHERE username = ?",
+            (username.strip(),)
+        )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {"id": row[0], "username": row[1], "email": row[2],
+                "password_hash": row[3], "role": row[4], "last_login": row[5]}
+
+
+def update_last_login(user_id: int):
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("UPDATE users SET last_login = NOW() WHERE id = %s", (user_id,))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("UPDATE users SET last_login = datetime('now') WHERE id = ?", (user_id,))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] update_last_login failed: {e}")
+
+
+def create_session(user_id: int) -> str:
+    """Create a new session token valid for SESSION_EXPIRY_HOURS hours."""
+    from auth import generate_session_token, SESSION_EXPIRY_HOURS
+    from datetime import timezone
+    token      = generate_session_token()
+    expires_at = datetime.now(timezone.utc) + __import__("datetime").timedelta(hours=SESSION_EXPIRY_HOURS)
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                INSERT INTO user_sessions (session_token, user_id, expires_at)
+                VALUES (%s, %s, %s)
+            """, (token, user_id, expires_at))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("""
+                INSERT INTO user_sessions (session_token, user_id, expires_at)
+                VALUES (?, ?, ?)
+            """, (token, user_id, expires_at.strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] create_session failed: {e}")
+    return token
+
+
+def validate_session(token: str) -> Optional[dict]:
+    """Return user dict if session is valid and not expired, else None."""
+    if not token:
+        return None
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT u.id, u.username, u.email, u.role
+                FROM user_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.session_token = %s
+                  AND s.is_active = TRUE
+                  AND s.expires_at > NOW()
+            """, (token,))
+            row = cur.fetchone()
+            cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT u.id, u.username, u.email, u.role
+                FROM user_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.session_token = ?
+                  AND s.is_active = 1
+                  AND s.expires_at > datetime('now')
+            """, (token,))
+            row = cur.fetchone()
+            conn.close()
+        if not row:
+            return None
+        return {"id": row[0], "username": row[1], "email": row[2], "role": row[3]}
+    except Exception as e:
+        print(f"  [db] validate_session failed: {e}")
+        return None
+
+
+def invalidate_session(token: str):
+    """Mark a session as inactive (logout)."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("UPDATE user_sessions SET is_active = FALSE WHERE session_token = %s", (token,))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("UPDATE user_sessions SET is_active = 0 WHERE session_token = ?", (token,))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] invalidate_session failed: {e}")
+
+
+def get_all_users() -> list:
+    """Admin-only: return all users (no password hashes)."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("SELECT id, username, email, role, created_at, last_login FROM users ORDER BY created_at")
+            rows = cur.fetchall()
+            cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute("SELECT id, username, email, role, created_at, last_login FROM users ORDER BY created_at")
+            rows = cur.fetchall()
+            conn.close()
+        return [{"id": r[0], "username": r[1], "email": r[2],
+                 "role": r[3], "created_at": r[4], "last_login": r[5]} for r in rows]
+    except Exception as e:
+        print(f"  [db] get_all_users failed: {e}")
+        return []

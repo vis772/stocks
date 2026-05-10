@@ -13,7 +13,11 @@ import sys, os, time as _time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import DEFAULT_UNIVERSE, SCORING_WEIGHTS, RISK_FLAGS
-from db.database import initialize_db, upsert_holding, delete_holding, get_portfolio, get_connection
+from db.database import (initialize_db, upsert_holding, delete_holding, get_portfolio,
+                          get_connection, validate_session, invalidate_session,
+                          create_session, get_user_by_username, create_user, update_last_login,
+                          get_all_users)
+from auth import check_password, hash_password, validate_password_strength
 from core.scanner import scan_ticker, scan_universe
 from analysis.portfolio import analyze_holding, compute_portfolio_summary
 from data.market_data import fetch_ticker_snapshot, get_price_history, get_chart_data
@@ -935,27 +939,123 @@ def render_deep_dive(r):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# AUTH
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _require_auth() -> dict:
+    """
+    Validates the current session. Returns the user dict if authenticated.
+    Shows the login/register page and calls st.stop() if not.
+    """
+    token = st.session_state.get("_session_token")
+    if token:
+        user = validate_session(token)
+        if user:
+            return user
+        # Token expired or invalid — clear it
+        st.session_state.pop("_session_token", None)
+
+    view = st.session_state.get("_auth_view", "login")
+
+    _, col, _ = st.columns([1, 1.6, 1])
+    with col:
+        st.markdown("""
+        <div style="text-align:center;padding:40px 0 28px;">
+          <div style="font-family:'Inter',sans-serif;font-size:2em;font-weight:700;
+                      color:var(--t1);letter-spacing:-0.02em;line-height:1;">Axiom</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:0.58em;
+                      color:var(--t3);letter-spacing:0.2em;margin-top:4px;">TERMINAL</div>
+        </div>""", unsafe_allow_html=True)
+
+        if view == "login":
+            with st.form("_login_form", clear_on_submit=False):
+                username = st.text_input("Username", placeholder="username")
+                password = st.text_input("Password", placeholder="••••••••", type="password")
+                submitted = st.form_submit_button("Sign in", use_container_width=True, type="primary")
+            if submitted:
+                u = get_user_by_username(username)
+                if u and check_password(password, u["password_hash"]):
+                    tok = create_session(u["id"])
+                    update_last_login(u["id"])
+                    st.session_state["_session_token"] = tok
+                    st.session_state.pop("_auth_view", None)
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
+            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+            if st.button("Create an account", use_container_width=True):
+                st.session_state["_auth_view"] = "register"
+                st.rerun()
+
+        else:  # register
+            with st.form("_register_form", clear_on_submit=False):
+                new_user  = st.text_input("Username", placeholder="username")
+                new_email = st.text_input("Email",    placeholder="you@example.com")
+                new_pass  = st.text_input("Password", placeholder="min 8 characters", type="password")
+                new_pass2 = st.text_input("Confirm password", placeholder="repeat password", type="password")
+                submitted = st.form_submit_button("Create account", use_container_width=True, type="primary")
+            if submitted:
+                err = validate_password_strength(new_pass)
+                if err:
+                    st.error(err)
+                elif new_pass != new_pass2:
+                    st.error("Passwords don't match.")
+                elif not new_user.strip() or not new_email.strip():
+                    st.error("All fields are required.")
+                else:
+                    try:
+                        uid = create_user(new_user.strip(), new_email.strip(), hash_password(new_pass))
+                        tok = create_session(uid)
+                        st.session_state["_session_token"] = tok
+                        st.session_state.pop("_auth_view", None)
+                        st.rerun()
+                    except Exception as _reg_err:
+                        st.error(f"Registration failed — username or email already taken.")
+            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+            if st.button("Back to sign in", use_container_width=True):
+                st.session_state["_auth_view"] = "login"
+                st.rerun()
+
+        st.markdown('<div class="disc" style="margin-top:20px;">Research tool · Not financial advice</div>',
+                    unsafe_allow_html=True)
+    st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # INIT
 # ══════════════════════════════════════════════════════════════════════════════
 initialize_db()
+_current_user = _require_auth()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("""
+    _sa, _sb = st.columns([3, 1])
+    _sa.markdown("""
     <div class="axiom-logo">
       <div class="name">Axiom</div>
       <div class="sub">TERMINAL</div>
     </div>
     """, unsafe_allow_html=True)
+    with _sb:
+        st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+        if st.button("out", help="Sign out", use_container_width=True):
+            invalidate_session(st.session_state.pop("_session_token", ""))
+            st.rerun()
+    st.markdown(
+        f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.62em;color:var(--t3);'
+        f'padding:0 4px 6px;letter-spacing:0.06em;">'
+        f'{_current_user["username"].upper()} · {_current_user["role"].upper()}</div>',
+        unsafe_allow_html=True
+    )
     st.markdown('<div class="disc">Research tool · Not financial advice</div>', unsafe_allow_html=True)
 
     # ── Live Holdings Manager ─────────────────────────────────────────────────
     st.markdown('<div style="padding:0 4px;"><div class="sh" style="margin-top:14px;">Holdings</div></div>', unsafe_allow_html=True)
 
-    _pf = get_portfolio()
+    _pf = get_portfolio(_current_user["id"])
     if _pf.empty:
         st.markdown('<div style="color:#94a3b8;font-size:0.68em;font-family:\'JetBrains Mono\',monospace;padding:4px 4px 8px;">No holdings saved yet.</div>', unsafe_allow_html=True)
     else:
@@ -973,7 +1073,7 @@ with st.sidebar:
             hc2.markdown(f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.75em;color:#475569;">{row["shares"]:,.0f}</span>', unsafe_allow_html=True)
             hc3.markdown(f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.75em;color:#64748b;">${row["avg_cost"]:.2f}</span>', unsafe_allow_html=True)
             if hc4.button("x", key=f"del_{row['ticker']}", help=f"Remove {row['ticker']}"):
-                delete_holding(row["ticker"])
+                delete_holding(row["ticker"], _current_user["id"])
                 st.rerun()
 
     # Add new holding form
@@ -989,7 +1089,7 @@ with st.sidebar:
         if st.form_submit_button("Add Holding", use_container_width=True):
             try:
                 if new_tkr and new_sh and new_cost:
-                    upsert_holding(new_tkr.strip().upper(), float(new_sh), float(new_cost))
+                    upsert_holding(new_tkr.strip().upper(), float(new_sh), float(new_cost), user_id=_current_user["id"])
                     st.rerun()
                 else:
                     st.warning("Fill all three fields.")
@@ -1009,7 +1109,7 @@ with st.sidebar:
         if use_default:
             tickers += DEFAULT_UNIVERSE
         if use_portfolio:
-            pf = get_portfolio()
+            pf = get_portfolio(_current_user["id"])
             if not pf.empty:
                 tickers += pf["ticker"].tolist()
         tickers = list(dict.fromkeys(tickers))
@@ -1132,7 +1232,7 @@ with tab1:
 
 # ── TAB 2: PORTFOLIO ──────────────────────────────────────────────────────────
 with tab2:
-    portfolio_df = get_portfolio()
+    portfolio_df = get_portfolio(_current_user["id"])
 
     if portfolio_df.empty:
         st.markdown("""
@@ -1894,3 +1994,40 @@ Each stock scores 0–100 across five components. Edit `config.py` to change wei
 ---
 **Research tool only. Not financial advice. Small-cap stocks can lose 100% of value. Always do your own research.**
     """)
+
+    if _current_user["role"] == "admin":
+        st.markdown("---")
+        st.markdown('<div class="sh">Admin Panel</div>', unsafe_allow_html=True)
+        try:
+            users = get_all_users()
+            st.markdown(f'**{len(users)} registered user(s)**')
+            rows_html = ""
+            for u in users:
+                last = str(u.get("last_login") or "—")[:16]
+                since = str(u.get("created_at") or "—")[:10]
+                role_color = "#c2610f" if u["role"] == "admin" else "#334155"
+                rows_html += (
+                    f'<div class="stat-row">'
+                    f'<span class="sval b" style="width:130px;">{u["username"]}</span>'
+                    f'<span class="slbl" style="width:200px;">{u["email"]}</span>'
+                    f'<span style="width:70px;font-family:\'JetBrains Mono\',monospace;font-size:0.72em;'
+                    f'color:{role_color};font-weight:600;">{u["role"].upper()}</span>'
+                    f'<span class="slbl" style="width:100px;">{since}</span>'
+                    f'<span class="slbl" style="width:130px;text-align:right;">{last}</span>'
+                    f'</div>'
+                )
+            st.markdown(
+                '<div style="background:var(--bgcard);border:1px solid var(--border);border-radius:8px;padding:10px 16px;">'
+                + '<div class="stat-row" style="margin-bottom:4px;">'
+                + '<span class="slbl" style="width:130px;">Username</span>'
+                + '<span class="slbl" style="width:200px;">Email</span>'
+                + '<span class="slbl" style="width:70px;">Role</span>'
+                + '<span class="slbl" style="width:100px;">Joined</span>'
+                + '<span class="slbl" style="width:130px;text-align:right;">Last login</span>'
+                + '</div>'
+                + rows_html
+                + '</div>',
+                unsafe_allow_html=True
+            )
+        except Exception as _adm_e:
+            st.error(f"Admin panel error: {_adm_e}")
