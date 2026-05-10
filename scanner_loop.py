@@ -661,7 +661,7 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                                     round(price * 0.93, 4),
                                     round(price * 1.10, 4),
                                     round(price * 1.20, 4))
-                    log_signal(
+                    sig_id = log_signal(
                         ticker           = ticker,
                         signal_label     = "Gap-Up",
                         score            = round(change_pct, 1),
@@ -670,8 +670,12 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                         volume_at_signal = volume,
                         alert_type       = "gap_up",
                     )
-                except Exception:
-                    pass
+                    if sig_id:
+                        print(f"  [signal_log] ✓ {ticker} Gap-Up {change_pct:+.1f}% | id={sig_id}")
+                    else:
+                        print(f"  [signal_log] ✗ {ticker} gap_up — log_signal returned None")
+                except Exception as _gap_e:
+                    print(f"  [signal_log] gap_up FAILED for {ticker}: {_gap_e}")
             elif change_pct <= -GAP_UP_THRESHOLD:
                 send_alert(
                     title=f"📉 {ticker} Gap-Down {change_pct:.1f}%",
@@ -862,31 +866,40 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
             if not price:
                 continue
 
+            signal_label = result.get("signal", "Hold")
+
+            # Log every signal regardless of score — full data for accuracy test
+            try:
+                from db.database import log_signal
+                sig_id = log_signal(
+                    ticker           = ticker,
+                    signal_label     = signal_label,
+                    score            = round(score, 1),
+                    score_breakdown  = {
+                        "technical":   result.get("technical_score", 0),
+                        "catalyst":    result.get("catalyst_score", 0),
+                        "fundamental": result.get("fundamental_score", 0),
+                        "risk":        result.get("risk_score", 0),
+                        "sentiment":   result.get("sentiment_score", 0),
+                    },
+                    price_at_signal  = price,
+                    volume_at_signal = result.get("volume", 0),
+                    alert_type       = "scan",
+                )
+                if sig_id:
+                    print(f"  [signal_log] ✓ {ticker} | {signal_label} | score={score:.0f} | id={sig_id}")
+                else:
+                    print(f"  [signal_log] ✗ {ticker} — log_signal returned None (check DB connection)")
+            except Exception as _e:
+                print(f"  [signal_log] FAILED for {ticker}: {_e}")
+
+            # Paper trades only for threshold crossings
             if score >= PREDICTION_BUY_THRESHOLD:
                 stop_ = result.get("stop_loss")  or round(price * 0.93, 4)
                 t1    = result.get("target_1")   or round(price * 1.10, 4)
                 t2    = result.get("target_2")   or round(price * 1.20, 4)
                 log_paper_trade(ticker, "prediction_buy", price, stop_, t1, t2,
                                 source_type="prediction_buy", score_at_entry=round(score, 1))
-                try:
-                    from db.database import log_signal
-                    log_signal(
-                        ticker       = ticker,
-                        signal_label = result.get("signal", "Strong Buy Candidate"),
-                        score        = round(score, 1),
-                        score_breakdown = {
-                            "technical":   result.get("technical_score", 0),
-                            "catalyst":    result.get("catalyst_score", 0),
-                            "fundamental": result.get("fundamental_score", 0),
-                            "risk":        result.get("risk_score", 0),
-                            "sentiment":   result.get("sentiment_score", 0),
-                        },
-                        price_at_signal  = price,
-                        volume_at_signal = result.get("volume", 0),
-                        alert_type       = "prediction_buy",
-                    )
-                except Exception as _e:
-                    print(f"  [prediction] signal_log failed: {_e}")
                 state.log_alert(f"PRED BUY {ticker} ({score:.0f}pt)")
                 print(f"  [prediction] 📈 BUY {ticker} score={score:.0f}")
 
@@ -896,25 +909,6 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
                 s_t2   = round(price * 0.80, 4)
                 log_paper_trade(ticker, "prediction_sell", price, s_stop, s_t1, s_t2,
                                 source_type="prediction_sell", score_at_entry=round(score, 1))
-                try:
-                    from db.database import log_signal
-                    log_signal(
-                        ticker       = ticker,
-                        signal_label = result.get("signal", "Sell"),
-                        score        = round(score, 1),
-                        score_breakdown = {
-                            "technical":   result.get("technical_score", 0),
-                            "catalyst":    result.get("catalyst_score", 0),
-                            "fundamental": result.get("fundamental_score", 0),
-                            "risk":        result.get("risk_score", 0),
-                            "sentiment":   result.get("sentiment_score", 0),
-                        },
-                        price_at_signal  = price,
-                        volume_at_signal = result.get("volume", 0),
-                        alert_type       = "prediction_sell",
-                    )
-                except Exception as _e:
-                    print(f"  [prediction] signal_log failed: {_e}")
                 state.log_alert(f"PRED SELL {ticker} ({score:.0f}pt)")
                 print(f"  [prediction] 📉 SELL {ticker} score={score:.0f}")
 

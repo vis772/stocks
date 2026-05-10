@@ -187,11 +187,13 @@ def _init_postgres():
 
     # Migration-safe: add new columns to existing deployments
     for ddl in [
-        "ALTER TABLE scanner_state  ADD COLUMN IF NOT EXISTS vwap_snapshot     TEXT DEFAULT '{}'",
-        "ALTER TABLE scanner_state  ADD COLUMN IF NOT EXISTS momentum_ranking  TEXT DEFAULT '[]'",
-        "ALTER TABLE paper_trades   ADD COLUMN IF NOT EXISTS source_type       TEXT DEFAULT 'signal'",
-        "ALTER TABLE paper_trades   ADD COLUMN IF NOT EXISTS score_at_entry    REAL",
-        "ALTER TABLE portfolio      ADD COLUMN IF NOT EXISTS user_id           INTEGER DEFAULT 1",
+        "ALTER TABLE scanner_state   ADD COLUMN IF NOT EXISTS vwap_snapshot      TEXT DEFAULT '{}'",
+        "ALTER TABLE scanner_state   ADD COLUMN IF NOT EXISTS momentum_ranking   TEXT DEFAULT '[]'",
+        "ALTER TABLE paper_trades    ADD COLUMN IF NOT EXISTS source_type        TEXT DEFAULT 'signal'",
+        "ALTER TABLE paper_trades    ADD COLUMN IF NOT EXISTS score_at_entry     REAL",
+        "ALTER TABLE portfolio       ADD COLUMN IF NOT EXISTS user_id            INTEGER DEFAULT 1",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS price_15day        REAL",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS pct_change_15day   REAL",
     ]:
         cur.execute(ddl)
 
@@ -925,18 +927,18 @@ def log_signal(ticker: str, signal_label: str, score: float,
         return None
 
 
-def get_pending_signals(max_age_days: int = 8) -> List[dict]:
-    """Return signal_log rows whose outcomes are still incomplete (missing 5-day price)."""
+def get_pending_signals(max_age_days: int = 20) -> List[dict]:
+    """Return signal_log rows whose outcomes are still incomplete (missing 15-day price)."""
     try:
         if _is_postgres():
             conn = _get_pg_conn()
             cur  = conn.cursor()
             cur.execute("""
                 SELECT sl.id, sl.ticker, sl.price_at_signal, sl.created_at,
-                       so.price_1hr, so.price_1day, so.price_5day
+                       so.price_1hr, so.price_1day, so.price_5day, so.price_15day
                 FROM signal_log sl
                 JOIN signal_outcomes so ON so.signal_id = sl.id
-                WHERE so.price_5day IS NULL
+                WHERE so.price_15day IS NULL
                   AND sl.created_at >= NOW() - INTERVAL '%s days'
                 ORDER BY sl.created_at ASC
             """, (max_age_days,))
@@ -944,16 +946,16 @@ def get_pending_signals(max_age_days: int = 8) -> List[dict]:
             cur.close(); conn.close()
             return [{"id": r[0], "ticker": r[1], "price_at_signal": r[2],
                      "created_at": r[3], "price_1hr": r[4],
-                     "price_1day": r[5], "price_5day": r[6]} for r in rows]
+                     "price_1day": r[5], "price_5day": r[6], "price_15day": r[7]} for r in rows]
         else:
             conn = _get_sqlite_conn()
             cur  = conn.cursor()
             cur.execute("""
                 SELECT sl.id, sl.ticker, sl.price_at_signal, sl.created_at,
-                       so.price_1hr, so.price_1day, so.price_5day
+                       so.price_1hr, so.price_1day, so.price_5day, so.price_15day
                 FROM signal_log sl
                 JOIN signal_outcomes so ON so.signal_id = sl.id
-                WHERE so.price_5day IS NULL
+                WHERE so.price_15day IS NULL
                   AND sl.created_at >= datetime('now', ?)
                 ORDER BY sl.created_at ASC
             """, (f"-{max_age_days} days",))
@@ -961,7 +963,7 @@ def get_pending_signals(max_age_days: int = 8) -> List[dict]:
             conn.close()
             return [{"id": r[0], "ticker": r[1], "price_at_signal": r[2],
                      "created_at": r[3], "price_1hr": r[4],
-                     "price_1day": r[5], "price_5day": r[6]} for r in rows]
+                     "price_1day": r[5], "price_5day": r[6], "price_15day": r[7]} for r in rows]
     except Exception as e:
         print(f"  [db] get_pending_signals failed: {e}")
         return []
@@ -970,12 +972,14 @@ def get_pending_signals(max_age_days: int = 8) -> List[dict]:
 def update_signal_outcome(signal_id: int, price_1hr: Optional[float] = None,
                           price_1day: Optional[float] = None,
                           price_5day: Optional[float] = None,
+                          price_15day: Optional[float] = None,
                           price_at_signal: Optional[float] = None):
     """Fill in available price outcomes and compute outcome_label when 5-day is known."""
     try:
-        pct_1hr  = (price_1hr  / price_at_signal - 1) * 100 if price_1hr  and price_at_signal else None
-        pct_1day = (price_1day / price_at_signal - 1) * 100 if price_1day and price_at_signal else None
-        pct_5day = (price_5day / price_at_signal - 1) * 100 if price_5day and price_at_signal else None
+        pct_1hr   = (price_1hr   / price_at_signal - 1) * 100 if price_1hr   and price_at_signal else None
+        pct_1day  = (price_1day  / price_at_signal - 1) * 100 if price_1day  and price_at_signal else None
+        pct_5day  = (price_5day  / price_at_signal - 1) * 100 if price_5day  and price_at_signal else None
+        pct_15day = (price_15day / price_at_signal - 1) * 100 if price_15day and price_at_signal else None
 
         if pct_5day is not None:
             if pct_5day >= 5.0:
@@ -995,14 +999,16 @@ def update_signal_outcome(signal_id: int, price_1hr: Optional[float] = None,
                     price_1hr          = COALESCE(%s, price_1hr),
                     price_1day         = COALESCE(%s, price_1day),
                     price_5day         = COALESCE(%s, price_5day),
+                    price_15day        = COALESCE(%s, price_15day),
                     pct_change_1hr     = COALESCE(%s, pct_change_1hr),
                     pct_change_1day    = COALESCE(%s, pct_change_1day),
                     pct_change_5day    = COALESCE(%s, pct_change_5day),
+                    pct_change_15day   = COALESCE(%s, pct_change_15day),
                     outcome_label      = %s,
                     outcome_updated_at = NOW()
                 WHERE signal_id = %s
-            """, (price_1hr, price_1day, price_5day,
-                  pct_1hr, pct_1day, pct_5day, label, signal_id))
+            """, (price_1hr, price_1day, price_5day, price_15day,
+                  pct_1hr, pct_1day, pct_5day, pct_15day, label, signal_id))
             conn.commit(); cur.close(); conn.close()
         else:
             conn = _get_sqlite_conn()
@@ -1011,14 +1017,16 @@ def update_signal_outcome(signal_id: int, price_1hr: Optional[float] = None,
                     price_1hr          = COALESCE(?, price_1hr),
                     price_1day         = COALESCE(?, price_1day),
                     price_5day         = COALESCE(?, price_5day),
+                    price_15day        = COALESCE(?, price_15day),
                     pct_change_1hr     = COALESCE(?, pct_change_1hr),
                     pct_change_1day    = COALESCE(?, pct_change_1day),
                     pct_change_5day    = COALESCE(?, pct_change_5day),
+                    pct_change_15day   = COALESCE(?, pct_change_15day),
                     outcome_label      = ?,
                     outcome_updated_at = datetime('now')
                 WHERE signal_id = ?
-            """, (price_1hr, price_1day, price_5day,
-                  pct_1hr, pct_1day, pct_5day, label, signal_id))
+            """, (price_1hr, price_1day, price_5day, price_15day,
+                  pct_1hr, pct_1day, pct_5day, pct_15day, label, signal_id))
             conn.commit(); conn.close()
     except Exception as e:
         print(f"  [db] update_signal_outcome failed: {e}")
@@ -1035,7 +1043,7 @@ def get_signal_log(days: int = 30) -> pd.DataFrame:
                        sl.score_breakdown, sl.price_at_signal, sl.alert_type,
                        sl.created_at,
                        so.pct_change_1hr, so.pct_change_1day, so.pct_change_5day,
-                       so.outcome_label
+                       so.pct_change_15day, so.outcome_label
                 FROM signal_log sl
                 LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
                 WHERE sl.created_at >= NOW() - INTERVAL '%s days'
@@ -1052,7 +1060,7 @@ def get_signal_log(days: int = 30) -> pd.DataFrame:
                        sl.score_breakdown, sl.price_at_signal, sl.alert_type,
                        sl.created_at,
                        so.pct_change_1hr, so.pct_change_1day, so.pct_change_5day,
-                       so.outcome_label
+                       so.pct_change_15day, so.outcome_label
                 FROM signal_log sl
                 LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
                 WHERE sl.created_at >= datetime('now', '-{days} days')

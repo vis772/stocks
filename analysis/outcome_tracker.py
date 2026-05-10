@@ -160,7 +160,7 @@ def run_one_pass():
         print(f"  [outcome_tracker] DB import failed: {e}")
         return
 
-    pending = get_pending_signals(max_age_days=8)
+    pending = get_pending_signals(max_age_days=20)
     if not pending:
         return
 
@@ -178,13 +178,15 @@ def run_one_pass():
 
         age_hrs = (now - created_at).total_seconds() / 3600
 
-        price_1hr  = sig.get("price_1hr")
-        price_1day = sig.get("price_1day")
-        price_5day = sig.get("price_5day")
+        price_1hr   = sig.get("price_1hr")
+        price_1day  = sig.get("price_1day")
+        price_5day  = sig.get("price_5day")
+        price_15day = sig.get("price_15day")
 
-        new_1hr  = None
-        new_1day = None
-        new_5day = None
+        new_1hr   = None
+        new_1day  = None
+        new_5day  = None
+        new_15day = None
 
         # 1hr: fill once ≥1 hour old; use live price if still same session
         if price_1hr is None and age_hrs >= 1.0:
@@ -201,29 +203,34 @@ def run_one_pass():
         if price_5day is None and age_hrs >= 5 * 24:
             new_5day = _fetch_close_on_day(ticker, created_at + timedelta(days=5))
 
-        if new_1hr or new_1day or new_5day:
+        # 15day: fill once ≥15 calendar days old
+        if price_15day is None and age_hrs >= 15 * 24:
+            new_15day = _fetch_close_on_day(ticker, created_at + timedelta(days=15))
+
+        if new_1hr or new_1day or new_5day or new_15day:
             update_signal_outcome(
                 signal_id       = signal_id,
-                price_1hr       = new_1hr   or price_1hr,
-                price_1day      = new_1day  or price_1day,
-                price_5day      = new_5day  or price_5day,
+                price_1hr       = new_1hr    or price_1hr,
+                price_1day      = new_1day   or price_1day,
+                price_5day      = new_5day   or price_5day,
+                price_15day     = new_15day  or price_15day,
                 price_at_signal = entry_price,
             )
             print(f"  [outcome_tracker] {ticker} updated: "
-                  f"1hr={new_1hr} 1day={new_1day} 5day={new_5day}")
+                  f"1hr={new_1hr} 1day={new_1day} 5day={new_5day} 15day={new_15day}")
 
         time.sleep(0.5)  # avoid hammering Finnhub rate limit
 
 
 def _tracker_loop():
-    """Run hourly during market hours; sleep 10 min otherwise."""
+    """Run hourly during market hours; run every 4 hours outside (for multi-day fills)."""
     while True:
         try:
+            run_one_pass()
             if _is_market_hours():
-                run_one_pass()
                 time.sleep(3600)
             else:
-                time.sleep(600)
+                time.sleep(4 * 3600)
         except Exception as e:
             print(f"  [outcome_tracker] loop error: {e}")
             time.sleep(300)
