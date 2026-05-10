@@ -1,9 +1,9 @@
 # reports/checkpoint_reports.py
 # Three-checkpoint accuracy test report generator.
 #
-# Checkpoint 1  Day 15  — Sanity Check:        is the scanner broken or working?
-# Checkpoint 2  Day 30  — Preliminary:         is there a directional signal?
-# Checkpoint 3  Day 60  — Final Verdict:       trust it or not?
+# Checkpoint 1  150 signals  — Sanity Check:        is the scanner broken or working?
+# Checkpoint 2  350 signals  — Preliminary:         is there a directional signal?
+# Checkpoint 3  600 signals  — Final Verdict:       trust it or not?
 #
 # Each PDF is uploaded to Filebin and sent via Pushover.
 # Metadata is stored in the accuracy_reports DB table.
@@ -281,9 +281,9 @@ def _upload_and_notify(filename: str, title: str, message: str) -> Optional[str]
 # ─── Checkpoint 1: Day 15 — Sanity Check ─────────────────────────────────────
 
 def generate_checkpoint_15(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
-    print("\n[CHECKPOINT 15] Generating Day-15 Sanity Check...")
+    print("\n[CHECKPOINT 150] Generating 150-Signal Sanity Check...")
     os.makedirs(REPORTS_DIR, exist_ok=True)
-    filename = f"{REPORTS_DIR}/APEX_Checkpoint15_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    filename = f"{REPORTS_DIR}/Axiom_Checkpoint150_{datetime.now().strftime('%Y-%m-%d')}.pdf"
 
     s = _compute_stats(df)
     degen   = s.get("degenerate_labels", [])
@@ -303,7 +303,7 @@ def generate_checkpoint_15(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
                                topMargin=0.65 * inch, bottomMargin=0.65 * inch)
     story = []
 
-    story.append(_header_table("Axiom Terminal — 15 Day Sanity Check"))
+    story.append(_header_table("Axiom Terminal — Sanity Check (150 Signals)"))
     story.append(_hr())
     story.append(Spacer(1, 8))
     story.append(_verdict_box(verdict, v_color))
@@ -356,7 +356,7 @@ def generate_checkpoint_15(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
         concl = (
             f"The scanner is operational. {s.get('total', 0)} signals logged across "
             f"{s.get('trading_days', 0)} trading days at {s.get('avg_per_day', 0)} per day. "
-            f"Outcome prices are filling in correctly. Proceed to Checkpoint 2 in 15 trading days."
+            f"Outcome prices are filling in correctly. Checkpoint 2 will generate at 350 signals."
         )
     else:
         issues = []
@@ -385,9 +385,9 @@ def generate_checkpoint_15(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
 # ─── Checkpoint 2: Day 30 — Preliminary Assessment ───────────────────────────
 
 def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
-    print("\n[CHECKPOINT 30] Generating Day-30 Preliminary Assessment...")
+    print("\n[CHECKPOINT 350] Generating 350-Signal Preliminary Assessment...")
     os.makedirs(REPORTS_DIR, exist_ok=True)
-    filename = f"{REPORTS_DIR}/APEX_Checkpoint30_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    filename = f"{REPORTS_DIR}/Axiom_Checkpoint350_{datetime.now().strftime('%Y-%m-%d')}.pdf"
 
     s      = _compute_stats(df)
     wr     = s.get("overall_win_rate")
@@ -400,7 +400,7 @@ def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
         for d in comp_c.values() if d.get("diff") is not None
     )
 
-    if s.get("total", 0) >= 300 and wr is not None and wr >= 52 and (sb_wr is None or sb_wr >= 55) and has_correlation:
+    if s.get("total", 0) >= 350 and wr is not None and wr >= 52 and (sb_wr is None or sb_wr >= 55) and has_correlation:
         verdict, v_color = "PROMISING", C_GREEN
     elif wr is not None and 50 <= wr < 52:
         verdict, v_color = "INCONCLUSIVE", C_AMBER
@@ -412,7 +412,7 @@ def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
                                topMargin=0.65 * inch, bottomMargin=0.65 * inch)
     story = []
 
-    story.append(_header_table("Axiom Terminal — 30 Day Preliminary Assessment"))
+    story.append(_header_table("Axiom Terminal — Preliminary Assessment (350 Signals)"))
     story.append(_hr())
     story.append(Spacer(1, 8))
     story.append(_verdict_box(verdict, v_color))
@@ -514,12 +514,12 @@ def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
         concl = (
             f"Early results are positive. {s.get('total', 0)} signals logged with a 5-day win rate of "
             f"{wr:.1f}%. At least one component shows early predictive correlation. "
-            f"Run through Day 60 without changing weights."
+            f"Continue to Checkpoint 3 at 600 signals without changing weights."
         )
     elif verdict == "INCONCLUSIVE":
         concl = (
             f"Win rate of {wr:.1f}% is near the coin-flip baseline. More data needed. "
-            f"Continue to Day 60 without changing weights or thresholds."
+            f"Continue to Checkpoint 3 at 600 signals without changing weights or thresholds."
         )
     else:
         concl = (
@@ -540,9 +540,9 @@ def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
 # ─── Checkpoint 3: Day 60 — Final Verdict ────────────────────────────────────
 
 def generate_checkpoint_60(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
-    print("\n[CHECKPOINT 60] Generating Day-60 Final Verdict...")
+    print("\n[CHECKPOINT 600] Generating 600-Signal Final Verdict...")
     os.makedirs(REPORTS_DIR, exist_ok=True)
-    filename = f"{REPORTS_DIR}/APEX_Checkpoint60_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    filename = f"{REPORTS_DIR}/Axiom_Checkpoint600_{datetime.now().strftime('%Y-%m-%d')}.pdf"
 
     s      = _compute_stats(df)
     wr     = s.get("overall_win_rate")
@@ -556,7 +556,7 @@ def generate_checkpoint_60(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
     gain_over_loss = (avg_w is not None and avg_l is not None and avg_w > abs(avg_l))
 
     approved = (
-        s.get("total", 0) >= 500 and
+        s.get("total", 0) >= 600 and
         wr is not None and wr >= 55 and
         (sb_wr is None or sb_wr >= 60) and
         gain_over_loss and
@@ -581,7 +581,7 @@ def generate_checkpoint_60(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
                                topMargin=0.65 * inch, bottomMargin=0.65 * inch)
     story = []
 
-    story.append(_header_table("Axiom Terminal — 60 Day Accuracy Assessment"))
+    story.append(_header_table("Axiom Terminal — Final Verdict (600 Signals)"))
     story.append(_hr())
     story.append(Spacer(1, 8))
     story.append(_verdict_box(verdict, v_color))
@@ -731,7 +731,7 @@ def generate_checkpoint_60(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
 def check_and_run_checkpoints() -> None:
     """
     Called at EOD. Generates whichever checkpoint reports are newly due
-    based on trading days elapsed since the first logged signal.
+    based on total signals logged.
     """
     try:
         from db.database import get_signal_log, get_accuracy_reports, save_accuracy_report
@@ -739,31 +739,28 @@ def check_and_run_checkpoints() -> None:
         print(f"  [checkpoint] DB import failed: {e}")
         return
 
-    df = get_signal_log(days=90)
+    df = get_signal_log(days=120)
     if df.empty:
         print("  [checkpoint] No signals yet — skipping checkpoint check")
         return
 
-    df["_date"]   = pd.to_datetime(df["created_at"]).dt.date
-    first_date    = df["_date"].min()
-    today         = datetime.now().date()
-    bdays_elapsed = len(pd.bdate_range(first_date, today))
-    print(f"  [checkpoint] {bdays_elapsed} trading days since first signal ({first_date})")
+    total_signals = len(df)
+    print(f"  [checkpoint] {total_signals} total signals logged")
 
     existing = {r["report_type"] for r in get_accuracy_reports()}
 
     CHECKPOINTS = [
-        (15, "checkpoint_15", generate_checkpoint_15,
-         "Axiom Terminal — 15 Day Sanity Check"),
-        (30, "checkpoint_30", generate_checkpoint_30,
-         "Axiom Terminal — 30 Day Preliminary Assessment"),
-        (60, "checkpoint_60", generate_checkpoint_60,
-         "Axiom Terminal — 60 Day Accuracy Assessment"),
+        (150, "checkpoint_150", generate_checkpoint_15,
+         "Axiom Terminal — Sanity Check (150 Signals)"),
+        (350, "checkpoint_350", generate_checkpoint_30,
+         "Axiom Terminal — Preliminary Assessment (350 Signals)"),
+        (600, "checkpoint_600", generate_checkpoint_60,
+         "Axiom Terminal — Final Verdict (600 Signals)"),
     ]
 
-    for days, rtype, gen_fn, title in CHECKPOINTS:
-        if bdays_elapsed >= days and rtype not in existing:
-            print(f"  [checkpoint] Threshold Day {days} reached — generating {rtype}...")
+    for threshold, rtype, gen_fn, title in CHECKPOINTS:
+        if total_signals >= threshold and rtype not in existing:
+            print(f"  [checkpoint] {threshold} signal threshold reached — generating {rtype}...")
             try:
                 result = gen_fn(df)
                 if result is None:
@@ -772,9 +769,9 @@ def check_and_run_checkpoints() -> None:
                 filename, verdict = result
                 url = _upload_and_notify(
                     filename, title,
-                    f"Verdict: {verdict}\n{len(df)} signals in dataset. Tap to download PDF.",
+                    f"Verdict: {verdict}\n{total_signals} signals in dataset. Tap to download PDF.",
                 )
-                save_accuracy_report(rtype, days, filename, url or "", verdict)
+                save_accuracy_report(rtype, threshold, filename, url or "", verdict)
                 print(f"  [checkpoint] {rtype} complete — verdict={verdict}")
             except Exception as exc:
                 print(f"  [checkpoint] {rtype} FAILED: {exc}")

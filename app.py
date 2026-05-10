@@ -1803,15 +1803,33 @@ with tab6:
     # ── Checkpoint Reports ────────────────────────────────────────────────────
     st.markdown('<div class="sh" style="margin-top:4px;">Accuracy Test Reports</div>', unsafe_allow_html=True)
     try:
-        from db.database import get_accuracy_reports
-        _chk_reports = get_accuracy_reports()
+        from db.database import get_accuracy_reports, get_signal_stats
+        _chk_reports  = get_accuracy_reports()
+        _chk_stats    = get_signal_stats()
+        _sig_total    = _chk_stats.get("total", 0)
     except Exception:
         _chk_reports = []
+        _sig_total   = 0
+
+    _FINAL_TARGET = 600
+    _prog_frac    = min(_sig_total / _FINAL_TARGET, 1.0)
+    _prog_pct     = int(_prog_frac * 100)
+    _prog_color   = "#16a34a" if _sig_total >= _FINAL_TARGET else "#1d6fa5"
+    st.markdown(
+        f'<div style="margin:10px 0 16px;">'
+        f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.78em;color:var(--t2);margin-bottom:6px;">'
+        f'{_sig_total} / {_FINAL_TARGET} signals logged toward final verdict</div>'
+        f'<div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden;">'
+        f'<div style="width:{_prog_pct}%;height:100%;background:{_prog_color};border-radius:4px;transition:width 0.3s;"></div>'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     _CHECKPOINT_META = {
-        "checkpoint_15": ("Day 15 — Sanity Check",         15),
-        "checkpoint_30": ("Day 30 — Preliminary",          30),
-        "checkpoint_60": ("Day 60 — Final Verdict",        60),
+        "checkpoint_150": ("150 Signals — Sanity Check",    150),
+        "checkpoint_350": ("350 Signals — Preliminary",     350),
+        "checkpoint_600": ("600 Signals — Final Verdict",   600),
     }
     _VERDICT_COLORS = {
         "OPERATIONAL":     "#1a56b0",
@@ -1825,7 +1843,7 @@ with tab6:
 
     _rpt_map = {r["report_type"]: r for r in _chk_reports}
     _chk_cols = st.columns(3)
-    for _ci, _rtype in enumerate(["checkpoint_15", "checkpoint_30", "checkpoint_60"]):
+    for _ci, _rtype in enumerate(["checkpoint_150", "checkpoint_350", "checkpoint_600"]):
         _meta  = _CHECKPOINT_META[_rtype]
         _rpt   = _rpt_map.get(_rtype)
         with _chk_cols[_ci]:
@@ -1850,7 +1868,7 @@ with tab6:
                     f'<div style="background:var(--bgcard);border:1px solid var(--border);'
                     f'border-radius:8px;padding:12px 14px;">'
                     f'<div style="font-size:0.72em;color:var(--t3);font-family:\'JetBrains Mono\',monospace;">{_meta[0].upper()}</div>'
-                    f'<div style="font-size:0.9em;color:var(--t3);margin:6px 0;">Pending — Day {_meta[1]} not reached</div>'
+                    f'<div style="font-size:0.9em;color:var(--t3);margin:6px 0;">Pending — {_meta[1]} signals not reached</div>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
