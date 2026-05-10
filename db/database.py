@@ -1131,48 +1131,60 @@ def get_signal_stats() -> dict:
 # ─── Users & Sessions ──────────────────────────────────────────────────────────
 
 def _seed_admin_user_pg():
-    """Create the admin account from env vars on first run (Postgres)."""
+    """Create or promote the admin account from env vars on every startup (Postgres)."""
     import os
     username = os.environ.get("ADMIN_USERNAME", "").strip()
     password = os.environ.get("ADMIN_PASSWORD", "").strip()
-    if not username or not password:
+    if not username:
         return
     try:
         from auth import hash_password
         conn = _get_pg_conn()
         cur  = conn.cursor()
         cur.execute("SELECT id FROM users WHERE username = %s", (username,))
-        if cur.fetchone() is None:
+        row = cur.fetchone()
+        if row is None:
+            if not password:
+                cur.close(); conn.close(); return
             cur.execute("""
                 INSERT INTO users (username, email, password_hash, role)
                 VALUES (%s, %s, %s, 'admin')
             """, (username, f"{username}@admin.local", hash_password(password)))
-            conn.commit()
-            print(f"  ✓ Admin user '{username}' seeded")
+            print(f"  ✓ Admin user '{username}' created")
+        else:
+            cur.execute("UPDATE users SET role = 'admin' WHERE username = %s", (username,))
+            print(f"  ✓ Admin role granted to '{username}'")
+        conn.commit()
         cur.close(); conn.close()
     except Exception as e:
         print(f"  [db] Admin seed failed: {e}")
 
 
 def _seed_admin_user_sqlite():
-    """Create the admin account from env vars on first run (SQLite)."""
+    """Create or promote the admin account from env vars on every startup (SQLite)."""
     import os
     username = os.environ.get("ADMIN_USERNAME", "").strip()
     password = os.environ.get("ADMIN_PASSWORD", "").strip()
-    if not username or not password:
+    if not username:
         return
     try:
         from auth import hash_password
         conn = _get_sqlite_conn()
         cur  = conn.cursor()
         cur.execute("SELECT id FROM users WHERE username = ?", (username,))
-        if cur.fetchone() is None:
+        row = cur.fetchone()
+        if row is None:
+            if not password:
+                conn.close(); return
             cur.execute("""
                 INSERT INTO users (username, email, password_hash, role)
                 VALUES (?, ?, ?, 'admin')
             """, (username, f"{username}@admin.local", hash_password(password)))
-            conn.commit()
-            print(f"  ✓ Admin user '{username}' seeded")
+            print(f"  ✓ Admin user '{username}' created")
+        else:
+            cur.execute("UPDATE users SET role = 'admin' WHERE username = ?", (username,))
+            print(f"  ✓ Admin role granted to '{username}'")
+        conn.commit()
         conn.close()
     except Exception as e:
         print(f"  [db] Admin seed failed: {e}")
