@@ -185,6 +185,18 @@ def _init_postgres():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS accuracy_reports (
+            id           SERIAL PRIMARY KEY,
+            report_type  TEXT NOT NULL,
+            checkpoint   INTEGER,
+            filename     TEXT,
+            download_url TEXT,
+            status_label TEXT,
+            generated_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
     # Migration-safe: add new columns to existing deployments
     for ddl in [
         "ALTER TABLE scanner_state   ADD COLUMN IF NOT EXISTS vwap_snapshot      TEXT DEFAULT '{}'",
@@ -354,12 +366,26 @@ def _init_sqlite():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS accuracy_reports (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_type  TEXT NOT NULL,
+            checkpoint   INTEGER,
+            filename     TEXT,
+            download_url TEXT,
+            status_label TEXT,
+            generated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     for col_sql in [
-        "ALTER TABLE scanner_state ADD COLUMN vwap_snapshot    TEXT DEFAULT '{}'",
-        "ALTER TABLE scanner_state ADD COLUMN momentum_ranking TEXT DEFAULT '[]'",
-        "ALTER TABLE paper_trades  ADD COLUMN source_type      TEXT DEFAULT 'signal'",
-        "ALTER TABLE paper_trades  ADD COLUMN score_at_entry   REAL",
-        "ALTER TABLE portfolio     ADD COLUMN user_id          INTEGER DEFAULT 1",
+        "ALTER TABLE scanner_state   ADD COLUMN vwap_snapshot     TEXT DEFAULT '{}'",
+        "ALTER TABLE scanner_state   ADD COLUMN momentum_ranking  TEXT DEFAULT '[]'",
+        "ALTER TABLE paper_trades    ADD COLUMN source_type       TEXT DEFAULT 'signal'",
+        "ALTER TABLE paper_trades    ADD COLUMN score_at_entry    REAL",
+        "ALTER TABLE portfolio       ADD COLUMN user_id           INTEGER DEFAULT 1",
+        "ALTER TABLE signal_outcomes ADD COLUMN price_15day       REAL",
+        "ALTER TABLE signal_outcomes ADD COLUMN pct_change_15day  REAL",
     ]:
         try:
             cur.execute(col_sql)
@@ -1134,6 +1160,54 @@ def get_signal_stats() -> dict:
     except Exception as e:
         print(f"  [db] get_signal_stats failed: {e}")
         return {}
+
+
+# ─── Accuracy Reports ──────────────────────────────────────────────────────────
+
+def save_accuracy_report(report_type: str, checkpoint: int, filename: str,
+                          download_url: str, status_label: str) -> None:
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO accuracy_reports (report_type, checkpoint, filename, download_url, status_label)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (report_type, checkpoint, filename, download_url, status_label))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("""
+                INSERT INTO accuracy_reports (report_type, checkpoint, filename, download_url, status_label)
+                VALUES (?, ?, ?, ?, ?)
+            """, (report_type, checkpoint, filename, download_url, status_label))
+            conn.commit(); conn.close()
+        print(f"  [db] accuracy_report saved: {report_type} verdict={status_label}")
+    except Exception as e:
+        print(f"  [db] save_accuracy_report failed: {e}")
+
+
+def get_accuracy_reports() -> List[dict]:
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT report_type, checkpoint, filename, download_url, status_label, generated_at
+                FROM accuracy_reports ORDER BY generated_at DESC
+            """)
+            rows = cur.fetchall(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT report_type, checkpoint, filename, download_url, status_label, generated_at
+                FROM accuracy_reports ORDER BY generated_at DESC
+            """)
+            rows = cur.fetchall(); conn.close()
+        return [{"report_type": r[0], "checkpoint": r[1], "filename": r[2],
+                 "download_url": r[3], "status_label": r[4], "generated_at": r[5]}
+                for r in rows]
+    except Exception as e:
+        print(f"  [db] get_accuracy_reports failed: {e}")
+        return []
 
 
 # ─── Users & Sessions ──────────────────────────────────────────────────────────

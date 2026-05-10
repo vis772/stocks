@@ -1800,8 +1800,65 @@ with tab5:
 
 # ── TAB 6: INFO ───────────────────────────────────────────────────────────────
 with tab6:
+    # ── Checkpoint Reports ────────────────────────────────────────────────────
+    st.markdown('<div class="sh" style="margin-top:4px;">Accuracy Test Reports</div>', unsafe_allow_html=True)
+    try:
+        from db.database import get_accuracy_reports
+        _chk_reports = get_accuracy_reports()
+    except Exception:
+        _chk_reports = []
+
+    _CHECKPOINT_META = {
+        "checkpoint_15": ("Day 15 — Sanity Check",         15),
+        "checkpoint_30": ("Day 30 — Preliminary",          30),
+        "checkpoint_60": ("Day 60 — Final Verdict",        60),
+    }
+    _VERDICT_COLORS = {
+        "OPERATIONAL":     "#1a56b0",
+        "NEEDS FIXING":    "#dc2626",
+        "PROMISING":       "#16a34a",
+        "INCONCLUSIVE":    "#c2610f",
+        "UNDERPERFORMING": "#dc2626",
+        "APPROVED":        "#16a34a",
+        "REJECTED":        "#dc2626",
+    }
+
+    _rpt_map = {r["report_type"]: r for r in _chk_reports}
+    _chk_cols = st.columns(3)
+    for _ci, _rtype in enumerate(["checkpoint_15", "checkpoint_30", "checkpoint_60"]):
+        _meta  = _CHECKPOINT_META[_rtype]
+        _rpt   = _rpt_map.get(_rtype)
+        with _chk_cols[_ci]:
+            if _rpt:
+                _vc   = _VERDICT_COLORS.get(_rpt.get("status_label", ""), "#334155")
+                _ts   = str(_rpt.get("generated_at", ""))[:10]
+                _url  = _rpt.get("download_url", "")
+                st.markdown(
+                    f'<div style="background:var(--bgcard);border:1px solid var(--border);'
+                    f'border-radius:8px;padding:12px 14px;">'
+                    f'<div style="font-size:0.72em;color:var(--t3);font-family:\'JetBrains Mono\',monospace;">{_meta[0].upper()}</div>'
+                    f'<div style="font-size:1.1em;font-weight:700;color:{_vc};margin:4px 0;">{_rpt.get("status_label","—")}</div>'
+                    f'<div style="font-size:0.72em;color:var(--t3);">Generated {_ts}</div>'
+                    + (f'<a href="{_url}" target="_blank" style="display:inline-block;margin-top:8px;'
+                       f'font-size:0.75em;color:var(--blue);font-family:\'JetBrains Mono\',monospace;">'
+                       f'Download PDF</a>' if _url else '')
+                    + '</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div style="background:var(--bgcard);border:1px solid var(--border);'
+                    f'border-radius:8px;padding:12px 14px;">'
+                    f'<div style="font-size:0.72em;color:var(--t3);font-family:\'JetBrains Mono\',monospace;">{_meta[0].upper()}</div>'
+                    f'<div style="font-size:0.9em;color:var(--t3);margin:6px 0;">Pending — Day {_meta[1]} not reached</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
     # ── Accuracy Tab ──────────────────────────────────────────────────────────
-    st.markdown('<div class="sh" style="margin-top:4px;">Signal Accuracy Tracker</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sh">Signal Accuracy Tracker</div>', unsafe_allow_html=True)
 
     try:
         from db.database import get_signal_log, get_signal_stats

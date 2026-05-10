@@ -1023,8 +1023,8 @@ def run_scanner():
                     alert_digest(state.alert_log[-10:], top_movers=top_movers[:5])
                     last_digest_time = et
 
-                # EOD report at exactly 4:00 PM ET
-                if et.hour == 16 and et.minute < 5 and not eod_report_sent:
+                # EOD report at 4:15 PM ET
+                if et.hour == 16 and 15 <= et.minute < 20 and not eod_report_sent:
                     print("\n[EOD REPORT] Generating end-of-day report...")
                     try:
                         from eod_report import run_eod_report
@@ -1033,6 +1033,11 @@ def run_scanner():
                         state.log_alert("EOD report generated and sent")
                     except Exception as e:
                         print(f"  [EOD] Failed: {e}")
+                    try:
+                        from reports.checkpoint_reports import check_and_run_checkpoints
+                        check_and_run_checkpoints()
+                    except Exception as _cp_e:
+                        print(f"  [checkpoint] Failed: {_cp_e}")
                     # Close open paper trades using last known prices
                     try:
                         from db.database import close_paper_trades_eod
