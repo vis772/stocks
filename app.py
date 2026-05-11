@@ -344,6 +344,52 @@ h1,h2,h3 { color: var(--t1) !important; font-family: 'Inter', sans-serif !import
 .chart-bar { display:flex; align-items:center; justify-content:space-between; padding:8px 0 12px; gap:12px; flex-wrap:wrap; }
 .live-badge { display:inline-flex; align-items:center; gap:5px; font-family:'JetBrains Mono',monospace; font-size:0.68em; color:#16a34a; }
 .live-dot { width:6px; height:6px; border-radius:50%; background:#16a34a; animation:live-dot 1.4s ease-in-out infinite; }
+
+/* ── Control panel (mobile-first) ── */
+[data-testid="stTabPanel"]:first-of-type .stButton > button {
+    padding: 1.1rem 1rem !important;
+    font-size: 1em !important;
+    font-weight: 700 !important;
+    border-radius: 10px !important;
+    min-height: 52px !important;
+    letter-spacing: 0.02em !important;
+}
+.ctrl-status {
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.ctrl-status .cs-row { display: flex; align-items: center; gap: 10px; }
+.ctrl-status .cs-dot {
+    width: 16px; height: 16px; border-radius: 50%;
+    flex-shrink: 0; margin-top: 1px;
+}
+.ctrl-status .cs-label {
+    font-family: 'Inter', sans-serif;
+    font-size: 1.05em; font-weight: 700; color: var(--t1);
+}
+.ctrl-status .cs-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72em; color: var(--t3); padding-left: 26px;
+}
+.ctrl-summary {
+    background: var(--bgcard); border: 1px solid var(--border);
+    border-radius: 10px; padding: 4px 0; margin-top: 8px;
+}
+.ctrl-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 16px; border-bottom: 1px solid rgba(0,0,0,0.05);
+}
+.ctrl-row:last-child { border-bottom: none; }
+.ctrl-lbl { font-family: 'Inter', sans-serif; font-size: 0.78em; color: var(--t3); font-weight: 500; }
+.ctrl-val { font-family: 'JetBrains Mono', monospace; font-size: 0.85em; color: var(--t1); font-weight: 600; }
+.ctrl-val.g { color: var(--green); }
+.ctrl-val.a { color: var(--amber); }
+.ctrl-val.r { color: var(--red); }
+.ctrl-section { font-family: 'Inter', sans-serif; font-size: 0.65em; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--t3); margin: 20px 0 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1185,7 +1231,201 @@ if "scoring_weights" not in st.session_state:
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info", "Config"])
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Control", "Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info", "Config"])
+
+
+# ── TAB 0: CONTROL ───────────────────────────────────────────────────────────
+with tab0:
+    # Auto-refresh every 60 seconds via JS
+    st.markdown(
+        '<script>setTimeout(function(){window.location.reload();},60000);</script>',
+        unsafe_allow_html=True
+    )
+
+    # ── Load control state ────────────────────────────────────────────────────
+    try:
+        from db.database import get_scanner_control, set_scanner_control, get_control_stats
+        _ctl = get_scanner_control()
+        _sts = get_control_stats()
+    except Exception as _ce:
+        _ctl = {"paused": False, "force_scan": False, "scanner_started_at": None}
+        _sts = {"signals_today": 0, "alerts_today": 0, "top_signal": None,
+                "scan_count": 0, "last_updated": None}
+
+    _paused     = _ctl.get("paused", False)
+    _force_scan = _ctl.get("force_scan", False)
+    _started_at = _ctl.get("scanner_started_at")
+    _last_upd   = _sts.get("last_updated")
+
+    # ── Market status helper ──────────────────────────────────────────────────
+    def _mkt_status():
+        try:
+            from zoneinfo import ZoneInfo
+            _et = datetime.now(ZoneInfo("America/New_York"))
+        except ImportError:
+            import pytz
+            _et = datetime.now(pytz.timezone("America/New_York"))
+        wd, h, m = _et.weekday(), _et.hour, _et.minute
+        if wd >= 5:                                         return "Weekend"
+        if h < 4:                                           return "Closed"
+        if h < 9 or (h == 9 and m < 25):                   return "Pre-Market"
+        if h < 16 or (h == 16 and m <= 30):                return "Open"
+        return "After-Hours"
+
+    _mkt = _mkt_status()
+
+    # ── Minutes since last scan ───────────────────────────────────────────────
+    _mins_ago = None
+    if _last_upd:
+        try:
+            _lu = datetime.fromisoformat(str(_last_upd).replace("Z", "+00:00"))
+            _lu_naive = _lu.replace(tzinfo=None) if _lu.tzinfo else _lu
+            _mins_ago = int((datetime.utcnow() - _lu_naive).total_seconds() / 60)
+        except Exception:
+            pass
+
+    # ── Scanner uptime ────────────────────────────────────────────────────────
+    _uptime_str = "Unknown"
+    if _started_at:
+        try:
+            _sa = datetime.fromisoformat(str(_started_at).replace("Z", "+00:00"))
+            _sa_naive = _sa.replace(tzinfo=None) if _sa.tzinfo else _sa
+            _up_secs = int((datetime.utcnow() - _sa_naive).total_seconds())
+            _up_h = _up_secs // 3600
+            _up_m = (_up_secs % 3600) // 60
+            _uptime_str = f"{_up_h}h {_up_m}m"
+        except Exception:
+            pass
+
+    # ── 1. STATUS INDICATOR ───────────────────────────────────────────────────
+    st.markdown('<div class="ctrl-section">Scanner Status</div>', unsafe_allow_html=True)
+
+    if _paused:
+        _dot_color = "#c2610f"
+        _dot_bg    = "rgba(194,97,15,0.08)"
+        _dot_border= "rgba(194,97,15,0.2)"
+        _status_lbl = "PAUSED — manual hold"
+        _status_sub = "Scanner is holding. Tap Resume to restart."
+    elif _mkt in ("Open", "Pre-Market"):
+        if _mins_ago is not None and _mins_ago <= 45:
+            _dot_color = "#16a34a"
+            _dot_bg    = "rgba(22,163,74,0.07)"
+            _dot_border= "rgba(22,163,74,0.2)"
+            _int_label = "every 60s" if _mkt == "Open" else "every 90s"
+            _status_lbl = f"ACTIVE — scanning {_int_label}"
+            _status_sub = f"Last scan {_mins_ago}m ago · {_sts['scan_count']} scans today"
+        else:
+            _dot_color = "#dc2626"
+            _dot_bg    = "rgba(220,38,38,0.07)"
+            _dot_border= "rgba(220,38,38,0.2)"
+            _status_lbl = "OFFLINE — no scan in 45+ min"
+            _ago_str = f"{_mins_ago}m ago" if _mins_ago is not None else "unknown"
+            _status_sub = f"Last scan: {_ago_str}. Check Railway logs."
+    else:
+        _dot_color = "#c2610f"
+        _dot_bg    = "rgba(194,97,15,0.06)"
+        _dot_border= "rgba(194,97,15,0.18)"
+        _status_lbl = "SLEEPING — market closed"
+        _nxt = "Monday 9:30 AM ET" if _mkt == "Weekend" else "9:30 AM ET"
+        _status_sub = f"Next scan window: {_nxt}"
+
+    st.markdown(f"""
+    <div class="ctrl-status" style="background:{_dot_bg};border:1px solid {_dot_border};">
+      <div class="cs-row">
+        <div class="cs-dot" style="background:{_dot_color};
+             box-shadow:0 0 0 4px {_dot_color}22;"></div>
+        <div class="cs-label" style="color:{_dot_color};">{_status_lbl}</div>
+      </div>
+      <div class="cs-sub">{_status_sub}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 2. PAUSE / RESUME ─────────────────────────────────────────────────────
+    st.markdown('<div class="ctrl-section">Scanner Control</div>', unsafe_allow_html=True)
+
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        if _paused:
+            if st.button("RESUME SCANNER", use_container_width=True, key="ctrl_resume"):
+                try:
+                    from db.database import set_scanner_control
+                    set_scanner_control(paused=False)
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Failed: {_e}")
+        else:
+            if st.button("PAUSE SCANNER", use_container_width=True, key="ctrl_pause"):
+                try:
+                    from db.database import set_scanner_control
+                    set_scanner_control(paused=True)
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Failed: {_e}")
+
+    with _c2:
+        _fscan_label = "SCANNING..." if _force_scan else "SCAN NOW"
+        _fscan_disabled = _force_scan
+        if st.button(_fscan_label, use_container_width=True, key="ctrl_forcescan",
+                     disabled=_fscan_disabled):
+            try:
+                from db.database import set_scanner_control
+                set_scanner_control(force_scan=True)
+                st.rerun()
+            except Exception as _e:
+                st.error(f"Failed: {_e}")
+
+    if _force_scan:
+        st.markdown(
+            '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.75em;'
+            'color:#1d6fa5;margin-top:6px;">Scan triggered — scanner will pick it up within 30–90s.</div>',
+            unsafe_allow_html=True
+        )
+
+    # ── 3. QUICK SUMMARY ─────────────────────────────────────────────────────
+    st.markdown('<div class="ctrl-section">Quick Summary</div>', unsafe_allow_html=True)
+
+    _top = _sts.get("top_signal")
+    _top_str = f"{_top['ticker']} — {_top['label']} — Score {_top['score']:.0f}" if _top else "No signals yet"
+
+    _mkt_color = {"Open": "g", "Pre-Market": "a", "After-Hours": "a",
+                  "Weekend": "", "Closed": ""}.get(_mkt, "")
+
+    _last_scan_str = f"{_mins_ago}m ago" if _mins_ago is not None else "—"
+
+    st.markdown(f"""
+    <div class="ctrl-summary">
+      <div class="ctrl-row">
+        <span class="ctrl-lbl">Last scan</span>
+        <span class="ctrl-val">{_last_scan_str}</span>
+      </div>
+      <div class="ctrl-row">
+        <span class="ctrl-lbl">Signals today</span>
+        <span class="ctrl-val g">{_sts['signals_today']}</span>
+      </div>
+      <div class="ctrl-row">
+        <span class="ctrl-lbl">Alerts fired today</span>
+        <span class="ctrl-val">{_sts['alerts_today']}</span>
+      </div>
+      <div class="ctrl-row">
+        <span class="ctrl-lbl">Top signal</span>
+        <span class="ctrl-val" style="font-size:0.78em;max-width:58%;text-align:right;">{_top_str}</span>
+      </div>
+      <div class="ctrl-row">
+        <span class="ctrl-lbl">Market status</span>
+        <span class="ctrl-val {_mkt_color}">{_mkt}</span>
+      </div>
+      <div class="ctrl-row">
+        <span class="ctrl-lbl">Scanner uptime</span>
+        <span class="ctrl-val">{_uptime_str}</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(
+        '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.65em;'
+        'color:var(--t3);margin-top:12px;text-align:center;">Auto-refreshes every 60 seconds</div>',
+        unsafe_allow_html=True
+    )
 
 
 # ── TAB 1: SCANNER ────────────────────────────────────────────────────────────

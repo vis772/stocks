@@ -951,6 +951,13 @@ def run_scanner():
     except Exception as _e:
         print(f"  [scanner] outcome tracker failed to start: {_e}")
 
+    # Record start time in control table; clear any stale force_scan flag
+    try:
+        from db.database import set_scanner_control
+        set_scanner_control(force_scan=False, scanner_started_at=now_et().isoformat())
+    except Exception as _ctrl_start_e:
+        print(f"  [control] startup init failed: {_ctrl_start_e}")
+
     # ── Test scan mode: one full cycle regardless of day/market hours ─────────
     if _test_scan_mode:
         print("\n[TEST MODE] Bypassing market-hours guardrail — running one scan cycle")
@@ -989,6 +996,38 @@ def run_scanner():
         try:
             et         = now_et()
             today_str  = et.strftime("%Y-%m-%d")
+
+            # ── Control flags: pause / force-scan ────────────────────────────
+            try:
+                from db.database import get_scanner_control, set_scanner_control
+                _ctrl = get_scanner_control()
+                if _ctrl.get("paused"):
+                    print(f"  [PAUSED] Manual hold — sleeping 30s")
+                    time.sleep(30)
+                    continue
+                if _ctrl.get("force_scan"):
+                    print(f"\n[FORCE SCAN] Triggered from dashboard")
+                    if not watchlist:
+                        watchlist = load_todays_watchlist() or []
+                        if not watchlist:
+                            from config import DEFAULT_UNIVERSE
+                            watchlist = DEFAULT_UNIVERSE
+                    _fs_alerts: List[str] = []
+                    with ThreadPoolExecutor(max_workers=15) as _fex:
+                        _ffs = {_fex.submit(scan_one_ticker, t, state): t for t in watchlist}
+                        for _ff in as_completed(_ffs, timeout=60):
+                            try:
+                                _fs_alerts.extend(_ff.result())
+                            except Exception:
+                                pass
+                    run_prediction_scan(watchlist, state)
+                    set_scanner_control(force_scan=False)
+                    state.scan_count += 1
+                    state.save()
+                    print(f"  [FORCE SCAN] Complete — {len(_fs_alerts)} alert(s)")
+                    continue
+            except Exception as _ctrl_e:
+                print(f"  [control] check failed: {_ctrl_e}")
 
             # Skip everything on weekends — market closed
             if et.weekday() >= 5:

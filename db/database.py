@@ -116,6 +116,17 @@ def _init_postgres():
         )
     """)
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS scanner_control (
+            id                 INTEGER PRIMARY KEY DEFAULT 1,
+            paused             BOOLEAN DEFAULT FALSE,
+            force_scan         BOOLEAN DEFAULT FALSE,
+            scanner_started_at TIMESTAMP,
+            updated_at         TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("INSERT INTO scanner_control (id) VALUES (1) ON CONFLICT DO NOTHING")
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS paper_trades (
             id           SERIAL PRIMARY KEY,
             trade_date   TEXT NOT NULL,
@@ -296,6 +307,17 @@ def _init_sqlite():
             last_updated  TEXT
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS scanner_control (
+            id                 INTEGER PRIMARY KEY DEFAULT 1,
+            paused             INTEGER DEFAULT 0,
+            force_scan         INTEGER DEFAULT 0,
+            scanner_started_at TEXT,
+            updated_at         TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    cur.execute("INSERT OR IGNORE INTO scanner_control (id) VALUES (1)")
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS paper_trades (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -768,6 +790,121 @@ def save_scanner_state(state_dict: dict):
             json.dump(state_dict, f)
     except Exception:
         pass
+
+
+# ─── Scanner Control (pause / force-scan flags) ───────────────────────────────
+
+def get_scanner_control() -> dict:
+    """Read pause and force_scan flags from scanner_control table."""
+    default = {"paused": False, "force_scan": False, "scanner_started_at": None, "updated_at": None}
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT paused, force_scan, scanner_started_at, updated_at
+                FROM scanner_control WHERE id = 1
+            """)
+            row = cur.fetchone()
+            cur.close(); conn.close()
+            if row:
+                return {"paused": bool(row[0]), "force_scan": bool(row[1]),
+                        "scanner_started_at": row[2], "updated_at": row[3]}
+        else:
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT paused, force_scan, scanner_started_at, updated_at
+                FROM scanner_control WHERE id = 1
+            """)
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                return {"paused": bool(row[0]), "force_scan": bool(row[1]),
+                        "scanner_started_at": row[2], "updated_at": row[3]}
+    except Exception as e:
+        print(f"  [db] get_scanner_control failed: {e}")
+    return default
+
+
+def set_scanner_control(paused: bool = None, force_scan: bool = None,
+                        scanner_started_at=None) -> None:
+    """Update scanner control flags."""
+    if _is_postgres():
+        ph = "%s"
+    else:
+        ph = "?"
+    sets, vals = [], []
+    if paused is not None:
+        sets.append(f"paused = {ph}"); vals.append(paused)
+    if force_scan is not None:
+        sets.append(f"force_scan = {ph}"); vals.append(force_scan)
+    if scanner_started_at is not None:
+        sets.append(f"scanner_started_at = {ph}"); vals.append(str(scanner_started_at))
+    if not sets:
+        return
+    sets.append("updated_at = NOW()" if _is_postgres() else "updated_at = datetime('now')")
+    sql = f"UPDATE scanner_control SET {', '.join(sets)} WHERE id = 1"
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute(sql, vals)
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute(sql, vals)
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] set_scanner_control failed: {e}")
+
+
+def get_control_stats() -> dict:
+    """Return summary stats for the Control tab: signals today, alerts today, top signal, scan count."""
+    stats = {"signals_today": 0, "alerts_today": 0, "top_signal": None,
+             "scan_count": 0, "last_updated": None}
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM signal_log WHERE DATE(created_at) = %s", (date_str,))
+            stats["signals_today"] = cur.fetchone()[0] or 0
+            cur.execute("SELECT COUNT(*) FROM alert_log WHERE DATE(created_at) = %s", (date_str,))
+            stats["alerts_today"] = cur.fetchone()[0] or 0
+            cur.execute("""
+                SELECT ticker, signal_label, score FROM signal_log
+                WHERE DATE(created_at) = %s ORDER BY score DESC LIMIT 1
+            """, (date_str,))
+            row = cur.fetchone()
+            if row:
+                stats["top_signal"] = {"ticker": row[0], "label": row[1], "score": row[2]}
+            cur.execute("SELECT scan_count, last_updated FROM scanner_state WHERE date = %s", (date_str,))
+            row = cur.fetchone()
+            if row:
+                stats["scan_count"] = row[0] or 0
+                stats["last_updated"] = row[1]
+            cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM signal_log WHERE DATE(created_at) = ?", (date_str,))
+            stats["signals_today"] = cur.fetchone()[0] or 0
+            cur.execute("SELECT COUNT(*) FROM alert_log WHERE DATE(created_at) = ?", (date_str,))
+            stats["alerts_today"] = cur.fetchone()[0] or 0
+            cur.execute("SELECT ticker, signal_label, score FROM signal_log WHERE DATE(created_at) = ? ORDER BY score DESC LIMIT 1", (date_str,))
+            row = cur.fetchone()
+            if row:
+                stats["top_signal"] = {"ticker": row[0], "label": row[1], "score": row[2]}
+            cur.execute("SELECT scan_count, last_updated FROM scanner_state WHERE date = ?", (date_str,))
+            row = cur.fetchone()
+            if row:
+                stats["scan_count"] = row[0] or 0
+                stats["last_updated"] = row[1]
+            conn.close()
+    except Exception as e:
+        print(f"  [db] get_control_stats failed: {e}")
+    return stats
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
