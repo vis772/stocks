@@ -770,6 +770,18 @@ def save_scanner_state(state_dict: dict):
         pass
 
 
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _f(v) -> Optional[float]:
+    """Convert numpy/pandas scalars to a plain Python float (or None)."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 # ─── Paper Trades ──────────────────────────────────────────────────────────────
 
 def log_paper_trade(ticker: str, signal_type: str, entry_price: float,
@@ -787,8 +799,8 @@ def log_paper_trade(ticker: str, signal_type: str, entry_price: float,
                     (trade_date, ticker, signal_type, entry_price, stop_price,
                      target1, target2, entry_time, source_type, score_at_entry)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-            """, (trade_date, ticker, signal_type, entry_price, stop_price,
-                  target1, target2, entry_time, source_type, score_at_entry))
+            """, (trade_date, ticker, signal_type, _f(entry_price), _f(stop_price),
+                  _f(target1), _f(target2), entry_time, source_type, _f(score_at_entry)))
             row_id = cur.fetchone()[0]
             conn.commit(); cur.close(); conn.close()
             return row_id
@@ -800,8 +812,8 @@ def log_paper_trade(ticker: str, signal_type: str, entry_price: float,
                     (trade_date, ticker, signal_type, entry_price, stop_price,
                      target1, target2, entry_time, source_type, score_at_entry)
                 VALUES (?,?,?,?,?,?,?,?,?,?)
-            """, (trade_date, ticker, signal_type, entry_price, stop_price,
-                  target1, target2, entry_time, source_type, score_at_entry))
+            """, (trade_date, ticker, signal_type, _f(entry_price), _f(stop_price),
+                  _f(target1), _f(target2), entry_time, source_type, _f(score_at_entry)))
             row_id = cur.lastrowid
             conn.commit(); conn.close()
             return row_id
@@ -838,7 +850,7 @@ def close_paper_trades_eod(exit_prices: dict):
                     UPDATE paper_trades
                     SET exit_price=%s, exit_time=%s, outcome=%s, pnl_pct=%s
                     WHERE id=%s
-                """, (exit_p, exit_time, outcome, round(pnl, 2), row_id))
+                """, (_f(exit_p), exit_time, outcome, _f(round(pnl, 2)), row_id))
             conn.commit(); cur.close(); conn.close()
         else:
             conn = _get_sqlite_conn()
@@ -925,8 +937,8 @@ def log_signal(ticker: str, signal_label: str, score: float,
                     (ticker, signal_label, score, score_breakdown,
                      price_at_signal, volume_at_signal, alert_type)
                 VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
-            """, (ticker, signal_label, score, breakdown_json,
-                  price_at_signal, volume_at_signal, alert_type))
+            """, (ticker, signal_label, _f(score), breakdown_json,
+                  _f(price_at_signal), _f(volume_at_signal), alert_type))
             sig_id = cur.fetchone()[0]
             # Insert a pending outcome row so the tracker can find it
             cur.execute("""
@@ -942,8 +954,8 @@ def log_signal(ticker: str, signal_label: str, score: float,
                     (ticker, signal_label, score, score_breakdown,
                      price_at_signal, volume_at_signal, alert_type)
                 VALUES (?,?,?,?,?,?,?)
-            """, (ticker, signal_label, score, breakdown_json,
-                  price_at_signal, volume_at_signal, alert_type))
+            """, (ticker, signal_label, _f(score), breakdown_json,
+                  _f(price_at_signal), _f(volume_at_signal), alert_type))
             sig_id = cur.lastrowid
             cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (?)", (sig_id,))
             conn.commit(); conn.close()
