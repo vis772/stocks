@@ -28,6 +28,15 @@ from morning_screen import build_todays_watchlist, load_todays_watchlist, WATCHL
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 STATE_FILE   = "scanner_state.json"
 
+
+def _log(level: str, message: str) -> None:
+    """Fire-and-forget structured log to scanner_logs table."""
+    try:
+        from db.database import log_scanner_event
+        log_scanner_event(level, message)
+    except Exception:
+        pass
+
 # Tiingo IEX real-time stream — module-level singleton, lazily started by
 # _ensure_stream() once the watchlist is known. No-op when TIINGO_TOKEN unset.
 try:
@@ -1003,10 +1012,12 @@ def run_scanner():
                 _ctrl = get_scanner_control()
                 if _ctrl.get("paused"):
                     print(f"  [PAUSED] Manual hold — sleeping 30s")
+                    _log("info", "Scanner paused — manual hold active")
                     time.sleep(30)
                     continue
                 if _ctrl.get("force_scan"):
                     print(f"\n[FORCE SCAN] Triggered from dashboard")
+                    _log("info", "Force scan triggered from dashboard")
                     if not watchlist:
                         watchlist = load_todays_watchlist() or []
                         if not watchlist:
@@ -1025,6 +1036,7 @@ def run_scanner():
                     state.scan_count += 1
                     state.save()
                     print(f"  [FORCE SCAN] Complete — {len(_fs_alerts)} alert(s)")
+                    _log("info", f"Force scan complete — {len(_fs_alerts)} alert(s) fired")
                     continue
             except Exception as _ctrl_e:
                 print(f"  [control] check failed: {_ctrl_e}")
@@ -1073,6 +1085,7 @@ def run_scanner():
             if is_market_hours():
                 state.scan_count += 1
                 print(f"\n[SCAN #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
+                _log("info", f"Scan #{state.scan_count} started — {len(watchlist)} stocks | {et.strftime('%H:%M ET')}")
 
                 if news_thread is None or not news_thread.is_alive():
                     news_thread = run_news_monitor(watchlist, state)
@@ -1093,8 +1106,10 @@ def run_scanner():
 
                 if all_alerts:
                     print(f"  🔔 {len(all_alerts)} alert(s) fired")
+                    _log("info", f"Scan #{state.scan_count} complete — {len(all_alerts)} alert(s) fired")
                 else:
                     print(f"  ✓ No alerts this scan")
+                    _log("info", f"Scan #{state.scan_count} complete — no alerts")
 
                 # Build momentum ranking and flush to DB every 5 scans
                 top_movers = _build_momentum_ranking(watchlist, state)
@@ -1104,8 +1119,10 @@ def run_scanner():
                 # Prediction scan every 30 minutes (runs full score on top-N stocks)
                 if (et - state.last_prediction_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
                     print("\n[PREDICTION SCAN] Running 30-min full-score prediction scan...")
+                    _log("info", f"Prediction scan started — top {PREDICTION_TOP_N} stocks")
                     run_prediction_scan(watchlist, state)
                     state.last_prediction_run = et
+                    _log("info", "Prediction scan complete")
 
                 # 30-min digest with top movers
                 if (et - last_digest_time).total_seconds() >= 1800 and state.alert_log:
@@ -1145,6 +1162,7 @@ def run_scanner():
             elif is_premarket():
                 state.scan_count += 1
                 print(f"\n[PRE-MARKET SCAN #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
+                _log("info", f"Pre-market scan #{state.scan_count} started — {len(watchlist)} stocks | {et.strftime('%H:%M ET')}")
 
                 # News monitor covers pre-market too (PRs land 06:00–09:00 ET)
                 if news_thread is None or not news_thread.is_alive():
@@ -1170,8 +1188,10 @@ def run_scanner():
 
                 if all_alerts:
                     print(f"  🔔 {len(all_alerts)} alert(s) fired")
+                    _log("info", f"Pre-market scan #{state.scan_count} complete — {len(all_alerts)} alert(s)")
                 else:
                     print(f"  ✓ No alerts this scan")
+                    _log("info", f"Pre-market scan #{state.scan_count} complete — no alerts")
 
                 time.sleep(PREMARKET_SCAN_INTERVAL)
 
@@ -1181,9 +1201,11 @@ def run_scanner():
 
         except KeyboardInterrupt:
             print("\nScanner stopped.")
+            _log("warning", "Scanner stopped via KeyboardInterrupt")
             break
         except Exception as e:
             print(f"  [scanner] Error: {e}")
+            _log("error", f"Scanner loop error: {e}")
             time.sleep(30)
 
   except Exception as _fatal:

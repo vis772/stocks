@@ -208,6 +208,15 @@ def _init_postgres():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS scanner_logs (
+            id         SERIAL PRIMARY KEY,
+            level      TEXT NOT NULL DEFAULT 'info',
+            message    TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
     # Migration-safe: add new columns to existing deployments
     for ddl in [
         "ALTER TABLE scanner_state   ADD COLUMN IF NOT EXISTS vwap_snapshot      TEXT DEFAULT '{}'",
@@ -397,6 +406,15 @@ def _init_sqlite():
             download_url TEXT,
             status_label TEXT,
             generated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS scanner_logs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            level      TEXT NOT NULL DEFAULT 'info',
+            message    TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
         )
     """)
 
@@ -1590,4 +1608,68 @@ def get_all_users() -> list:
                  "role": r[3], "created_at": r[4], "last_login": r[5]} for r in rows]
     except Exception as e:
         print(f"  [db] get_all_users failed: {e}")
+
+
+# ─── Scanner Logs ──────────────────────────────────────────────────────────────
+
+def log_scanner_event(level: str, message: str) -> None:
+    """Write a structured log line to scanner_logs. Trims table to 500 rows."""
+    level = level.lower().strip()
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute(
+                "INSERT INTO scanner_logs (level, message) VALUES (%s, %s)",
+                (level, message[:500])
+            )
+            # Keep only the newest 500 rows
+            cur.execute("""
+                DELETE FROM scanner_logs WHERE id NOT IN (
+                    SELECT id FROM scanner_logs ORDER BY created_at DESC LIMIT 500
+                )
+            """)
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute(
+                "INSERT INTO scanner_logs (level, message) VALUES (?, ?)",
+                (level, message[:500])
+            )
+            conn.execute("""
+                DELETE FROM scanner_logs WHERE id NOT IN (
+                    SELECT id FROM scanner_logs ORDER BY created_at DESC LIMIT 500
+                )
+            """)
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] log_scanner_event failed: {e}")
+
+
+def get_scanner_logs(limit: int = 50) -> List[dict]:
+    """Return the most recent scanner log entries, newest first."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT id, level, message, created_at
+                FROM scanner_logs ORDER BY created_at DESC LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+            cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT id, level, message, created_at
+                FROM scanner_logs ORDER BY created_at DESC LIMIT ?
+            """, (limit,))
+            rows = cur.fetchall()
+            conn.close()
+        return [{"id": r[0], "level": r[1], "message": r[2], "created_at": r[3]}
+                for r in rows]
+    except Exception as e:
+        print(f"  [db] get_scanner_logs failed: {e}")
+        return []
         return []
