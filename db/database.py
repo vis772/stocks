@@ -217,6 +217,69 @@ def _init_postgres():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS data_quality (
+            id         SERIAL PRIMARY KEY,
+            ticker     TEXT NOT NULL,
+            source     TEXT NOT NULL,
+            status     TEXT NOT NULL,
+            latency_ms REAL,
+            error      TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS quote_cache (
+            ticker      TEXT PRIMARY KEY,
+            price       REAL,
+            prev_close  REAL,
+            volume      REAL,
+            high        REAL,
+            low         REAL,
+            source      TEXT,
+            created_at  TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS universe (
+            ticker         TEXT PRIMARY KEY,
+            exchange       TEXT,
+            market_cap     BIGINT,
+            adv_20         INTEGER,
+            sector         TEXT,
+            industry       TEXT,
+            sic_code       INTEGER,
+            active         BOOLEAN DEFAULT TRUE,
+            last_refreshed TIMESTAMP,
+            last_scanned   TIMESTAMP
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS conviction_buys (
+            id             SERIAL PRIMARY KEY,
+            date           DATE,
+            session        TEXT,
+            rank           INTEGER,
+            ticker         TEXT,
+            conviction     FLOAT,
+            hold_type      TEXT,
+            entry          FLOAT,
+            stop_loss      FLOAT,
+            target_1       FLOAT,
+            target_2       FLOAT,
+            target_3       FLOAT,
+            position_pct   FLOAT,
+            expected_value FLOAT,
+            reasoning      TEXT,
+            composite      FLOAT,
+            quant_adj      FLOAT,
+            created_at     TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
     # Migration-safe: add new columns to existing deployments
     for ddl in [
         "ALTER TABLE scanner_state   ADD COLUMN IF NOT EXISTS vwap_snapshot      TEXT DEFAULT '{}'",
@@ -226,6 +289,14 @@ def _init_postgres():
         "ALTER TABLE portfolio       ADD COLUMN IF NOT EXISTS user_id            INTEGER DEFAULT 1",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS price_15day        REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS pct_change_15day   REAL",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS quant_adj          FLOAT",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS source_quality     TEXT",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS outcome_1d         TEXT",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS outcome_3d         TEXT",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS outcome_5d         TEXT",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS ret_1d             REAL",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS ret_3d             REAL",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS ret_5d             REAL",
     ]:
         cur.execute(ddl)
 
@@ -418,6 +489,69 @@ def _init_sqlite():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS data_quality (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker     TEXT NOT NULL,
+            source     TEXT NOT NULL,
+            status     TEXT NOT NULL,
+            latency_ms REAL,
+            error      TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS quote_cache (
+            ticker      TEXT PRIMARY KEY,
+            price       REAL,
+            prev_close  REAL,
+            volume      REAL,
+            high        REAL,
+            low         REAL,
+            source      TEXT,
+            created_at  TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS universe (
+            ticker         TEXT PRIMARY KEY,
+            exchange       TEXT,
+            market_cap     INTEGER,
+            adv_20         INTEGER,
+            sector         TEXT,
+            industry       TEXT,
+            sic_code       INTEGER,
+            active         INTEGER DEFAULT 1,
+            last_refreshed TEXT,
+            last_scanned   TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS conviction_buys (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            date           TEXT,
+            session        TEXT,
+            rank           INTEGER,
+            ticker         TEXT,
+            conviction     REAL,
+            hold_type      TEXT,
+            entry          REAL,
+            stop_loss      REAL,
+            target_1       REAL,
+            target_2       REAL,
+            target_3       REAL,
+            position_pct   REAL,
+            expected_value REAL,
+            reasoning      TEXT,
+            composite      REAL,
+            quant_adj      REAL,
+            created_at     TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     for col_sql in [
         "ALTER TABLE scanner_state   ADD COLUMN vwap_snapshot     TEXT DEFAULT '{}'",
         "ALTER TABLE scanner_state   ADD COLUMN momentum_ranking  TEXT DEFAULT '[]'",
@@ -426,6 +560,14 @@ def _init_sqlite():
         "ALTER TABLE portfolio       ADD COLUMN user_id           INTEGER DEFAULT 1",
         "ALTER TABLE signal_outcomes ADD COLUMN price_15day       REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN pct_change_15day  REAL",
+        "ALTER TABLE signal_log      ADD COLUMN quant_adj         REAL",
+        "ALTER TABLE signal_log      ADD COLUMN source_quality    TEXT",
+        "ALTER TABLE signal_outcomes ADD COLUMN outcome_1d        TEXT",
+        "ALTER TABLE signal_outcomes ADD COLUMN outcome_3d        TEXT",
+        "ALTER TABLE signal_outcomes ADD COLUMN outcome_5d        TEXT",
+        "ALTER TABLE signal_outcomes ADD COLUMN ret_1d            REAL",
+        "ALTER TABLE signal_outcomes ADD COLUMN ret_3d            REAL",
+        "ALTER TABLE signal_outcomes ADD COLUMN ret_5d            REAL",
     ]:
         try:
             cur.execute(col_sql)
@@ -1078,9 +1220,34 @@ def get_paper_trades(days: int = 30) -> pd.DataFrame:
 
 # ─── Signal Log ────────────────────────────────────────────────────────────────
 
+def should_suppress(ticker: str, signal_label: str, window_minutes: int = 5) -> bool:
+    """Return True if the same ticker+signal_label fired within the last window_minutes."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT MAX(created_at) FROM signal_log
+                WHERE ticker = %s AND signal_label = %s
+                  AND created_at > NOW() - INTERVAL '%s minutes'
+            """, (ticker, signal_label, window_minutes))
+            row = cur.fetchone(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT MAX(created_at) FROM signal_log
+                WHERE ticker = ? AND signal_label = ?
+                  AND created_at > datetime('now', ? || ' minutes')
+            """, (ticker, signal_label, f"-{window_minutes}"))
+            row = cur.fetchone(); conn.close()
+        return row is not None and row[0] is not None
+    except Exception:
+        return False
+
+
 def log_signal(ticker: str, signal_label: str, score: float,
                score_breakdown: dict, price_at_signal: float,
-               volume_at_signal: float, alert_type: str) -> Optional[int]:
+               volume_at_signal: float, alert_type: str,
+               quant_adj: float = None, source_quality: str = None) -> Optional[int]:
     """Log a scanner signal. Returns the signal_log row id or None on failure."""
     breakdown_json = json.dumps(score_breakdown)
     try:
@@ -1090,10 +1257,13 @@ def log_signal(ticker: str, signal_label: str, score: float,
             cur.execute("""
                 INSERT INTO signal_log
                     (ticker, signal_label, score, score_breakdown,
-                     price_at_signal, volume_at_signal, alert_type)
-                VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                     price_at_signal, volume_at_signal, alert_type,
+                     quant_adj, source_quality)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
             """, (ticker, signal_label, _f(score), breakdown_json,
-                  _f(price_at_signal), _f(volume_at_signal), alert_type))
+                  _f(price_at_signal), _f(volume_at_signal), alert_type,
+                  _f(quant_adj) if quant_adj is not None else None,
+                  source_quality))
             sig_id = cur.fetchone()[0]
             # Insert a pending outcome row so the tracker can find it
             cur.execute("""
@@ -1107,10 +1277,13 @@ def log_signal(ticker: str, signal_label: str, score: float,
             cur.execute("""
                 INSERT INTO signal_log
                     (ticker, signal_label, score, score_breakdown,
-                     price_at_signal, volume_at_signal, alert_type)
-                VALUES (?,?,?,?,?,?,?)
+                     price_at_signal, volume_at_signal, alert_type,
+                     quant_adj, source_quality)
+                VALUES (?,?,?,?,?,?,?,?,?)
             """, (ticker, signal_label, _f(score), breakdown_json,
-                  _f(price_at_signal), _f(volume_at_signal), alert_type))
+                  _f(price_at_signal), _f(volume_at_signal), alert_type,
+                  _f(quant_adj) if quant_adj is not None else None,
+                  source_quality))
             sig_id = cur.lastrowid
             cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (?)", (sig_id,))
             conn.commit(); conn.close()

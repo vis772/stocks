@@ -240,6 +240,149 @@ def _get_portfolio_snapshot() -> List[Dict]:
         return []
 
 
+def _get_conviction_buys() -> List[Dict]:
+    """Load today's conviction buys from DB."""
+    try:
+        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+        today = datetime.now().strftime("%Y-%m-%d")
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT rank, ticker, conviction, hold_type, entry, stop_loss,
+                       target_1, target_2, target_3, position_pct, expected_value,
+                       reasoning, composite, quant_adj, session
+                FROM conviction_buys WHERE date = %s
+                ORDER BY session DESC, rank ASC
+            """, (today,))
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            cur.close(); conn.close()
+        else:
+            from db.database import _get_sqlite_conn as _sq
+            conn = _sq(); cur = conn.cursor()
+            cur.execute("""
+                SELECT rank, ticker, conviction, hold_type, entry, stop_loss,
+                       target_1, target_2, target_3, position_pct, expected_value,
+                       reasoning, composite, quant_adj, session
+                FROM conviction_buys WHERE date = ?
+                ORDER BY session DESC, rank ASC
+            """, (today,))
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            conn.close()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        print(f"  [eod] conviction_buys load failed: {e}")
+        return []
+
+
+def _get_data_quality_stats() -> Dict:
+    """Return quote source breakdown and dedup counts for today."""
+    try:
+        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+        today = datetime.now().strftime("%Y-%m-%d")
+        stats = {"by_source": {}, "dedup_count": 0, "total_attempts": 0, "failed_tickers": []}
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT source, status, COUNT(*), AVG(latency_ms)
+                FROM data_quality
+                WHERE DATE(created_at) = %s
+                GROUP BY source, status
+            """, (today,))
+            rows = cur.fetchall()
+            cur.execute("""
+                SELECT ticker, COUNT(*) as attempts
+                FROM data_quality
+                WHERE DATE(created_at) = %s AND status != 'ok'
+                GROUP BY ticker HAVING COUNT(*) > 2
+            """, (today,))
+            failed = cur.fetchall()
+            cur.close(); conn.close()
+        else:
+            from db.database import _get_sqlite_conn as _sq2
+            conn = _sq2(); cur = conn.cursor()
+            cur.execute("""
+                SELECT source, status, COUNT(*), AVG(latency_ms)
+                FROM data_quality
+                WHERE DATE(created_at) = DATE('now')
+                GROUP BY source, status
+            """)
+            rows = cur.fetchall()
+            cur.execute("""
+                SELECT ticker, COUNT(*) as attempts
+                FROM data_quality
+                WHERE DATE(created_at) = DATE('now') AND status != 'ok'
+                GROUP BY ticker HAVING COUNT(*) > 2
+            """)
+            failed = cur.fetchall()
+            conn.close()
+
+        for source, status, cnt, avg_lat in rows:
+            if source not in stats["by_source"]:
+                stats["by_source"][source] = {"ok": 0, "fail": 0, "avg_ms": 0}
+            if status == "ok":
+                stats["by_source"][source]["ok"] += cnt
+                stats["by_source"][source]["avg_ms"] = round(avg_lat or 0, 1)
+            else:
+                stats["by_source"][source]["fail"] += cnt
+            stats["total_attempts"] += cnt
+        stats["failed_tickers"] = [(r[0], r[1]) for r in failed]
+        return stats
+    except Exception:
+        return {"by_source": {}, "dedup_count": 0, "total_attempts": 0, "failed_tickers": []}
+
+
+def _get_accuracy_metrics() -> Dict:
+    """Load current accuracy metrics from AccuracyValidator."""
+    try:
+        from accuracy_validator import AccuracyValidator
+        return AccuracyValidator().compute_metrics()
+    except Exception:
+        return {}
+
+
+def _get_quant_stats() -> Dict:
+    """Load quant_adj distribution from today's signals."""
+    try:
+        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+        today = datetime.now().strftime("%Y-%m-%d")
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT ticker, quant_adj, score
+                FROM signal_log
+                WHERE DATE(created_at) = %s AND quant_adj IS NOT NULL
+                ORDER BY quant_adj DESC
+            """, (today,))
+            rows = cur.fetchall(); cur.close(); conn.close()
+        else:
+            from db.database import _get_sqlite_conn as _sq3
+            conn = _sq3(); cur = conn.cursor()
+            cur.execute("""
+                SELECT ticker, quant_adj, score
+                FROM signal_log
+                WHERE DATE(created_at) = DATE('now') AND quant_adj IS NOT NULL
+                ORDER BY quant_adj DESC
+            """)
+            rows = cur.fetchall(); conn.close()
+
+        if not rows:
+            return {}
+        adjs = [float(r[1]) for r in rows if r[1] is not None]
+        top5 = [{"ticker": r[0], "quant_adj": round(float(r[1]), 2), "score": round(float(r[2] or 0), 1)}
+                for r in rows[:5]]
+        return {
+            "count": len(adjs),
+            "mean":  round(sum(adjs) / len(adjs), 2) if adjs else 0,
+            "min":   round(min(adjs), 2) if adjs else 0,
+            "max":   round(max(adjs), 2) if adjs else 0,
+            "top5":  top5,
+        }
+    except Exception:
+        return {}
+
+
 def _make_watchpoints(summaries: List[Dict], sec_filings: List[Dict]) -> List[str]:
     """Generate factual watchpoints for tomorrow. No hype language."""
     points = []
@@ -294,11 +437,15 @@ def generate_eod_report(watchlist: List[str]) -> Optional[str]:
     summaries_ok.sort(key=lambda x: abs(x.get("change_pct", 0)), reverse=True)
 
     print("  Checking SEC filings...")
-    sec_filings   = _get_sec_filings(watchlist)
-    todays_sigs   = _get_todays_signals()
-    todays_alerts = _get_todays_alerts()
-    portfolio     = _get_portfolio_snapshot()
-    watchpoints   = _make_watchpoints(summaries_ok, sec_filings)
+    sec_filings    = _get_sec_filings(watchlist)
+    todays_sigs    = _get_todays_signals()
+    todays_alerts  = _get_todays_alerts()
+    portfolio      = _get_portfolio_snapshot()
+    watchpoints    = _make_watchpoints(summaries_ok, sec_filings)
+    conviction_buys = _get_conviction_buys()
+    dq_stats       = _get_data_quality_stats()
+    acc_metrics    = _get_accuracy_metrics()
+    quant_stats    = _get_quant_stats()
 
     gainers = sum(1 for s in summaries_ok if s.get("change_pct", 0) > 0)
     losers  = sum(1 for s in summaries_ok if s.get("change_pct", 0) < 0)
@@ -331,6 +478,53 @@ def generate_eod_report(watchlist: List[str]) -> Optional[str]:
     ]))
     story.append(hdr)
     story.append(_hr())
+
+    # ── 0. CONVICTION BUY LIST ───────────────────────────────────────────────
+    story.append(Paragraph("CONVICTION BUY LIST", ST["section"]))
+    gen_time = datetime.now().strftime("%I:%M %p ET")
+    story.append(Paragraph(f"Generated: {gen_time} | Max 5 names | Trade parameters are indicative only.", ST["note"]))
+    if conviction_buys:
+        # Summary table
+        buy_hdr  = ["#", "Ticker", "Conv.", "Hold Type", "Entry", "Stop", "Size", "EV"]
+        buy_rows = []
+        for b in conviction_buys:
+            buy_rows.append([
+                str(b.get("rank", "")),
+                b.get("ticker", ""),
+                f"{b.get('conviction', 0):.0f}/100",
+                b.get("hold_type", ""),
+                f"${b.get('entry', 0):.2f}",
+                f"${b.get('stop_loss', 0):.2f}",
+                f"{b.get('position_pct', 0):.1f}%",
+                f"+{b.get('expected_value', 0):.2f}%",
+            ])
+        story.append(_table(
+            buy_hdr, buy_rows,
+            [0.3*inch, 0.7*inch, 0.7*inch, 1.1*inch, 0.7*inch, 0.7*inch, 0.55*inch, 0.75*inch],
+            right_cols=[2, 4, 5, 6, 7],
+        ))
+        # Detail rows per ticker
+        for b in conviction_buys:
+            story.append(Spacer(1, 4))
+            t1 = b.get("target_1", 0)
+            t2 = b.get("target_2", 0)
+            t3 = b.get("target_3", 0)
+            story.append(Paragraph(
+                f"<b>{b.get('ticker')}</b>  |  "
+                f"Limit entry: ${b.get('entry',0)*0.995:.2f}  |  "
+                f"T1: ${t1:.2f}  T2: ${t2:.2f}  T3: ${t3:.2f}  |  "
+                f"Composite: {b.get('composite',0):.0f}  Quant adj: {b.get('quant_adj',0):+.1f}",
+                ST["mono"],
+            ))
+            why = b.get("reasoning", "")
+            if why:
+                story.append(Paragraph(f"Why: {why}", ST["note"]))
+    else:
+        story.append(Paragraph(
+            "No high-conviction setups cleared the eligibility gate today. Cash is a position.",
+            ST["body"],
+        ))
+    story.append(_section_rule())
 
     # ── 1. MARKET SUMMARY ────────────────────────────────────────────────────
     story.append(Paragraph("MARKET SUMMARY", ST["section"]))
@@ -439,13 +633,137 @@ def generate_eod_report(watchlist: List[str]) -> Optional[str]:
         story.append(Paragraph("No specific watchpoints identified for tomorrow.", ST["body"]))
     story.append(_section_rule())
 
-    # ── 7. DATA QUALITY NOTE ─────────────────────────────────────────────────
-    story.append(Paragraph("DATA QUALITY NOTE", ST["section"]))
+    # ── 7. QUANT METRICS DASHBOARD ───────────────────────────────────────────
+    story.append(Paragraph("QUANT METRICS DASHBOARD", ST["section"]))
+    story.append(Paragraph(
+        f"Universe coverage: {clean_count} of {len(watchlist)} tickers scanned today.  "
+        f"Quote failures: {fail_count} ({round(fail_count/max(len(watchlist),1)*100,1)}%).  "
+        f"Signal dedup rate: {dq_stats.get('dedup_count', 0)} signals suppressed.",
+        ST["body"],
+    ))
+    # Source breakdown
+    if dq_stats.get("by_source"):
+        src_rows = []
+        for src, sd in sorted(dq_stats["by_source"].items()):
+            total = sd["ok"] + sd["fail"]
+            pct   = round(sd["ok"] / total * 100, 1) if total else 0
+            src_rows.append([src, str(sd["ok"]), str(sd["fail"]), f"{pct}%", f"{sd['avg_ms']}ms"])
+        story.append(_table(
+            ["Source", "OK", "Fail", "Success%", "Avg Latency"],
+            src_rows,
+            [1.2*inch, 0.7*inch, 0.7*inch, 0.9*inch, 1.0*inch],
+            right_cols=[1, 2, 3, 4],
+        ))
+    # Quant adj distribution
+    if quant_stats:
+        story.append(Paragraph(
+            f"Quant adj distribution — n={quant_stats['count']} | "
+            f"mean={quant_stats['mean']:+.2f} | min={quant_stats['min']:+.2f} | max={quant_stats['max']:+.2f}",
+            ST["mono"],
+        ))
+        story.append(Paragraph("Top 5 by quant adjustment:", ST["small"]))
+        if quant_stats.get("top5"):
+            qrows = [[q["ticker"], f"{q['quant_adj']:+.2f}", f"{q['score']:.0f}"] for q in quant_stats["top5"]]
+            story.append(_table(
+                ["Ticker", "Quant Adj", "Final Score"],
+                qrows,
+                [1.0*inch, 1.2*inch, 1.2*inch],
+                right_cols=[1, 2],
+            ))
+    story.append(_section_rule())
+
+    # ── 8. FACTOR PERFORMANCE ────────────────────────────────────────────────
+    story.append(Paragraph("FACTOR PERFORMANCE", ST["section"]))
+    try:
+        import yfinance as yf
+        import numpy as _np
+        iwm_hist  = yf.Ticker("IWM").history(period="2d", auto_adjust=True)
+        iwm_ret1d = 0.0
+        if iwm_hist is not None and len(iwm_hist) >= 2:
+            iwm_ret1d = round((float(iwm_hist["Close"].iloc[-1]) / float(iwm_hist["Close"].iloc[-2]) - 1) * 100, 2)
+
+        high_rvol_rets = [s.get("change_pct", 0) for s in summaries_ok if s.get("rel_volume", 0) >= 2.0]
+        high_rvol_avg  = round(sum(high_rvol_rets) / len(high_rvol_rets), 2) if high_rvol_rets else None
+        universe_ret   = round(sum(s.get("change_pct", 0) for s in summaries_ok) / max(len(summaries_ok), 1), 2)
+
+        factor_rows = [
+            ["Universe avg return (today)", f"{universe_ret:+.2f}%", "—"],
+            ["High-RVOL basket (RVOL≥2)", f"{high_rvol_avg:+.2f}%" if high_rvol_avg is not None else "—", f"n={len(high_rvol_rets)}"],
+            ["IWM (Russell 2000)", f"{iwm_ret1d:+.2f}%", "Benchmark"],
+        ]
+        story.append(_table(
+            ["Factor", "Return", "Note"],
+            factor_rows,
+            [3.0*inch, 1.0*inch, 1.5*inch],
+            right_cols=[1],
+        ))
+    except Exception as _fp_e:
+        story.append(Paragraph(f"Factor data unavailable: {_fp_e}", ST["note"]))
+    story.append(_section_rule())
+
+    # ── 9. SIGNAL ACCURACY (ROLLING) ────────────────────────────────────────
+    story.append(Paragraph("SIGNAL ACCURACY (ROLLING)", ST["section"]))
+    if acc_metrics and not acc_metrics.get("insufficient"):
+        n = acc_metrics.get("n", 0)
+        ov = acc_metrics.get("overall", {})
+        story.append(Paragraph(
+            f"Sample: n={n} {'⚠ INSUFFICIENT DATA (<30)' if n < 30 else ''}  |  "
+            f"Win Rate: {ov.get('win_rate', 0):.1%}  |  "
+            f"Profit Factor: {ov.get('profit_factor') or '—'}  |  "
+            f"EV: {ov.get('expected_value', 0):+.3f}  |  "
+            f"Sharpe: {ov.get('sharpe', 0):.2f}",
+            ST["body"],
+        ))
+        sig_flag = ov.get("significant", False)
+        story.append(Paragraph(
+            f"t-stat: {ov.get('t_stat', 0):.2f}  |  p-value: {ov.get('p_value', 1):.4f}  |  "
+            f"{'✓ STATISTICALLY SIGNIFICANT (p<0.05, n≥30)' if sig_flag else '✗ not significant'}",
+            ST["mono"],
+        ))
+        # By score bucket
+        by_b = acc_metrics.get("by_bucket", {})
+        if by_b:
+            brows = []
+            for label in ["65-70", "70-75", "75-80", "80-85", "85+"]:
+                bm = by_b.get(label, {})
+                bn = bm.get("n", 0)
+                brows.append([
+                    label,
+                    str(bn),
+                    f"{bm.get('win_rate', 0):.1%}" if bn else "—",
+                    f"{bm.get('profit_factor') or '—'}",
+                    f"{bm.get('expected_value', 0):+.3f}" if bn else "—",
+                    "⚠ low n" if bn < 30 else ("✓ sig" if bm.get("significant") else ""),
+                ])
+            story.append(_table(
+                ["Bucket", "n", "Win Rate", "P.Factor", "EV", "Status"],
+                brows,
+                [0.8*inch, 0.4*inch, 0.8*inch, 0.8*inch, 0.7*inch, 0.9*inch],
+                right_cols=[1, 2, 3, 4],
+            ))
+    else:
+        n = acc_metrics.get("n", 0) if acc_metrics else 0
+        story.append(Paragraph(
+            f"⚠ Insufficient data (n={n} — need ≥30 resolved signals). "
+            "Accuracy stats will appear once enough signals have 5-day outcomes.",
+            ST["note"],
+        ))
+    story.append(_section_rule())
+
+    # ── 10. DATA QUALITY LOG ────────────────────────────────────────────────
+    story.append(Paragraph("DATA QUALITY LOG", ST["section"]))
     story.append(Paragraph(
         f"{clean_count} of {len(watchlist)} tickers returned clean data. "
-        f"{fail_count} tickers had no quote available.",
-        ST["note"]
+        f"{fail_count} tickers had no quote available this session.",
+        ST["note"],
     ))
+    if dq_stats.get("failed_tickers"):
+        dq_rows = [(t, str(cnt), "⚠ >2 failures") for t, cnt in dq_stats["failed_tickers"]]
+        story.append(_table(
+            ["Ticker", "Fail Count", "Status"],
+            dq_rows,
+            [1.0*inch, 1.0*inch, 2.0*inch],
+        ))
 
     # Footer spacer
     story.append(Spacer(1, 20))

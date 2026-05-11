@@ -25,6 +25,13 @@ from alerts import (
 )
 from morning_screen import build_todays_watchlist, load_todays_watchlist, WATCHLIST_FILE
 
+try:
+    from quant_engine import run_quant_for_ticker, QuantEngine
+    _QUANT_AVAILABLE = True
+except Exception as _qe:
+    _QUANT_AVAILABLE = False
+    print(f"  [quant] import failed: {_qe}")
+
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 STATE_FILE   = "scanner_state.json"
 
@@ -880,26 +887,61 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
 
             signal_label = result.get("signal", "Hold")
 
+            # Deduplication: suppress if same ticker+signal fired within last 5 min
+            try:
+                from db.database import should_suppress
+                if should_suppress(ticker, signal_label, window_minutes=5):
+                    print(f"  [dedup] Suppressed {ticker} {signal_label} — duplicate within 5min")
+                    continue
+            except Exception:
+                pass
+
+            # Quant adjustment block (must complete in <500ms or is skipped)
+            quant_adj    = 0.0
+            atr_14       = 0.0
+            rsi_quant    = None
+            sigma_hist   = None
+            source_qual  = "live"
+            if _QUANT_AVAILABLE:
+                try:
+                    quant_adj, atr_14, rsi_quant, sigma_hist = run_quant_for_ticker(ticker, result)
+                    # Apply quant adjustment to final score (additive, capped 0-100)
+                    adj_score = round(float(max(0, min(100, score + quant_adj))), 1)
+                    print(f"  [quant] {ticker} base={score:.0f} adj={quant_adj:+.1f} final={adj_score:.0f}")
+                    score = adj_score
+                    signal_label = result.get("signal", "Hold")  # re-evaluate after adjustment
+                except Exception as _qerr:
+                    print(f"  [quant] {ticker} error: {_qerr}")
+
             # Log every signal regardless of score — full data for accuracy test
             try:
                 from db.database import log_signal
+                breakdown = {
+                    "technical":   float(result.get("technical_score") or 0),
+                    "catalyst":    float(result.get("catalyst_score") or 0),
+                    "fundamental": float(result.get("fundamental_score") or 0),
+                    "risk":        float(result.get("risk_score") or 0),
+                    "sentiment":   float(result.get("sentiment_score") or 0),
+                }
+                if rsi_quant is not None:
+                    breakdown["rsi"] = round(float(rsi_quant), 1)
+                if sigma_hist is not None:
+                    breakdown["sigma_hist"] = round(float(sigma_hist), 4)
+                if atr_14:
+                    breakdown["atr_14"] = round(float(atr_14), 4)
                 sig_id = log_signal(
                     ticker           = ticker,
                     signal_label     = signal_label,
                     score            = round(score, 1),
-                    score_breakdown  = {
-                        "technical":   float(result.get("technical_score") or 0),
-                        "catalyst":    float(result.get("catalyst_score") or 0),
-                        "fundamental": float(result.get("fundamental_score") or 0),
-                        "risk":        float(result.get("risk_score") or 0),
-                        "sentiment":   float(result.get("sentiment_score") or 0),
-                    },
+                    score_breakdown  = breakdown,
                     price_at_signal  = price,
                     volume_at_signal = result.get("volume", 0),
                     alert_type       = "scan",
+                    quant_adj        = quant_adj,
+                    source_quality   = source_qual,
                 )
                 if sig_id:
-                    print(f"  [signal_log] ✓ {ticker} | {signal_label} | score={score:.0f} | id={sig_id}")
+                    print(f"  [signal_log] ✓ {ticker} | {signal_label} | score={score:.0f} | quant={quant_adj:+.1f} | id={sig_id}")
                 else:
                     print(f"  [signal_log] ✗ {ticker} — log_signal returned None (check DB connection)")
             except Exception as _e:
@@ -933,6 +975,14 @@ def run_scanner():
     print("Axiom Terminal Scanner Starting...")
     print(f"Time: {now_et().strftime('%Y-%m-%d %H:%M:%S ET')}")
     print("="*60 + "\n")
+
+    # Initialize DB — creates all tables including new ones from this version
+    try:
+        from db.database import initialize_db
+        initialize_db()
+        print("  ✓ DB initialized")
+    except Exception as _dbi_e:
+        print(f"  [startup] DB init failed: {_dbi_e}")
 
     # ── Startup status ────────────────────────────────────────────────────────
     _et_start = now_et()
@@ -1129,6 +1179,18 @@ def run_scanner():
                     alert_digest(state.alert_log[-10:], top_movers=top_movers[:5])
                     last_digest_time = et
 
+                # Conviction buy list at 4:00 PM ET (market close)
+                if et.hour == 16 and 0 <= et.minute < 5:
+                    _close_key = f"conviction_close_{today_str}"
+                    if not state.already_alerted(_close_key):
+                        print("\n[CONVICTION] Running 4 PM close conviction scan...")
+                        try:
+                            from conviction_engine import run_conviction_engine
+                            run_conviction_engine(session="close")
+                            state.mark_alerted(_close_key)
+                        except Exception as _cve:
+                            print(f"  [conviction] close scan failed: {_cve}")
+
                 # EOD report at 4:15 PM ET
                 if et.hour == 16 and 15 <= et.minute < 20 and not eod_report_sent:
                     print("\n[EOD REPORT] Generating end-of-day report...")
@@ -1196,6 +1258,30 @@ def run_scanner():
                 time.sleep(PREMARKET_SCAN_INTERVAL)
 
             else:
+                # After-hours conviction scan at 8:30 PM ET
+                if et.hour == 20 and 30 <= et.minute < 35:
+                    _ah_key = f"conviction_ah_{today_str}"
+                    if not state.already_alerted(_ah_key):
+                        print("\n[CONVICTION] Running 8:30 PM after-hours conviction scan...")
+                        try:
+                            from conviction_engine import run_conviction_engine
+                            run_conviction_engine(session="afterhours")
+                            state.mark_alerted(_ah_key)
+                        except Exception as _cve2:
+                            print(f"  [conviction] afterhours scan failed: {_cve2}")
+
+                # Nightly accuracy validation at 10 PM ET
+                if et.hour == 22 and 0 <= et.minute < 5:
+                    _acc_key = f"accuracy_nightly_{today_str}"
+                    if not state.already_alerted(_acc_key):
+                        print("\n[ACCURACY] Running nightly validation...")
+                        try:
+                            from accuracy_validator import run_nightly_validation
+                            run_nightly_validation()
+                            state.mark_alerted(_acc_key)
+                        except Exception as _ave:
+                            print(f"  [accuracy] nightly validation failed: {_ave}")
+
                 print(f"  [CLOSED] {et.strftime('%H:%M ET')} — sleeping 10 min")
                 time.sleep(600)
 
