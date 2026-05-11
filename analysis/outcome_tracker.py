@@ -31,7 +31,7 @@ def _is_market_hours() -> bool:
     if et.weekday() >= 5:
         return False
     after_open   = (et.hour > 9)  or (et.hour == 9  and et.minute >= 30)
-    before_close = (et.hour < 16) or (et.hour == 16 and et.minute == 0)
+    before_close = (et.hour < 16) or (et.hour == 16 and et.minute <= 30)
     return after_open and before_close
 
 
