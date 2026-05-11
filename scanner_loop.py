@@ -1071,11 +1071,44 @@ def run_scanner():
 
     _SLEEP_MAP = {"MARKET": 60, "PREMARKET": 120, "AFTERHOURS": 120, "OVERNIGHT": 300, "WEEKEND": 600}
 
+    _MODE_LABELS = {
+        "MARKET":     "Market Hours",
+        "PREMARKET":  "Pre-Market",
+        "AFTERHOURS": "After-Hours",
+        "OVERNIGHT":  "Overnight",
+        "WEEKEND":    "Weekend",
+    }
+    _MODE_DESC = {
+        "MARKET":     "Full scan every 60s — tickers, predictions, paper broker active.",
+        "PREMARKET":  "Pre-market scan every 120s — gaps, news, SEC EDGAR.",
+        "AFTERHOURS": "After-hours every 120s — AH price alerts, conviction at 8:30 PM ET.",
+        "OVERNIGHT":  "Light scan every 5min — SEC EDGAR + portfolio maintenance only.",
+        "WEEKEND":    "Weekend mode — grading signals & refreshing universe.",
+    }
+    _last_mode: Optional[str] = None
+
     while True:
         try:
             et        = now_et()
             today_str = et.strftime("%Y-%m-%d")
             mode      = get_scan_mode()
+
+            # ── Mode transition: Pushover alert + DB write ────────────────────
+            if mode != _last_mode:
+                print(f"\n[MODE] {_last_mode or 'STARTUP'} → {mode} at {et.strftime('%H:%M ET')}")
+                _log("info", f"Mode transition: {_last_mode or 'STARTUP'} → {mode}")
+                try:
+                    from db.database import set_scanner_control
+                    set_scanner_control(current_mode=mode)
+                except Exception:
+                    pass
+                if _last_mode is not None:  # skip the very first iteration
+                    send_alert(
+                        title=f"Axiom — {_MODE_LABELS.get(mode, mode)}",
+                        message=_MODE_DESC.get(mode, mode),
+                        priority=PRIORITY_NORMAL,
+                    )
+                _last_mode = mode
 
             # ── Control flags: pause / force-scan ────────────────────────────
             try:

@@ -126,6 +126,7 @@ def _init_postgres():
             paused             BOOLEAN DEFAULT FALSE,
             force_scan         BOOLEAN DEFAULT FALSE,
             scanner_started_at TIMESTAMP,
+            current_mode       TEXT DEFAULT 'UNKNOWN',
             updated_at         TIMESTAMP DEFAULT NOW()
         )
     """)
@@ -330,9 +331,10 @@ def _init_postgres():
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS ret_1d             REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS ret_3d             REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS ret_5d             REAL",
-        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS shares             REAL",
-        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS limit_entry        REAL",
-        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS conviction_score   REAL",
+        "ALTER TABLE conviction_buys  ADD COLUMN IF NOT EXISTS shares             REAL",
+        "ALTER TABLE conviction_buys  ADD COLUMN IF NOT EXISTS limit_entry        REAL",
+        "ALTER TABLE conviction_buys  ADD COLUMN IF NOT EXISTS conviction_score   REAL",
+        "ALTER TABLE scanner_control  ADD COLUMN IF NOT EXISTS current_mode       TEXT DEFAULT 'UNKNOWN'",
     ]:
         cur.execute(ddl)
 
@@ -429,6 +431,7 @@ def _init_sqlite():
             paused             INTEGER DEFAULT 0,
             force_scan         INTEGER DEFAULT 0,
             scanner_started_at TEXT,
+            current_mode       TEXT DEFAULT 'UNKNOWN',
             updated_at         TEXT DEFAULT (datetime('now'))
         )
     """)
@@ -632,9 +635,10 @@ def _init_sqlite():
         "ALTER TABLE signal_outcomes ADD COLUMN ret_1d            REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN ret_3d            REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN ret_5d            REAL",
-        "ALTER TABLE conviction_buys ADD COLUMN shares            REAL",
-        "ALTER TABLE conviction_buys ADD COLUMN limit_entry       REAL",
-        "ALTER TABLE conviction_buys ADD COLUMN conviction_score  REAL",
+        "ALTER TABLE conviction_buys  ADD COLUMN shares            REAL",
+        "ALTER TABLE conviction_buys  ADD COLUMN limit_entry       REAL",
+        "ALTER TABLE conviction_buys  ADD COLUMN conviction_score  REAL",
+        "ALTER TABLE scanner_control  ADD COLUMN current_mode      TEXT DEFAULT 'UNKNOWN'",
     ]:
         try:
             cur.execute(col_sql)
@@ -1022,40 +1026,43 @@ def save_scanner_state(state_dict: dict):
 # ─── Scanner Control (pause / force-scan flags) ───────────────────────────────
 
 def get_scanner_control() -> dict:
-    """Read pause and force_scan flags from scanner_control table."""
-    default = {"paused": False, "force_scan": False, "scanner_started_at": None, "updated_at": None}
+    """Read pause, force_scan, and current_mode from scanner_control table."""
+    default = {"paused": False, "force_scan": False, "scanner_started_at": None,
+               "updated_at": None, "current_mode": "UNKNOWN"}
     try:
         if _is_postgres():
             conn = _get_pg_conn()
             cur  = conn.cursor()
             cur.execute("""
-                SELECT paused, force_scan, scanner_started_at, updated_at
+                SELECT paused, force_scan, scanner_started_at, updated_at, current_mode
                 FROM scanner_control WHERE id = 1
             """)
             row = cur.fetchone()
             cur.close(); conn.close()
             if row:
                 return {"paused": bool(row[0]), "force_scan": bool(row[1]),
-                        "scanner_started_at": row[2], "updated_at": row[3]}
+                        "scanner_started_at": row[2], "updated_at": row[3],
+                        "current_mode": row[4] or "UNKNOWN"}
         else:
             conn = _get_sqlite_conn()
             cur  = conn.cursor()
             cur.execute("""
-                SELECT paused, force_scan, scanner_started_at, updated_at
+                SELECT paused, force_scan, scanner_started_at, updated_at, current_mode
                 FROM scanner_control WHERE id = 1
             """)
             row = cur.fetchone()
             conn.close()
             if row:
                 return {"paused": bool(row[0]), "force_scan": bool(row[1]),
-                        "scanner_started_at": row[2], "updated_at": row[3]}
+                        "scanner_started_at": row[2], "updated_at": row[3],
+                        "current_mode": row[4] or "UNKNOWN"}
     except Exception as e:
         print(f"  [db] get_scanner_control failed: {e}")
     return default
 
 
 def set_scanner_control(paused: bool = None, force_scan: bool = None,
-                        scanner_started_at=None) -> None:
+                        scanner_started_at=None, current_mode: str = None) -> None:
     """Update scanner control flags."""
     if _is_postgres():
         ph = "%s"
@@ -1068,6 +1075,8 @@ def set_scanner_control(paused: bool = None, force_scan: bool = None,
         sets.append(f"force_scan = {ph}"); vals.append(force_scan)
     if scanner_started_at is not None:
         sets.append(f"scanner_started_at = {ph}"); vals.append(str(scanner_started_at))
+    if current_mode is not None:
+        sets.append(f"current_mode = {ph}"); vals.append(current_mode)
     if not sets:
         return
     sets.append("updated_at = NOW()" if _is_postgres() else "updated_at = datetime('now')")

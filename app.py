@@ -1252,27 +1252,11 @@ with tab0:
         _sts = {"signals_today": 0, "alerts_today": 0, "top_signal": None,
                 "scan_count": 0, "last_updated": None}
 
-    _paused     = _ctl.get("paused", False)
-    _force_scan = _ctl.get("force_scan", False)
-    _started_at = _ctl.get("scanner_started_at")
-    _last_upd   = _sts.get("last_updated")
-
-    # ── Market status helper ──────────────────────────────────────────────────
-    def _mkt_status():
-        try:
-            from zoneinfo import ZoneInfo
-            _et = datetime.now(ZoneInfo("America/New_York"))
-        except ImportError:
-            import pytz
-            _et = datetime.now(pytz.timezone("America/New_York"))
-        wd, h, m = _et.weekday(), _et.hour, _et.minute
-        if wd >= 5:                                         return "Weekend"
-        if h < 4:                                           return "Closed"
-        if h < 9 or (h == 9 and m < 25):                   return "Pre-Market"
-        if h < 16 or (h == 16 and m <= 30):                return "Open"
-        return "After-Hours"
-
-    _mkt = _mkt_status()
+    _paused      = _ctl.get("paused", False)
+    _force_scan  = _ctl.get("force_scan", False)
+    _started_at  = _ctl.get("scanner_started_at")
+    _last_upd    = _sts.get("last_updated")
+    _cur_mode    = _ctl.get("current_mode", "UNKNOWN")
 
     # ── Minutes since last scan ───────────────────────────────────────────────
     _mins_ago = None
@@ -1297,37 +1281,56 @@ with tab0:
         except Exception:
             pass
 
+    # ── Mode → display config ─────────────────────────────────────────────────
+    _MODE_UI = {
+        "MARKET":     ("#16a34a", "rgba(22,163,74,0.07)",   "rgba(22,163,74,0.2)",
+                       "MARKET — scanning every 60s",
+                       "Full ticker scan, predictions, paper broker active."),
+        "PREMARKET":  ("#2563eb", "rgba(37,99,235,0.07)",   "rgba(37,99,235,0.2)",
+                       "PRE-MARKET — scanning every 120s",
+                       "Gap alerts, news, SEC EDGAR checks running."),
+        "AFTERHOURS": ("#7c3aed", "rgba(124,58,237,0.07)",  "rgba(124,58,237,0.2)",
+                       "AFTER-HOURS — monitoring every 120s",
+                       "AH price alerts active. Conviction scan at 8:30 PM ET."),
+        "OVERNIGHT":  ("#475569", "rgba(71,85,105,0.07)",   "rgba(71,85,105,0.2)",
+                       "OVERNIGHT — light scan every 5min",
+                       "SEC EDGAR + portfolio maintenance only. No new signals."),
+        "WEEKEND":    ("#475569", "rgba(71,85,105,0.07)",   "rgba(71,85,105,0.2)",
+                       "WEEKEND — grading signals",
+                       "Accuracy grading active. Universe refresh Sat 8 AM ET."),
+        "UNKNOWN":    ("#475569", "rgba(71,85,105,0.07)",   "rgba(71,85,105,0.2)",
+                       "CONNECTING…",
+                       "Waiting for scanner heartbeat."),
+    }
+
     # ── 1. STATUS INDICATOR ───────────────────────────────────────────────────
     st.markdown('<div class="ctrl-section">Scanner Status</div>', unsafe_allow_html=True)
 
     if _paused:
-        _dot_color = "#c2610f"
-        _dot_bg    = "rgba(194,97,15,0.08)"
-        _dot_border= "rgba(194,97,15,0.2)"
+        _dot_color  = "#c2610f"
+        _dot_bg     = "rgba(194,97,15,0.08)"
+        _dot_border = "rgba(194,97,15,0.2)"
         _status_lbl = "PAUSED — manual hold"
         _status_sub = "Scanner is holding. Tap Resume to restart."
-    elif _mkt in ("Open", "Pre-Market"):
-        if _mins_ago is not None and _mins_ago <= 45:
-            _dot_color = "#16a34a"
-            _dot_bg    = "rgba(22,163,74,0.07)"
-            _dot_border= "rgba(22,163,74,0.2)"
-            _int_label = "every 60s" if _mkt == "Open" else "every 90s"
-            _status_lbl = f"ACTIVE — scanning {_int_label}"
-            _status_sub = f"Last scan {_mins_ago}m ago · {_sts['scan_count']} scans today"
-        else:
-            _dot_color = "#dc2626"
-            _dot_bg    = "rgba(220,38,38,0.07)"
-            _dot_border= "rgba(220,38,38,0.2)"
-            _status_lbl = "OFFLINE — no scan in 45+ min"
-            _ago_str = f"{_mins_ago}m ago" if _mins_ago is not None else "unknown"
-            _status_sub = f"Last scan: {_ago_str}. Check Railway logs."
     else:
-        _dot_color = "#c2610f"
-        _dot_bg    = "rgba(194,97,15,0.06)"
-        _dot_border= "rgba(194,97,15,0.18)"
-        _status_lbl = "SLEEPING — market closed"
-        _nxt = "Monday 9:30 AM ET" if _mkt == "Weekend" else "9:30 AM ET"
-        _status_sub = f"Next scan window: {_nxt}"
+        # Use the mode the scanner last wrote; fall back to OFFLINE if stale
+        _offline = _mins_ago is not None and _mins_ago > 10 and _cur_mode in ("MARKET", "PREMARKET")
+        if _offline:
+            _dot_color  = "#dc2626"
+            _dot_bg     = "rgba(220,38,38,0.07)"
+            _dot_border = "rgba(220,38,38,0.2)"
+            _ago_str    = f"{_mins_ago}m ago" if _mins_ago is not None else "unknown"
+            _status_lbl = "OFFLINE — no scan in 10+ min"
+            _status_sub = f"Last scan: {_ago_str}. Check Railway logs."
+        else:
+            _ui = _MODE_UI.get(_cur_mode, _MODE_UI["UNKNOWN"])
+            _dot_color, _dot_bg, _dot_border = _ui[0], _ui[1], _ui[2]
+            _status_lbl = _ui[3]
+            _base_sub   = _ui[4]
+            if _mins_ago is not None and _cur_mode in ("MARKET", "PREMARKET"):
+                _status_sub = f"{_base_sub} Last scan {_mins_ago}m ago · {_sts['scan_count']} scans today"
+            else:
+                _status_sub = _base_sub
 
     st.markdown(f"""
     <div class="ctrl-status" style="background:{_dot_bg};border:1px solid {_dot_border};">
@@ -1387,9 +1390,7 @@ with tab0:
     _top = _sts.get("top_signal")
     _top_str = f"{_top['ticker']} — {_top['label']} — Score {_top['score']:.0f}" if _top else "No signals yet"
 
-    _mkt_color = {"Open": "g", "Pre-Market": "a", "After-Hours": "a",
-                  "Weekend": "", "Closed": ""}.get(_mkt, "")
-
+    _mode_color = {"MARKET": "g", "PREMARKET": "a", "AFTERHOURS": "a"}.get(_cur_mode, "")
     _last_scan_str = f"{_mins_ago}m ago" if _mins_ago is not None else "—"
 
     st.markdown(f"""
@@ -1411,8 +1412,8 @@ with tab0:
         <span class="ctrl-val" style="font-size:0.78em;max-width:58%;text-align:right;">{_top_str}</span>
       </div>
       <div class="ctrl-row">
-        <span class="ctrl-lbl">Market status</span>
-        <span class="ctrl-val {_mkt_color}">{_mkt}</span>
+        <span class="ctrl-lbl">Scanner mode</span>
+        <span class="ctrl-val {_mode_color}">{_cur_mode}</span>
       </div>
       <div class="ctrl-row">
         <span class="ctrl-lbl">Scanner uptime</span>
