@@ -45,14 +45,14 @@ def _log(level: str, message: str) -> None:
         pass
 
 # Tiingo IEX real-time stream — module-level singleton, lazily started by
-# _ensure_stream() once the watchlist is known. No-op when TIINGO_TOKEN unset.
+# _ensure_stream() once the watchlist is known. No-op when TIINGO_API_KEY unset.
 try:
     from data.tiingo_stream import TiingoStream
 except Exception as _tiingo_import_err:
     TiingoStream = None
     print(f"  [tiingo] import failed: {_tiingo_import_err}")
 _stream: Optional["TiingoStream"] = None
-TIINGO_FRESH_MS = 5000   # treat ticks newer than this as live; else fall back to Finnhub
+TIINGO_FRESH_MS = 90_000  # REST polls every 60 s; treat data <90 s old as live
 
 # ─── Alert thresholds ─────────────────────────────────────────────────────────
 VOLUME_SPIKE_THRESHOLD     = 2.5
@@ -355,7 +355,7 @@ def _ensure_stream(watchlist: List[str]) -> None:
     global _stream
     if TiingoStream is None:
         return
-    token = os.environ.get("TIINGO_TOKEN", "")
+    token = os.environ.get("TIINGO_API_KEY", "")
     if not token:
         return
     tickers = _stream_subscription_set(watchlist)

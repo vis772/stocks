@@ -22,7 +22,7 @@ CRITERIA = {
 
 
 def _tiingo_headers() -> dict:
-    token = os.environ.get("TIINGO_TOKEN", "")
+    token = os.environ.get("TIINGO_API_KEY", "")
     return {"Authorization": f"Token {token}", "Content-Type": "application/json"}
 
 
@@ -47,9 +47,9 @@ class UniverseManager:
         Returns {"added": N, "removed": N, "total": N}.
         """
         _log("Starting universe refresh...")
-        token = os.environ.get("TIINGO_TOKEN", "")
+        token = os.environ.get("TIINGO_API_KEY", "")
         if not token:
-            _log("TIINGO_TOKEN not set — universe refresh skipped")
+            _log("TIINGO_API_KEY not set — universe refresh skipped")
             return {"added": 0, "removed": 0, "total": 0}
 
         # 1. Fetch full ticker list from Tiingo
