@@ -8,9 +8,12 @@ import requests
 import feedparser
 import re
 import threading
+import traceback
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Set
+
+print(f"AXIOM_TEST_SCAN = {os.environ.get('AXIOM_TEST_SCAN', 'NOT SET')}")
 
 from alerts import (
     alert_volume_spike, alert_price_move,
@@ -916,10 +919,23 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
 # ─── Main loop ────────────────────────────────────────────────────────────────
 
 def run_scanner():
+  try:
     print("\n" + "="*60)
     print("Axiom Terminal Scanner Starting...")
     print(f"Time: {now_et().strftime('%Y-%m-%d %H:%M:%S ET')}")
     print("="*60 + "\n")
+
+    # ── Startup status ────────────────────────────────────────────────────────
+    _et_start = now_et()
+    _test_scan_mode = os.environ.get("AXIOM_TEST_SCAN", "").strip() == "1"
+    print(f"  [startup] test_scan_mode={_test_scan_mode}  weekday={_et_start.weekday()}")
+    if _et_start.weekday() >= 5:
+        print("Market closed - weekend. Next scan Monday 9:30 AM ET")
+        send_alert(
+            title="Axiom Terminal — Online",
+            message="Market closed today. Next scan Monday 9:30 AM ET",
+            priority=PRIORITY_NORMAL,
+        )
 
     state              = ScannerState()
     watchlist:         List[str] = []
@@ -934,6 +950,40 @@ def run_scanner():
         start_outcome_tracker()
     except Exception as _e:
         print(f"  [scanner] outcome tracker failed to start: {_e}")
+
+    # ── Test scan mode: one full cycle regardless of day/market hours ─────────
+    if _test_scan_mode:
+        print("\n[TEST MODE] Bypassing market-hours guardrail — running one scan cycle")
+        try:
+            _test_wl = load_todays_watchlist()
+        except Exception as _wl_e:
+            print(f"  [TEST MODE] load_todays_watchlist failed ({_wl_e}), falling back to DEFAULT_UNIVERSE")
+            _test_wl = []
+        if not _test_wl:
+            from config import DEFAULT_UNIVERSE
+            _test_wl = DEFAULT_UNIVERSE
+        print(f"  Watchlist: {len(_test_wl)} stocks")
+
+        print("  Running scan_one_ticker on all watchlist stocks...")
+        _test_alerts: List[str] = []
+        with ThreadPoolExecutor(max_workers=15) as _ex:
+            _futs = {_ex.submit(scan_one_ticker, t, state): t for t in _test_wl}
+            for _fut in as_completed(_futs, timeout=60):
+                try:
+                    _test_alerts.extend(_fut.result())
+                except Exception:
+                    pass
+        print(f"  scan_one_ticker complete — {len(_test_alerts)} alert(s)")
+
+        print("  Running prediction scan (logs to signal_log)...")
+        watchlist = _test_wl
+        try:
+            run_prediction_scan(watchlist, state)
+        except Exception as _pred_e:
+            print(f"  [TEST MODE] prediction scan error:")
+            traceback.print_exc()
+
+        print("[TEST MODE] Complete — resuming normal schedule\n")
 
     while True:
         try:
@@ -1096,6 +1146,11 @@ def run_scanner():
         except Exception as e:
             print(f"  [scanner] Error: {e}")
             time.sleep(30)
+
+  except Exception as _fatal:
+    print("\n[FATAL] run_scanner() crashed before entering main loop:")
+    traceback.print_exc()
+    raise
 
 
 if __name__ == "__main__":
