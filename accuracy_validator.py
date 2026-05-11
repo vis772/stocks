@@ -192,15 +192,71 @@ class AccuracyValidator:
                 if bd["rets"]:
                     by_bucket[label] = _metrics_from_rets(bd["rets"])
 
-            return {
-                "n":         len(all_rets),
-                "overall":   overall,
-                "by_bucket": by_bucket,
+            result = {
+                "n":           len(all_rets),
+                "overall":     overall,
+                "by_bucket":   by_bucket,
                 "insufficient": len(all_rets) < 30,
             }
+
+            # Upsert per-bucket stats into accuracy_metrics
+            self._upsert_accuracy_metrics(by_bucket)
+
+            return result
         except Exception as e:
             print(f"  [accuracy] compute_metrics failed: {e}")
             return {"n": 0, "insufficient": True}
+
+    def _upsert_accuracy_metrics(self, by_bucket: dict) -> None:
+        """Write per-bucket metrics to accuracy_metrics table."""
+        try:
+            from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+            if _is_postgres():
+                conn = _get_pg_conn(); cur = conn.cursor()
+                for bucket, m in by_bucket.items():
+                    cur.execute("""
+                        INSERT INTO accuracy_metrics
+                            (bucket, sample_n, win_rate, profit_factor, ev_per_trade,
+                             sharpe, max_drawdown, t_stat, p_value, updated_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, NOW())
+                        ON CONFLICT (bucket) DO UPDATE SET
+                            sample_n      = EXCLUDED.sample_n,
+                            win_rate      = EXCLUDED.win_rate,
+                            profit_factor = EXCLUDED.profit_factor,
+                            ev_per_trade  = EXCLUDED.ev_per_trade,
+                            sharpe        = EXCLUDED.sharpe,
+                            max_drawdown  = EXCLUDED.max_drawdown,
+                            t_stat        = EXCLUDED.t_stat,
+                            p_value       = EXCLUDED.p_value,
+                            updated_at    = NOW()
+                    """, (bucket, m.get("n"), m.get("win_rate"), m.get("profit_factor"),
+                          m.get("expected_value"), m.get("sharpe"), m.get("max_drawdown"),
+                          m.get("t_stat"), m.get("p_value")))
+                conn.commit(); cur.close(); conn.close()
+            else:
+                conn = _get_sqlite_conn()
+                for bucket, m in by_bucket.items():
+                    conn.execute("""
+                        INSERT INTO accuracy_metrics
+                            (bucket, sample_n, win_rate, profit_factor, ev_per_trade,
+                             sharpe, max_drawdown, t_stat, p_value)
+                        VALUES (?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT (bucket) DO UPDATE SET
+                            sample_n      = excluded.sample_n,
+                            win_rate      = excluded.win_rate,
+                            profit_factor = excluded.profit_factor,
+                            ev_per_trade  = excluded.ev_per_trade,
+                            sharpe        = excluded.sharpe,
+                            max_drawdown  = excluded.max_drawdown,
+                            t_stat        = excluded.t_stat,
+                            p_value       = excluded.p_value,
+                            updated_at    = datetime('now')
+                    """, (bucket, m.get("n"), m.get("win_rate"), m.get("profit_factor"),
+                          m.get("expected_value"), m.get("sharpe"), m.get("max_drawdown"),
+                          m.get("t_stat"), m.get("p_value")))
+                conn.commit(); conn.close()
+        except Exception as e:
+            print(f"  [accuracy] _upsert_accuracy_metrics failed: {e}")
 
     def get_bucket_win_rate(self, score: float) -> Optional[float]:
         """Return win rate for the score's bucket, or None if insufficient data."""
@@ -218,11 +274,97 @@ class AccuracyValidator:
             return None
 
     def is_bucket_disabled(self, score: float) -> bool:
-        """Return True if win_rate < 0.45 for this score bucket (disable buys)."""
+        """Return True if the accuracy_metrics row has disabled=True OR win_rate < 0.45."""
+        b = _bucket(score)
+        try:
+            from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+            if _is_postgres():
+                conn = _get_pg_conn(); cur = conn.cursor()
+                cur.execute("SELECT disabled, win_rate, sample_n FROM accuracy_metrics WHERE bucket = %s", (b,))
+                row = cur.fetchone(); cur.close(); conn.close()
+            else:
+                conn = _get_sqlite_conn(); cur = conn.cursor()
+                cur.execute("SELECT disabled, win_rate, sample_n FROM accuracy_metrics WHERE bucket = ?", (b,))
+                row = cur.fetchone(); conn.close()
+            if row:
+                if bool(row[0]):
+                    return True
+                n = row[2] or 0
+                if n >= 30 and row[1] is not None and row[1] < 0.45:
+                    return True
+                return False
+        except Exception:
+            pass
         wr = self.get_bucket_win_rate(score)
         if wr is None:
             return False
         return wr < 0.45
+
+    def self_check(self) -> dict:
+        """
+        Run a health check on the validator pipeline. Logs result to validator_health table.
+        Returns a dict with signals_graded, signals_pending, oldest_pending, error_msg.
+        """
+        result = {"signals_graded": 0, "signals_pending": 0, "oldest_pending": None, "error_msg": ""}
+        try:
+            from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+            if _is_postgres():
+                conn = _get_pg_conn(); cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_5d IS NOT NULL")
+                result["signals_graded"] = cur.fetchone()[0] or 0
+                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_5d IS NULL")
+                result["signals_pending"] = cur.fetchone()[0] or 0
+                cur.execute("""
+                    SELECT sl.created_at FROM signal_log sl
+                    JOIN signal_outcomes so ON so.signal_id = sl.id
+                    WHERE so.outcome_5d IS NULL
+                    ORDER BY sl.created_at ASC LIMIT 1
+                """)
+                row = cur.fetchone()
+                result["oldest_pending"] = str(row[0]) if row else None
+                cur.close(); conn.close()
+            else:
+                conn = _get_sqlite_conn(); cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_5d IS NOT NULL")
+                result["signals_graded"] = cur.fetchone()[0] or 0
+                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_5d IS NULL")
+                result["signals_pending"] = cur.fetchone()[0] or 0
+                cur.execute("""
+                    SELECT sl.created_at FROM signal_log sl
+                    JOIN signal_outcomes so ON so.signal_id = sl.id
+                    WHERE so.outcome_5d IS NULL
+                    ORDER BY sl.created_at ASC LIMIT 1
+                """)
+                row = cur.fetchone()
+                result["oldest_pending"] = str(row[0]) if row else None
+                conn.close()
+        except Exception as e:
+            result["error_msg"] = str(e)[:300]
+
+        # Log to validator_health
+        try:
+            from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+            if _is_postgres():
+                conn = _get_pg_conn(); cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO validator_health (signals_graded, signals_pending, oldest_pending, error_msg)
+                    VALUES (%s, %s, %s, %s)
+                """, (result["signals_graded"], result["signals_pending"],
+                      result["oldest_pending"], result["error_msg"]))
+                conn.commit(); cur.close(); conn.close()
+            else:
+                conn = _get_sqlite_conn()
+                conn.execute("""
+                    INSERT INTO validator_health (signals_graded, signals_pending, oldest_pending, error_msg)
+                    VALUES (?, ?, ?, ?)
+                """, (result["signals_graded"], result["signals_pending"],
+                      result["oldest_pending"], result["error_msg"]))
+                conn.commit(); conn.close()
+        except Exception as _hle:
+            print(f"  [accuracy] self_check health log failed: {_hle}")
+
+        print(f"  [accuracy] self_check: graded={result['signals_graded']} pending={result['signals_pending']}")
+        return result
 
 
 def _metrics_from_rets(rets: list) -> dict:
@@ -320,11 +462,13 @@ def run_nightly_validation():
     print("\n[ACCURACY] Running nightly signal validation...")
     try:
         v = AccuracyValidator()
+        health = v.self_check()
         n = v.grade_signals()
         m = v.compute_metrics()
         overall = m.get("overall", {})
         print(f"  [accuracy] n={m.get('n',0)} | win_rate={overall.get('win_rate','?')} | "
-              f"EV={overall.get('expected_value','?')} | significant={overall.get('significant','?')}")
+              f"EV={overall.get('expected_value','?')} | significant={overall.get('significant','?')} | "
+              f"pending={health.get('signals_pending', '?')}")
         return m
     except Exception as e:
         print(f"  [accuracy] nightly validation failed: {e}")

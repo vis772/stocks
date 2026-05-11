@@ -44,6 +44,11 @@ def initialize_db():
         _init_postgres()
     else:
         _init_sqlite()
+    try:
+        from paper_broker import init_paper_trading_tables
+        init_paper_trading_tables()
+    except Exception as _pt_e:
+        print(f"  [db] paper trading tables init failed: {_pt_e}")
 
 
 def _init_postgres():
@@ -280,6 +285,33 @@ def _init_postgres():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS validator_health (
+            id          SERIAL PRIMARY KEY,
+            check_time  TIMESTAMP DEFAULT NOW(),
+            signals_graded   INTEGER DEFAULT 0,
+            signals_pending  INTEGER DEFAULT 0,
+            oldest_pending   TEXT,
+            error_msg        TEXT DEFAULT ''
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS accuracy_metrics (
+            bucket       TEXT PRIMARY KEY,
+            sample_n     INTEGER,
+            win_rate     REAL,
+            profit_factor REAL,
+            ev_per_trade REAL,
+            sharpe       REAL,
+            max_drawdown REAL,
+            t_stat       REAL,
+            p_value      REAL,
+            disabled     BOOLEAN DEFAULT FALSE,
+            updated_at   TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
     # Migration-safe: add new columns to existing deployments
     for ddl in [
         "ALTER TABLE scanner_state   ADD COLUMN IF NOT EXISTS vwap_snapshot      TEXT DEFAULT '{}'",
@@ -291,12 +323,16 @@ def _init_postgres():
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS pct_change_15day   REAL",
         "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS quant_adj          FLOAT",
         "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS source_quality     TEXT",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS session_mode       TEXT DEFAULT 'MARKET'",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS outcome_1d         TEXT",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS outcome_3d         TEXT",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS outcome_5d         TEXT",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS ret_1d             REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS ret_3d             REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS ret_5d             REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS shares             REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS limit_entry        REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS conviction_score   REAL",
     ]:
         cur.execute(ddl)
 
@@ -552,6 +588,33 @@ def _init_sqlite():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS validator_health (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            check_time     TEXT DEFAULT (datetime('now')),
+            signals_graded INTEGER DEFAULT 0,
+            signals_pending INTEGER DEFAULT 0,
+            oldest_pending TEXT,
+            error_msg      TEXT DEFAULT ''
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS accuracy_metrics (
+            bucket        TEXT PRIMARY KEY,
+            sample_n      INTEGER,
+            win_rate      REAL,
+            profit_factor REAL,
+            ev_per_trade  REAL,
+            sharpe        REAL,
+            max_drawdown  REAL,
+            t_stat        REAL,
+            p_value       REAL,
+            disabled      INTEGER DEFAULT 0,
+            updated_at    TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     for col_sql in [
         "ALTER TABLE scanner_state   ADD COLUMN vwap_snapshot     TEXT DEFAULT '{}'",
         "ALTER TABLE scanner_state   ADD COLUMN momentum_ranking  TEXT DEFAULT '[]'",
@@ -562,12 +625,16 @@ def _init_sqlite():
         "ALTER TABLE signal_outcomes ADD COLUMN pct_change_15day  REAL",
         "ALTER TABLE signal_log      ADD COLUMN quant_adj         REAL",
         "ALTER TABLE signal_log      ADD COLUMN source_quality    TEXT",
+        "ALTER TABLE signal_log      ADD COLUMN session_mode      TEXT DEFAULT 'MARKET'",
         "ALTER TABLE signal_outcomes ADD COLUMN outcome_1d        TEXT",
         "ALTER TABLE signal_outcomes ADD COLUMN outcome_3d        TEXT",
         "ALTER TABLE signal_outcomes ADD COLUMN outcome_5d        TEXT",
         "ALTER TABLE signal_outcomes ADD COLUMN ret_1d            REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN ret_3d            REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN ret_5d            REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN shares            REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN limit_entry       REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN conviction_score  REAL",
     ]:
         try:
             cur.execute(col_sql)
@@ -1247,7 +1314,8 @@ def should_suppress(ticker: str, signal_label: str, window_minutes: int = 5) -> 
 def log_signal(ticker: str, signal_label: str, score: float,
                score_breakdown: dict, price_at_signal: float,
                volume_at_signal: float, alert_type: str,
-               quant_adj: float = None, source_quality: str = None) -> Optional[int]:
+               quant_adj: float = None, source_quality: str = None,
+               session_mode: str = None) -> Optional[int]:
     """Log a scanner signal. Returns the signal_log row id or None on failure."""
     breakdown_json = json.dumps(score_breakdown)
     try:
@@ -1258,17 +1326,14 @@ def log_signal(ticker: str, signal_label: str, score: float,
                 INSERT INTO signal_log
                     (ticker, signal_label, score, score_breakdown,
                      price_at_signal, volume_at_signal, alert_type,
-                     quant_adj, source_quality)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                     quant_adj, source_quality, session_mode)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
             """, (ticker, signal_label, _f(score), breakdown_json,
                   _f(price_at_signal), _f(volume_at_signal), alert_type,
                   _f(quant_adj) if quant_adj is not None else None,
-                  source_quality))
+                  source_quality, session_mode or "MARKET"))
             sig_id = cur.fetchone()[0]
-            # Insert a pending outcome row so the tracker can find it
-            cur.execute("""
-                INSERT INTO signal_outcomes (signal_id) VALUES (%s)
-            """, (sig_id,))
+            cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (%s)", (sig_id,))
             conn.commit(); cur.close(); conn.close()
             return sig_id
         else:
@@ -1278,12 +1343,12 @@ def log_signal(ticker: str, signal_label: str, score: float,
                 INSERT INTO signal_log
                     (ticker, signal_label, score, score_breakdown,
                      price_at_signal, volume_at_signal, alert_type,
-                     quant_adj, source_quality)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                     quant_adj, source_quality, session_mode)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
             """, (ticker, signal_label, _f(score), breakdown_json,
                   _f(price_at_signal), _f(volume_at_signal), alert_type,
                   _f(quant_adj) if quant_adj is not None else None,
-                  source_quality))
+                  source_quality, session_mode or "MARKET"))
             sig_id = cur.lastrowid
             cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (?)", (sig_id,))
             conn.commit(); conn.close()

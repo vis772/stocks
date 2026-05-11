@@ -252,6 +252,23 @@ def is_morning_screen_time() -> bool:
     return et.hour == MORNING_SCREEN_HOUR and et.minute < 10
 
 
+def get_scan_mode() -> str:
+    """Return one of MARKET / PREMARKET / AFTERHOURS / OVERNIGHT / WEEKEND."""
+    et = now_et()
+    if et.weekday() >= 5:
+        return "WEEKEND"
+    h, m = et.hour, et.minute
+    after_open   = (h > 9) or (h == 9 and m >= 25)
+    before_close = (h < 16) or (h == 16 and m <= 30)
+    if after_open and before_close:
+        return "MARKET"
+    if h >= 4 and not after_open:
+        return "PREMARKET"
+    if (h == 16 and m > 30) or (17 <= h < 20):
+        return "AFTERHOURS"
+    return "OVERNIGHT"
+
+
 # ─── Claude News Analysis ─────────────────────────────────────────────────────
 
 def analyze_news_with_claude(ticker: str, headline: str, summary: str = "") -> dict:
@@ -846,7 +863,7 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
 
 # ─── Prediction scan ──────────────────────────────────────────────────────────
 
-def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
+def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode: str = "MARKET") -> None:
     """
     Run full scan_ticker() on the top-N momentum stocks every 30 minutes.
     Logs prediction_buy (score >= PREDICTION_BUY_THRESHOLD) and
@@ -939,6 +956,7 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState) -> None:
                     alert_type       = "scan",
                     quant_adj        = quant_adj,
                     source_quality   = source_qual,
+                    session_mode     = session_mode,
                 )
                 if sig_id:
                     print(f"  [signal_log] ✓ {ticker} | {signal_label} | score={score:.0f} | quant={quant_adj:+.1f} | id={sig_id}")
@@ -1051,10 +1069,13 @@ def run_scanner():
 
         print("[TEST MODE] Complete — resuming normal schedule\n")
 
+    _SLEEP_MAP = {"MARKET": 60, "PREMARKET": 120, "AFTERHOURS": 120, "OVERNIGHT": 300, "WEEKEND": 600}
+
     while True:
         try:
-            et         = now_et()
-            today_str  = et.strftime("%Y-%m-%d")
+            et        = now_et()
+            today_str = et.strftime("%Y-%m-%d")
+            mode      = get_scan_mode()
 
             # ── Control flags: pause / force-scan ────────────────────────────
             try:
@@ -1081,7 +1102,7 @@ def run_scanner():
                                 _fs_alerts.extend(_ff.result())
                             except Exception:
                                 pass
-                    run_prediction_scan(watchlist, state)
+                    run_prediction_scan(watchlist, state, session_mode=mode)
                     set_scanner_control(force_scan=False)
                     state.scan_count += 1
                     state.save()
@@ -1091,14 +1112,39 @@ def run_scanner():
             except Exception as _ctrl_e:
                 print(f"  [control] check failed: {_ctrl_e}")
 
-            # Skip everything on weekends — market closed
-            if et.weekday() >= 5:
-                time.sleep(300)  # sleep 5 min and check again
+            # ── WEEKEND mode ──────────────────────────────────────────────────
+            if mode == "WEEKEND":
+                print(f"  [WEEKEND {et.strftime('%H:%M ET')}] Grading signals / checking universe...")
+                try:
+                    from accuracy_validator import AccuracyValidator
+                    AccuracyValidator().grade_signals()
+                except Exception as _wknd_av:
+                    print(f"  [weekend] grade_signals failed: {_wknd_av}")
+                # Saturday 8 AM ET — full universe refresh
+                if et.weekday() == 5 and et.hour == 8 and et.minute < 10:
+                    _sat_key = f"universe_refresh_sat_{today_str}"
+                    if not state.already_alerted(_sat_key):
+                        try:
+                            from universe_manager import refresh_universe
+                            refresh_universe()
+                            state.mark_alerted(_sat_key)
+                        except Exception as _ure:
+                            print(f"  [weekend] universe refresh failed: {_ure}")
+                # Sunday 6 PM ET — prep alert
+                if et.weekday() == 6 and et.hour == 18 and et.minute < 10:
+                    _sun_key = f"sunday_prep_{today_str}"
+                    if not state.already_alerted(_sun_key):
+                        send_alert(
+                            title="Axiom — Weekend Summary",
+                            message="Universe refresh complete. Scanner resumes Monday 4:00 AM ET.",
+                            priority=PRIORITY_NORMAL,
+                        )
+                        state.mark_alerted(_sun_key)
+                time.sleep(_SLEEP_MAP["WEEKEND"])
                 continue
 
-            # ── Morning screen at 6 AM ET ─────────────────────────────────────
-            # Runs once per day even if pre-market scanning has already seeded
-            # `watchlist` with DEFAULT_UNIVERSE since 4 AM.
+            # ── Common weekday setup ──────────────────────────────────────────
+            # Morning screen at 6 AM ET (once per day)
             if is_morning_screen_time() and last_screen_date != today_str:
                 print("\n[MORNING SCREEN] Building today's watchlist...")
                 watchlist          = build_todays_watchlist(max_stocks=50)
@@ -1108,7 +1154,7 @@ def run_scanner():
                 news_thread        = None
                 _ensure_stream(watchlist)
 
-            # ── Load watchlist if empty ────────────────────────────────────────
+            # Load watchlist if empty
             if not watchlist:
                 watchlist = load_todays_watchlist()
                 if not watchlist:
@@ -1117,7 +1163,7 @@ def run_scanner():
                     print(f"  Using default universe: {len(watchlist)} stocks")
                 _ensure_stream(watchlist)
 
-            # ── Morning brief at 8:30 AM ET (7:30 CST) ────────────────────────
+            # Morning brief at 8:30 AM ET
             if et.hour == 8 and et.minute >= 30 and not morning_brief_sent and watchlist:
                 try:
                     with open(WATCHLIST_FILE) as f:
@@ -1131,21 +1177,64 @@ def run_scanner():
                 morning_brief_sent = True
                 state.log_alert(f"Morning brief sent — {len(watchlist)} stocks")
 
-            # ── Market hours scan ─────────────────────────────────────────────
-            if is_market_hours():
-                state.scan_count += 1
-                print(f"\n[SCAN #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
-                _log("info", f"Scan #{state.scan_count} started — {len(watchlist)} stocks | {et.strftime('%H:%M ET')}")
+            # Paper broker: update day_start_equity at market open
+            if et.hour == 9 and 29 <= et.minute < 35:
+                _open_key = f"broker_open_{today_str}"
+                if not state.already_alerted(_open_key):
+                    try:
+                        from paper_broker import get_broker
+                        get_broker()._update_account_metrics()
+                        state.mark_alerted(_open_key)
+                    except Exception as _pbo:
+                        print(f"  [broker] open-bell update failed: {_pbo}")
 
+            # Reset eod flag at midnight
+            if et.hour == 0 and et.minute < 5:
+                eod_report_sent = False
+
+            # ── PREMARKET mode ────────────────────────────────────────────────
+            if mode == "PREMARKET":
+                state.scan_count += 1
+                print(f"\n[PRE-MARKET #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
+                _log("info", f"Pre-market scan #{state.scan_count} started | {et.strftime('%H:%M ET')}")
                 if news_thread is None or not news_thread.is_alive():
                     news_thread = run_news_monitor(watchlist, state)
-
-                all_alerts = []
-
                 if (et - state.last_sec_check).total_seconds() >= 300:
                     print("  Checking SEC EDGAR...")
                     check_sec_filings(watchlist, state)
+                _pre_alerts: List[str] = []
+                with ThreadPoolExecutor(max_workers=15) as executor:
+                    futures = {executor.submit(scan_one_ticker, t, state): t for t in watchlist}
+                    for future in as_completed(futures, timeout=45):
+                        try:
+                            _pre_alerts.extend(future.result())
+                        except Exception:
+                            pass
+                try:
+                    from paper_broker import get_broker
+                    _pb = get_broker()
+                    _pb.process_pending_orders()
+                    _pb.update_all_positions()
+                except Exception as _pbp:
+                    print(f"  [broker] pre-market update failed: {_pbp}")
+                if _pre_alerts:
+                    print(f"  🔔 {len(_pre_alerts)} alert(s) fired")
+                    _log("info", f"Pre-market scan #{state.scan_count} complete — {len(_pre_alerts)} alert(s)")
+                else:
+                    print(f"  ✓ No alerts this scan")
+                    _log("info", f"Pre-market scan #{state.scan_count} complete — no alerts")
 
+            # ── MARKET mode ───────────────────────────────────────────────────
+            elif mode == "MARKET":
+                state.scan_count += 1
+                print(f"\n[SCAN #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
+                _log("info", f"Scan #{state.scan_count} started — {len(watchlist)} stocks | {et.strftime('%H:%M ET')}")
+                if news_thread is None or not news_thread.is_alive():
+                    news_thread = run_news_monitor(watchlist, state)
+                all_alerts: List[str] = []
+                if (et - state.last_sec_check).total_seconds() >= 300:
+                    print("  Checking SEC EDGAR...")
+                    check_sec_filings(watchlist, state)
                 with ThreadPoolExecutor(max_workers=15) as executor:
                     futures = {executor.submit(scan_one_ticker, t, state): t for t in watchlist}
                     for future in as_completed(futures, timeout=45):
@@ -1153,33 +1242,36 @@ def run_scanner():
                             all_alerts.extend(future.result())
                         except Exception:
                             pass
-
                 if all_alerts:
                     print(f"  🔔 {len(all_alerts)} alert(s) fired")
                     _log("info", f"Scan #{state.scan_count} complete — {len(all_alerts)} alert(s) fired")
                 else:
                     print(f"  ✓ No alerts this scan")
                     _log("info", f"Scan #{state.scan_count} complete — no alerts")
-
-                # Build momentum ranking and flush to DB every 5 scans
                 top_movers = _build_momentum_ranking(watchlist, state)
                 if state.scan_count % 5 == 0:
                     state.save()
-
-                # Prediction scan every 30 minutes (runs full score on top-N stocks)
+                # Prediction scan every 30 minutes
                 if (et - state.last_prediction_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
-                    print("\n[PREDICTION SCAN] Running 30-min full-score prediction scan...")
+                    print("\n[PREDICTION SCAN] Running 30-min full-score scan...")
                     _log("info", f"Prediction scan started — top {PREDICTION_TOP_N} stocks")
-                    run_prediction_scan(watchlist, state)
+                    run_prediction_scan(watchlist, state, session_mode="MARKET")
                     state.last_prediction_run = et
                     _log("info", "Prediction scan complete")
-
-                # 30-min digest with top movers
+                # 30-min digest
                 if (et - last_digest_time).total_seconds() >= 1800 and state.alert_log:
                     alert_digest(state.alert_log[-10:], top_movers=top_movers[:5])
                     last_digest_time = et
-
-                # Conviction buy list at 4:00 PM ET (market close)
+                # Paper broker: update positions each cycle
+                try:
+                    from paper_broker import get_broker
+                    _pb = get_broker()
+                    _pb.process_pending_orders()
+                    _pb.update_all_positions()
+                    _pb._snapshot_equity_curve()
+                except Exception as _pbm:
+                    print(f"  [broker] market update failed: {_pbm}")
+                # Conviction buy list at 4:00 PM ET
                 if et.hour == 16 and 0 <= et.minute < 5:
                     _close_key = f"conviction_close_{today_str}"
                     if not state.already_alerted(_close_key):
@@ -1188,9 +1280,48 @@ def run_scanner():
                             from conviction_engine import run_conviction_engine
                             run_conviction_engine(session="close")
                             state.mark_alerted(_close_key)
+                            # Wire conviction buys into paper broker
+                            try:
+                                from db.database import _get_pg_conn, _is_postgres, _get_sqlite_conn
+                                from paper_broker import get_broker
+                                _pb2 = get_broker()
+                                if _is_postgres():
+                                    _conn2 = _get_pg_conn()
+                                    _c2    = _conn2.cursor()
+                                    _c2.execute(
+                                        "SELECT ticker, COALESCE(shares, 1), COALESCE(limit_entry, entry), stop_loss, COALESCE(conviction_score, conviction) FROM conviction_buys WHERE session=%s ORDER BY rank LIMIT 5",
+                                        ("close",)
+                                    )
+                                    _buys = _c2.fetchall()
+                                    _conn2.close()
+                                else:
+                                    _conn2 = _get_sqlite_conn()
+                                    _c2    = _conn2.cursor()
+                                    _c2.execute(
+                                        "SELECT ticker, COALESCE(shares, 1), COALESCE(limit_entry, entry), stop_loss, COALESCE(conviction_score, conviction) FROM conviction_buys WHERE session=? ORDER BY rank LIMIT 5",
+                                        ("close",)
+                                    )
+                                    _buys  = _c2.fetchall()
+                                    _conn2.close()
+                                for _row in _buys:
+                                    _pb2.submit_order(
+                                        ticker      = _row[0],
+                                        side        = "buy",
+                                        qty         = int(_row[1]) if _row[1] else 1,
+                                        order_type  = "limit",
+                                        limit_price = float(_row[2]) if _row[2] else None,
+                                        stop_price  = float(_row[3]) if _row[3] else None,
+                                        notes       = f"conviction_close score={_row[4] or 0:.0f}",
+                                    )
+                            except Exception as _pb_buy:
+                                print(f"  [broker] conviction buy submit failed: {_pb_buy}")
+                            # Snapshot daily stats at close
+                            try:
+                                get_broker().snapshot_daily_stats()
+                            except Exception as _pbs:
+                                print(f"  [broker] snapshot_daily_stats failed: {_pbs}")
                         except Exception as _cve:
                             print(f"  [conviction] close scan failed: {_cve}")
-
                 # EOD report at 4:15 PM ET
                 if et.hour == 16 and 15 <= et.minute < 20 and not eod_report_sent:
                     print("\n[EOD REPORT] Generating end-of-day report...")
@@ -1206,7 +1337,6 @@ def run_scanner():
                         check_and_run_checkpoints()
                     except Exception as _cp_e:
                         print(f"  [checkpoint] Failed: {_cp_e}")
-                    # Close open paper trades using last known prices
                     try:
                         from db.database import close_paper_trades_eod
                         close_paper_trades_eod(
@@ -1216,49 +1346,51 @@ def run_scanner():
                     except Exception as e:
                         print(f"  [paper] EOD close failed: {e}")
 
-                if et.hour == 6 and et.minute < 5:
-                    eod_report_sent = False
-
-                time.sleep(SCAN_INTERVAL_SEC)
-
-            elif is_premarket():
+            # ── AFTERHOURS mode ───────────────────────────────────────────────
+            elif mode == "AFTERHOURS":
                 state.scan_count += 1
-                print(f"\n[PRE-MARKET SCAN #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
-                _log("info", f"Pre-market scan #{state.scan_count} started — {len(watchlist)} stocks | {et.strftime('%H:%M ET')}")
-
-                # News monitor covers pre-market too (PRs land 06:00–09:00 ET)
-                if news_thread is None or not news_thread.is_alive():
-                    news_thread = run_news_monitor(watchlist, state)
-
-                all_alerts = []
-
-                if (et - state.last_sec_check).total_seconds() >= PREMARKET_SEC_INTERVAL:
-                    print("  Checking SEC EDGAR...")
-                    check_sec_filings(watchlist, state)
-
-                # Same parallel ticker fan-out as market hours. Volume-spike
-                # branch inside scan_one_ticker self-skips because
-                # expected_pct < 0.05 before 09:30, so we just get gap, 1-min,
-                # 10-min, and news alerts — exactly what's useful pre-market.
-                with ThreadPoolExecutor(max_workers=15) as executor:
-                    futures = {executor.submit(scan_one_ticker, t, state): t for t in watchlist}
-                    for future in as_completed(futures, timeout=45):
+                print(f"\n[AH SCAN #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
+                _log("info", f"After-hours scan #{state.scan_count} | {et.strftime('%H:%M ET')}")
+                # Fetch AH prices via yfinance prepost=True; alert on >5% move
+                try:
+                    import yfinance as yf
+                    for _ah_ticker in watchlist[:20]:
                         try:
-                            all_alerts.extend(future.result())
+                            _ah_hist = yf.Ticker(_ah_ticker).history(period="1d", prepost=True)
+                            if _ah_hist.empty:
+                                continue
+                            _ah_price = float(_ah_hist["Close"].iloc[-1])
+                            _ah_prev  = state.last_prices.get(_ah_ticker, 0)
+                            if _ah_prev > 0:
+                                _ah_move = (_ah_price - _ah_prev) / _ah_prev * 100
+                                if abs(_ah_move) >= 5.0:
+                                    _ah_mv_key = f"{_ah_ticker}_ah_move_{today_str}_{et.hour}"
+                                    if not state.already_alerted(_ah_mv_key):
+                                        send_alert(
+                                            title=f"{'🌙🟢' if _ah_move > 0 else '🌙🔴'} {_ah_ticker} AH {_ah_move:+.1f}%",
+                                            message=(
+                                                f"After-hours move: {_ah_move:+.1f}%\n"
+                                                f"AH Price: ${_ah_price:.4f} | Prev Close: ${_ah_prev:.4f}\n"
+                                                f"Time: {et.strftime('%H:%M ET')}"
+                                            ),
+                                            priority=PRIORITY_HIGH if abs(_ah_move) >= 8 else PRIORITY_NORMAL,
+                                        )
+                                        state.mark_alerted(_ah_mv_key)
+                                        state.log_alert(f"{_ah_ticker} AH {_ah_move:+.1f}%")
+                            state.last_prices[_ah_ticker] = _ah_price
                         except Exception:
                             pass
-
-                if all_alerts:
-                    print(f"  🔔 {len(all_alerts)} alert(s) fired")
-                    _log("info", f"Pre-market scan #{state.scan_count} complete — {len(all_alerts)} alert(s)")
-                else:
-                    print(f"  ✓ No alerts this scan")
-                    _log("info", f"Pre-market scan #{state.scan_count} complete — no alerts")
-
-                time.sleep(PREMARKET_SCAN_INTERVAL)
-
-            else:
-                # After-hours conviction scan at 8:30 PM ET
+                except Exception as _yf_ah:
+                    print(f"  [AH] yfinance fetch failed: {_yf_ah}")
+                # Paper broker update
+                try:
+                    from paper_broker import get_broker
+                    _pb3 = get_broker()
+                    _pb3.process_pending_orders()
+                    _pb3.update_all_positions()
+                except Exception as _pbah:
+                    print(f"  [broker] AH update failed: {_pbah}")
+                # Conviction at 8:30 PM ET
                 if et.hour == 20 and 30 <= et.minute < 35:
                     _ah_key = f"conviction_ah_{today_str}"
                     if not state.already_alerted(_ah_key):
@@ -1269,8 +1401,7 @@ def run_scanner():
                             state.mark_alerted(_ah_key)
                         except Exception as _cve2:
                             print(f"  [conviction] afterhours scan failed: {_cve2}")
-
-                # Nightly accuracy validation at 10 PM ET
+                # Nightly accuracy at 10 PM ET
                 if et.hour == 22 and 0 <= et.minute < 5:
                     _acc_key = f"accuracy_nightly_{today_str}"
                     if not state.already_alerted(_acc_key):
@@ -1282,8 +1413,51 @@ def run_scanner():
                         except Exception as _ave:
                             print(f"  [accuracy] nightly validation failed: {_ave}")
 
-                print(f"  [CLOSED] {et.strftime('%H:%M ET')} — sleeping 10 min")
-                time.sleep(600)
+            # ── OVERNIGHT mode ────────────────────────────────────────────────
+            else:  # OVERNIGHT
+                print(f"  [OVERNIGHT {et.strftime('%H:%M ET')}] Light scan — conviction buys + portfolio")
+                _log("info", f"Overnight scan | {et.strftime('%H:%M ET')}")
+                # SEC EDGAR poll for overnight conviction tickers
+                if (et - state.last_sec_check).total_seconds() >= 300:
+                    try:
+                        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+                        if _is_postgres():
+                            _oconn = _get_pg_conn()
+                            _oc    = _oconn.cursor()
+                            _oc.execute("SELECT ticker FROM conviction_buys ORDER BY created_at DESC LIMIT 20")
+                            _overnight_wl = [r[0] for r in _oc.fetchall()]
+                            _oconn.close()
+                        else:
+                            _oconn = _get_sqlite_conn()
+                            _oc    = _oconn.cursor()
+                            _oc.execute("SELECT ticker FROM conviction_buys ORDER BY created_at DESC LIMIT 20")
+                            _overnight_wl = [r[0] for r in _oc.fetchall()]
+                            _oconn.close()
+                    except Exception:
+                        _overnight_wl = []
+                    if _overnight_wl:
+                        check_sec_filings(_overnight_wl, state)
+                # Paper broker: maintain positions, no new signals
+                try:
+                    from paper_broker import get_broker
+                    _pb4 = get_broker()
+                    _pb4.process_pending_orders()
+                    _pb4.update_all_positions()
+                except Exception as _pbon:
+                    print(f"  [broker] overnight update failed: {_pbon}")
+                # Nightly accuracy at 10 PM ET
+                if et.hour == 22 and 0 <= et.minute < 5:
+                    _acc_key2 = f"accuracy_nightly_{today_str}"
+                    if not state.already_alerted(_acc_key2):
+                        print("\n[ACCURACY] Running nightly validation...")
+                        try:
+                            from accuracy_validator import run_nightly_validation
+                            run_nightly_validation()
+                            state.mark_alerted(_acc_key2)
+                        except Exception as _ave2:
+                            print(f"  [accuracy] nightly validation failed: {_ave2}")
+
+            time.sleep(_SLEEP_MAP.get(mode, 60))
 
         except KeyboardInterrupt:
             print("\nScanner stopped.")

@@ -1231,7 +1231,7 @@ if "scoring_weights" not in st.session_state:
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Control", "Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info", "Config"])
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["Control", "Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info", "Config", "Paper Trading"])
 
 
 # ── TAB 0: CONTROL ───────────────────────────────────────────────────────────
@@ -2438,3 +2438,210 @@ with tab8:
             _save_config_overrides(_ov)
             st.success("Reset to config.py defaults.")
             st.rerun()
+
+
+# ── TAB 9: PAPER TRADING ─────────────────────────────────────────────────────
+with tab9:
+    st.markdown("## Paper Trading")
+    st.markdown(
+        '<p style="color:#334155;font-size:0.82em;font-family:\'JetBrains Mono\',monospace;">'
+        '$100K virtual account. Conviction engine submits limit orders; positions managed with '
+        'T1/T2/T3 partial exits and ATR-based stops. No real money involved.</p>',
+        unsafe_allow_html=True,
+    )
+
+    try:
+        from paper_broker import get_broker
+        _broker = get_broker()
+        _dash   = _broker.get_dashboard_data()
+        _acct   = _dash.get("account", {})
+        _pos_df = _dash.get("positions",   pd.DataFrame())
+        _ord_df = _dash.get("orders",      pd.DataFrame())
+        _trd_df = _dash.get("trades",      pd.DataFrame())
+        _eq_df  = _dash.get("equity_curve", pd.DataFrame())
+        _day_df = _dash.get("daily_stats", pd.DataFrame())
+
+        # ── Section 1: Account summary bar ───────────────────────────────────
+        st.markdown('<div class="sh">Account Summary</div>', unsafe_allow_html=True)
+        _total_eq  = _acct.get("total_equity", 100000)
+        _cash      = _acct.get("cash_balance", 100000)
+        _open_pnl  = _acct.get("open_pnl", 0.0)
+        _total_pnl = _acct.get("total_pnl", 0.0)
+        _win_rate  = _acct.get("win_rate", 0.0)
+        _pf        = _acct.get("profit_factor")
+        _n_pos     = len(_pos_df) if not _pos_df.empty else 0
+        _n_trades  = _acct.get("total_trades", 0)
+        _max_dd    = _acct.get("max_drawdown", 0.0)
+
+        _a1, _a2, _a3, _a4, _a5, _a6, _a7 = st.columns(7)
+        _a1.metric("Total Equity",   f"${_total_eq:,.0f}",
+                   delta=f"{(_total_eq/100000-1)*100:+.1f}%")
+        _a2.metric("Cash",           f"${_cash:,.0f}")
+        _a3.metric("Open P&L",       f"${_open_pnl:+,.2f}")
+        _a4.metric("Total P&L",      f"${_total_pnl:+,.2f}")
+        _a5.metric("Win Rate",       f"{_win_rate:.0%}" if _win_rate else "—",
+                   delta=f"{_n_trades} trades")
+        _a6.metric("Profit Factor",  f"{_pf:.2f}" if _pf else "—")
+        _a7.metric("Max Drawdown",   f"{_max_dd:.1f}%")
+
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+        # ── Section 2: Equity curve chart ─────────────────────────────────────
+        st.markdown('<div class="sh">Equity Curve</div>', unsafe_allow_html=True)
+        if not _eq_df.empty and "equity" in _eq_df.columns:
+            _eq_df = _eq_df.sort_values("snapshot_time") if "snapshot_time" in _eq_df.columns else _eq_df
+            _fig_eq = go.Figure()
+            _fig_eq.add_trace(go.Scatter(
+                x=_eq_df.get("snapshot_time", _eq_df.index),
+                y=_eq_df["equity"],
+                mode="lines",
+                line=dict(color="#2563eb", width=2),
+                fill="tozeroy",
+                fillcolor="rgba(37,99,235,0.08)",
+                name="Equity",
+            ))
+            _fig_eq.add_hline(y=100000, line_dash="dot", line_color="#64748b",
+                              annotation_text="Starting $100K")
+            _fig_eq.update_layout(
+                height=220, margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="JetBrains Mono", size=11, color="#e2e8f0"),
+                xaxis=dict(showgrid=False, color="#64748b"),
+                yaxis=dict(showgrid=True, gridcolor="#1e293b",
+                           tickprefix="$", tickformat=",.0f", color="#64748b"),
+                showlegend=False,
+            )
+            st.plotly_chart(_fig_eq, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.markdown(
+                '<div class="empty"><div class="ico">--</div>'
+                '<p>Equity curve builds after the first scan cycle.</p></div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── Section 3: Open positions ─────────────────────────────────────────
+        st.markdown('<div class="sh">Open Positions</div>', unsafe_allow_html=True)
+        if not _pos_df.empty:
+            _show_cols = [c for c in ["ticker","side","qty","avg_cost","current_price",
+                                      "unrealized_pnl","unrealized_pnl_pct","stop_price",
+                                      "t1_price","t2_price","t3_price","t1_hit","t2_hit",
+                                      "hold_type","mae","mfe"] if c in _pos_df.columns]
+            _pos_show = _pos_df[_show_cols].copy()
+            for _pc in ["avg_cost","current_price","stop_price","t1_price","t2_price","t3_price","mae","mfe"]:
+                if _pc in _pos_show.columns:
+                    _pos_show[_pc] = _pos_show[_pc].apply(
+                        lambda v: f"${v:.2f}" if pd.notna(v) and v != 0 else "—"
+                    )
+            if "unrealized_pnl" in _pos_show.columns:
+                _pos_show["unrealized_pnl"] = _pos_show["unrealized_pnl"].apply(
+                    lambda v: f"${v:+,.2f}" if pd.notna(v) else "—"
+                )
+            if "unrealized_pnl_pct" in _pos_show.columns:
+                _pos_show["unrealized_pnl_pct"] = _pos_show["unrealized_pnl_pct"].apply(
+                    lambda v: f"{v:+.1f}%" if pd.notna(v) else "—"
+                )
+            st.dataframe(_pos_show, use_container_width=True, hide_index=True)
+        else:
+            st.markdown('<p style="color:#64748b;font-size:0.85em;">No open positions.</p>',
+                        unsafe_allow_html=True)
+
+        # ── Section 4: Pending orders ─────────────────────────────────────────
+        st.markdown('<div class="sh">Pending Orders</div>', unsafe_allow_html=True)
+        if not _ord_df.empty:
+            _pend = _ord_df[_ord_df["status"] == "pending"] if "status" in _ord_df.columns else _ord_df
+            if not _pend.empty:
+                _ord_cols = [c for c in ["order_id","ticker","side","order_type","qty",
+                                         "limit_price","stop_price","status","created_at"]
+                             if c in _pend.columns]
+                st.dataframe(_pend[_ord_cols], use_container_width=True, hide_index=True)
+            else:
+                st.markdown('<p style="color:#64748b;font-size:0.85em;">No pending orders.</p>',
+                            unsafe_allow_html=True)
+        else:
+            st.markdown('<p style="color:#64748b;font-size:0.85em;">No pending orders.</p>',
+                        unsafe_allow_html=True)
+
+        # ── Section 5: Trade history ──────────────────────────────────────────
+        st.markdown('<div class="sh">Trade History</div>', unsafe_allow_html=True)
+        if not _trd_df.empty:
+            _trd_cols = [c for c in ["ticker","side","qty","entry_price","exit_price",
+                                     "realized_pnl","realized_pnl_pct","hold_minutes",
+                                     "exit_reason","entry_time","exit_time"]
+                         if c in _trd_df.columns]
+            _trd_show = _trd_df[_trd_cols].head(50).copy()
+            for _tc in ["entry_price","exit_price"]:
+                if _tc in _trd_show.columns:
+                    _trd_show[_tc] = _trd_show[_tc].apply(
+                        lambda v: f"${v:.2f}" if pd.notna(v) else "—"
+                    )
+            if "realized_pnl" in _trd_show.columns:
+                _trd_show["realized_pnl"] = _trd_show["realized_pnl"].apply(
+                    lambda v: f"${v:+,.2f}" if pd.notna(v) else "—"
+                )
+            if "realized_pnl_pct" in _trd_show.columns:
+                _trd_show["realized_pnl_pct"] = _trd_show["realized_pnl_pct"].apply(
+                    lambda v: f"{v:+.1f}%" if pd.notna(v) else "—"
+                )
+            st.dataframe(_trd_show, use_container_width=True, hide_index=True)
+        else:
+            st.markdown('<p style="color:#64748b;font-size:0.85em;">No closed trades yet.</p>',
+                        unsafe_allow_html=True)
+
+        # ── Section 6: Performance metrics ────────────────────────────────────
+        st.markdown('<div class="sh">Performance Metrics</div>', unsafe_allow_html=True)
+        if not _trd_df.empty and len(_trd_df) >= 3:
+            _pm1, _pm2, _pm3, _pm4, _pm5, _pm6 = st.columns(6)
+            _closed_pnl = _trd_df["realized_pnl"] if "realized_pnl" in _trd_df.columns else pd.Series([])
+            _wins_pnl   = _closed_pnl[_closed_pnl > 0]
+            _loss_pnl   = _closed_pnl[_closed_pnl < 0]
+            _avg_w   = _wins_pnl.mean() if len(_wins_pnl) else 0
+            _avg_l   = _loss_pnl.mean() if len(_loss_pnl) else 0
+            _pf_val  = abs(_wins_pnl.sum() / _loss_pnl.sum()) if len(_loss_pnl) and _loss_pnl.sum() != 0 else None
+            _avg_hld = _trd_df["hold_minutes"].mean() if "hold_minutes" in _trd_df.columns else 0
+            _pm1.metric("Avg Win",      f"${_avg_w:+,.2f}")
+            _pm2.metric("Avg Loss",     f"${_avg_l:+,.2f}")
+            _pm3.metric("Profit Factor", f"{_pf_val:.2f}" if _pf_val else "—")
+            _pm4.metric("Best Trade",   f"${_closed_pnl.max():+,.2f}" if len(_closed_pnl) else "—")
+            _pm5.metric("Worst Trade",  f"${_closed_pnl.min():+,.2f}" if len(_closed_pnl) else "—")
+            _pm6.metric("Avg Hold",     f"{_avg_hld:.0f}m" if _avg_hld else "—")
+        else:
+            st.markdown('<p style="color:#64748b;font-size:0.85em;">Need at least 3 closed trades for metrics.</p>',
+                        unsafe_allow_html=True)
+
+        # ── Section 7: Daily P&L calendar ─────────────────────────────────────
+        st.markdown('<div class="sh">Daily P&L</div>', unsafe_allow_html=True)
+        if not _day_df.empty and "trade_date" in _day_df.columns and "day_pnl" in _day_df.columns:
+            _day_sorted = _day_df.sort_values("trade_date").tail(30)
+            _day_colors = ["#16a34a" if v >= 0 else "#dc2626"
+                           for v in _day_sorted["day_pnl"]]
+            _fig_day = go.Figure(go.Bar(
+                x=_day_sorted["trade_date"].astype(str),
+                y=_day_sorted["day_pnl"],
+                marker_color=_day_colors,
+                text=[f"${v:+,.0f}" for v in _day_sorted["day_pnl"]],
+                textposition="outside",
+            ))
+            _fig_day.update_layout(
+                height=200, margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="JetBrains Mono", size=11, color="#e2e8f0"),
+                xaxis=dict(showgrid=False, color="#64748b", tickangle=-45),
+                yaxis=dict(showgrid=True, gridcolor="#1e293b",
+                           tickprefix="$", tickformat=",.0f", color="#64748b"),
+                showlegend=False,
+            )
+            st.plotly_chart(_fig_day, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.markdown('<p style="color:#64748b;font-size:0.85em;">Daily P&L builds after 4 PM snapshots.</p>',
+                        unsafe_allow_html=True)
+
+    except ImportError:
+        st.warning("paper_broker module not found. Deploy the latest scanner service.")
+    except Exception as _pt_err:
+        st.error(f"Paper trading dashboard error: {_pt_err}")
+
+    st.markdown(
+        '<div class="disc" style="margin-top:20px;">PAPER TRADING ONLY · NOT REAL MONEY · '
+        'FOR STRATEGY RESEARCH PURPOSES</div>',
+        unsafe_allow_html=True,
+    )
