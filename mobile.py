@@ -1413,6 +1413,23 @@ def _mob_control_screen():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+    st.markdown('<div style="padding:0 12px 4px;">', unsafe_allow_html=True)
+    st.markdown('<div class="ctrl-btn-blue">', unsafe_allow_html=True)
+    if st.button("CONVICTION NOW", use_container_width=True, key="mob_conviction_now"):
+        try:
+            from conviction_engine import run_conviction_engine
+            import threading
+            threading.Thread(
+                target=run_conviction_engine,
+                kwargs={"session": "preopen"},
+                daemon=True,
+            ).start()
+            st.success("Conviction scan triggered — Pushover alert on its way.")
+        except Exception as _ce:
+            st.error(str(_ce))
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
     if _force_scan:
         st.markdown(
             '<div style="padding:0 12px 4px;font-size:0.72em;color:#58a6ff;'
