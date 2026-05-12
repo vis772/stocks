@@ -1,6 +1,6 @@
 # conviction_engine.py
 # Synthesizes ALL available signals into a ranked, actionable buy list.
-# Runs at 4:00 PM ET (close) and 8:30 PM ET (afterhours).
+# Runs at 8:55 AM ET (preopen), 4:00 PM ET (close), and 8:30 PM ET (afterhours).
 # Max 5 names per session. Writes to conviction_buys table.
 
 import os
@@ -509,8 +509,14 @@ def send_buy_list_alert(buy_list: list, session: str) -> None:
                 f"#{b['rank']} {b['ticker']} ({b['conviction']:.0f}) {hold_abbr} | "
                 f"Entry ${p.get('entry','?')} stop ${p.get('stop_loss','?')}"
             )
+        title_map = {
+            "preopen":   "Axiom — Pre-Open Conviction (8:55 AM)",
+            "close":     "Axiom — Close Conviction (4 PM)",
+            "afterhours": "Axiom — Tonight's Buys",
+        }
+        alert_title = title_map.get(session, f"Axiom — Conviction ({session})")
         send_alert(
-            title="Axiom — Tonight's Buys",
+            title=alert_title,
             message="\n".join(lines),
             priority=PRIORITY_HIGH,
         )
@@ -519,7 +525,7 @@ def send_buy_list_alert(buy_list: list, session: str) -> None:
 
 
 def run_conviction_engine(session: str = "afterhours") -> list:
-    """Entry point called by scanner_loop at 4 PM and 8:30 PM ET."""
+    """Entry point called by scanner_loop at 8:55 AM, 4 PM, and 8:30 PM ET."""
     print(f"\n[CONVICTION] Running conviction engine for session={session}...")
     try:
         from accuracy_validator import AccuracyValidator

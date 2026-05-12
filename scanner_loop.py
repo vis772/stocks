@@ -1110,7 +1110,7 @@ def run_scanner():
     }
     _MODE_DESC = {
         "MARKET":     "Full scan every 60s — tickers, predictions, paper broker active.",
-        "PREMARKET":  "Pre-market scan every 120s — gaps, news, SEC EDGAR.",
+        "PREMARKET":  "Pre-market scan every 120s — gaps, news, SEC EDGAR. Conviction at 8:55 AM ET.",
         "AFTERHOURS": "After-hours every 120s — AH price alerts, conviction at 8:30 PM ET.",
         "OVERNIGHT":  "Light scan every 5min — SEC EDGAR + portfolio maintenance only.",
         "WEEKEND":    "Weekend mode — grading signals & refreshing universe.",
@@ -1279,6 +1279,19 @@ def run_scanner():
                             _pre_alerts.extend(future.result())
                         except Exception:
                             pass
+                # Conviction scan 30 min before market open (8:55 AM ET)
+                if et.hour == 8 and 55 <= et.minute <= 59:
+                    _preopen_key = f"conviction_preopen_{today_str}"
+                    if not state.already_alerted(_preopen_key):
+                        print("\n[CONVICTION] Running pre-open conviction scan (8:55 AM ET)...")
+                        try:
+                            from conviction_engine import run_conviction_engine
+                            run_conviction_engine(session="preopen")
+                            state.last_conviction_run_ts = now_et().isoformat()
+                            state.mark_alerted(_preopen_key)
+                        except Exception as _cve_pre:
+                            print(f"  [conviction] pre-open scan failed: {_cve_pre}")
+
                 try:
                     from paper_broker import get_broker
                     _pb = get_broker()
