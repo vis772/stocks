@@ -185,6 +185,44 @@ def _get_sec_filings(tickers: List[str]) -> List[Dict]:
     return filings
 
 
+def _get_current_price(ticker: str) -> float:
+    """Fetch current price with fallbacks: Finnhub → Tiingo → yfinance. Never returns 0."""
+    # 1. Finnhub
+    quote = _fh_get("quote", {"symbol": ticker})
+    if quote:
+        price = quote.get("c") or 0
+        if price > 0:
+            return float(price)
+    # 2. Tiingo IEX
+    try:
+        tiingo_key = os.environ.get("TIINGO_API_KEY", "")
+        if tiingo_key:
+            resp = requests.get(
+                f"https://api.tiingo.com/iex/{ticker}",
+                headers={"Authorization": f"Token {tiingo_key}",
+                         "Content-Type": "application/json"},
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and isinstance(data, list) and data[0]:
+                    p = data[0].get("last") or 0
+                    if p > 0:
+                        return float(p)
+    except Exception:
+        pass
+    # 3. yfinance
+    try:
+        hist = yf.Ticker(ticker).history(period="1d")
+        if not hist.empty:
+            p = float(hist["Close"].iloc[-1])
+            if p > 0:
+                return p
+    except Exception:
+        pass
+    return 0.0
+
+
 def _get_todays_signals() -> List[Dict]:
     try:
         from db.database import get_signal_log
@@ -192,6 +230,8 @@ def _get_todays_signals() -> List[Dict]:
         if df.empty:
             return []
         df = df.sort_values("score", ascending=False)
+        # Deduplicate: keep the highest-scoring signal per ticker per day
+        df = df.drop_duplicates(subset=["ticker"], keep="first")
         return df.head(15).to_dict("records")
     except Exception:
         return []
@@ -221,8 +261,7 @@ def _get_portfolio_snapshot() -> List[Dict]:
             ticker  = row["ticker"]
             shares  = row.get("shares", 0)
             avg_c   = row.get("avg_cost", 0)
-            quote   = _fh_get("quote", {"symbol": ticker})
-            price   = quote.get("c", 0) if quote else 0
+            price   = _get_current_price(ticker)
             pnl_pct = ((price - avg_c) / avg_c * 100) if avg_c > 0 and price > 0 else 0
             pnl_usd = (price - avg_c) * shares if price > 0 else 0
             rows.append({

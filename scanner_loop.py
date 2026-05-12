@@ -973,7 +973,7 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                     score            = round(score, 1),
                     score_breakdown  = breakdown,
                     price_at_signal  = price,
-                    volume_at_signal = result.get("volume", 0),
+                    volume_at_signal = result.get("volume") or state.last_volumes.get(ticker) or 0,
                     alert_type       = "scan",
                     quant_adj        = quant_adj,
                     source_quality   = source_qual,
@@ -994,8 +994,25 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                 t2    = result.get("target_2")   or round(price * 1.20, 4)
                 log_paper_trade(ticker, "prediction_buy", price, stop_, t1, t2,
                                 source_type="prediction_buy", score_at_entry=round(score, 1))
+                # Submit to paper broker so positions appear in dashboard/mobile
+                try:
+                    from paper_broker import get_broker
+                    get_broker().submit_order(
+                        ticker       = ticker,
+                        side         = "buy",
+                        qty          = 10,
+                        order_type   = "market",
+                        stop_loss    = stop_,
+                        target_1     = t1,
+                        target_2     = t2,
+                        entry_reason = "prediction_buy",
+                        conviction   = round(score, 1),
+                        session_mode = session_mode,
+                    )
+                except Exception as _pbe:
+                    print(f"  [broker] prediction_buy submit failed: {_pbe}")
                 state.log_alert(f"PRED BUY {ticker} ({score:.0f}pt)")
-                print(f"  [prediction] 📈 BUY {ticker} score={score:.0f}")
+                print(f"  [prediction] BUY {ticker} score={score:.0f}")
 
             elif score <= PREDICTION_SELL_THRESHOLD:
                 s_stop = round(price * 1.07, 4)
@@ -1004,7 +1021,7 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                 log_paper_trade(ticker, "prediction_sell", price, s_stop, s_t1, s_t2,
                                 source_type="prediction_sell", score_at_entry=round(score, 1))
                 state.log_alert(f"PRED SELL {ticker} ({score:.0f}pt)")
-                print(f"  [prediction] 📉 SELL {ticker} score={score:.0f}")
+                print(f"  [prediction] SELL {ticker} score={score:.0f}")
 
 
 # ─── Main loop ────────────────────────────────────────────────────────────────
@@ -1331,13 +1348,13 @@ def run_scanner():
                     print(f"  ✓ No alerts this scan")
                     _log("info", f"Scan #{state.scan_count} complete — no alerts")
                 top_movers = _build_momentum_ranking(watchlist, state)
-                if state.scan_count % 5 == 0:
-                    try:
-                        from db.database import get_open_position_count
-                        state.open_positions = get_open_position_count()
-                    except Exception:
-                        pass
-                    state.save()
+                # Save state on every scan (not just every 5th) so status bar stays fresh
+                try:
+                    from db.database import get_open_position_count
+                    state.open_positions = get_open_position_count()
+                except Exception:
+                    pass
+                state.save()
                 # Prediction scan every 30 minutes
                 if (et - state.last_prediction_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
                     print("\n[PREDICTION SCAN] Running 30-min full-score scan...")

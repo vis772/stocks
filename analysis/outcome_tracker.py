@@ -222,11 +222,78 @@ def run_one_pass():
         time.sleep(0.5)  # avoid hammering Finnhub rate limit
 
 
+def run_post_close_sweep():
+    """
+    After market close (>=4 PM ET on weekdays), fetch today's closing price for any
+    signals from today that still lack a 1day price. This drives the fill rate from
+    ~50% (signals aged <24h) to 90%+ by the first checkpoint.
+    """
+    try:
+        from db.database import update_signal_outcome
+        if _is_postgres():
+            from db.database import _get_pg_conn
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT sl.id, sl.ticker, sl.price_at_signal
+                FROM signal_log sl
+                JOIN signal_outcomes so ON so.signal_id = sl.id
+                WHERE DATE(sl.created_at) = CURRENT_DATE
+                  AND so.price_1day IS NULL
+                  AND sl.price_at_signal IS NOT NULL AND sl.price_at_signal > 0
+            """)
+            rows = cur.fetchall()
+            cur.close(); conn.close()
+        else:
+            from db.database import _get_sqlite_conn
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT sl.id, sl.ticker, sl.price_at_signal
+                FROM signal_log sl
+                JOIN signal_outcomes so ON so.signal_id = sl.id
+                WHERE DATE(sl.created_at) = DATE('now')
+                  AND so.price_1day IS NULL
+                  AND sl.price_at_signal IS NOT NULL AND sl.price_at_signal > 0
+            """)
+            rows = cur.fetchall()
+            conn.close()
+    except Exception as e:
+        print(f"  [outcome_tracker] post-close sweep query failed: {e}")
+        return
+
+    if not rows:
+        print("  [outcome_tracker] post-close sweep: all signals already have 1day price")
+        return
+
+    print(f"  [outcome_tracker] post-close sweep: filling {len(rows)} signal(s) with today's close")
+    for sig_id, ticker, entry_price in rows:
+        price = _fetch_price_now(ticker)
+        if price and price > 0:
+            update_signal_outcome(
+                signal_id       = sig_id,
+                price_1day      = price,
+                price_at_signal = entry_price,
+            )
+            print(f"  [outcome_tracker] post-close {ticker}: 1day={price:.4f}")
+        time.sleep(0.3)
+
+
 def _tracker_loop():
     """Run hourly during market hours; run every 4 hours outside (for multi-day fills)."""
+    _post_close_done: set = set()
     while True:
         try:
             run_one_pass()
+            et    = _now_et()
+            today = et.strftime("%Y-%m-%d")
+            # After market close on weekdays, run a fast sweep to fill today's 1day prices
+            if et.weekday() < 5 and et.hour >= 16 and today not in _post_close_done:
+                run_post_close_sweep()
+                _post_close_done.add(today)
+                # Trim old dates so set doesn't grow forever
+                if len(_post_close_done) > 10:
+                    _post_close_done.pop()
             if _is_market_hours():
                 time.sleep(3600)
             else:

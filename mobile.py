@@ -574,26 +574,33 @@ with _tc2:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# NAVIGATION BAR (6 tabs)
+# NAVIGATION BAR — 5 bottom tabs: Status | Signals | Alerts | Portfolio | More
 # ══════════════════════════════════════════════════════════════════════════════
 
+# "more" sub-screens live inside the More tab
+_MORE_SCREENS = {"accuracy", "account", "control", "deep_dive"}
+
 _screens = [
-    ("status",   "Status"),
-    ("signals",  "Signals"),
-    ("alerts",   "Alerts"),
-    ("accuracy", "Accuracy"),
-    ("account",  "Account"),
-    ("control",  "Control"),
+    ("status",    "Status"),
+    ("signals",   "Signals"),
+    ("alerts",    "Alerts"),
+    ("portfolio", "Portfolio"),
+    ("more",      "More"),
 ]
 
-_nc = st.columns(6)
+_nc = st.columns(5)
 for _col, (_key, _label) in zip(_nc, _screens):
-    _active = st.session_state.screen == _key
+    # "more" tab is active when the current screen is any sub-screen
+    _active = (st.session_state.screen == _key) or \
+              (_key == "more" and st.session_state.screen in _MORE_SCREENS)
     _wrap = "nav-active" if _active else ""
     with _col:
         st.markdown(f'<div class="{_wrap}">', unsafe_allow_html=True)
         if st.button(_label, key=f"nav_{_key}", use_container_width=True):
-            st.session_state.screen = _key
+            if _key == "more" and st.session_state.screen not in _MORE_SCREENS:
+                st.session_state.screen = "accuracy"  # default More sub-tab
+            else:
+                st.session_state.screen = _key
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1598,6 +1605,253 @@ def _mob_control_screen():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PORTFOLIO SCREEN — real holdings with live prices
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.fragment(run_every=60)
+def _mob_portfolio_screen():
+    try:
+        from db.database import get_portfolio
+        _pf = get_portfolio(user_id=_auth.get("id", 1))
+    except Exception as _e:
+        st.error(f"Portfolio load failed: {_e}")
+        return
+
+    if _pf.empty:
+        st.markdown("""
+        <div style="padding:60px 20px;text-align:center;color:#484f58;">
+          <div style="font-size:0.9em;font-weight:600;color:#8b949e;">No holdings</div>
+          <div style="font-size:0.75em;margin-top:6px;">Add holdings in the dashboard</div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # Fetch live prices and compute P&L
+    import requests as _req
+    _fh_key_ = os.environ.get("FINNHUB_API_KEY", "")
+    _tiingo_key_ = os.environ.get("TIINGO_API_KEY", "")
+
+    def _live_price(tkr: str) -> float:
+        # 1. Finnhub
+        if _fh_key_:
+            try:
+                r = _req.get(f"https://finnhub.io/api/v1/quote",
+                             params={"symbol": tkr, "token": _fh_key_}, timeout=6)
+                if r.status_code == 200:
+                    p = r.json().get("c") or 0
+                    if p > 0: return float(p)
+            except Exception:
+                pass
+        # 2. Tiingo
+        if _tiingo_key_:
+            try:
+                r = _req.get(f"https://api.tiingo.com/iex/{tkr}",
+                             headers={"Authorization": f"Token {_tiingo_key_}",
+                                      "Content-Type": "application/json"}, timeout=6)
+                if r.status_code == 200:
+                    d = r.json()
+                    if d and isinstance(d, list):
+                        p = d[0].get("last") or 0
+                        if p > 0: return float(p)
+            except Exception:
+                pass
+        # 3. yfinance
+        try:
+            import yfinance as _yf
+            h = _yf.Ticker(tkr).history(period="1d")
+            if not h.empty:
+                p = float(h["Close"].iloc[-1])
+                if p > 0: return p
+        except Exception:
+            pass
+        return 0.0
+
+    _total_val  = 0.0
+    _total_cost = 0.0
+    _total_pnl  = 0.0
+    _rows_data  = []
+    for _, _row in _pf.iterrows():
+        _tkr  = _row["ticker"]
+        _shrs = float(_row.get("shares") or 0)
+        _avg  = float(_row.get("avg_cost") or 0)
+        _price = _live_price(_tkr)
+        _cost_val = _avg * _shrs
+        _mkt_val  = _price * _shrs if _price > 0 else 0.0
+        _pnl_usd  = (_price - _avg) * _shrs if _price > 0 and _avg > 0 else 0.0
+        _pnl_pct  = ((_price - _avg) / _avg * 100) if _avg > 0 and _price > 0 else 0.0
+        _total_val  += _mkt_val
+        _total_cost += _cost_val
+        _total_pnl  += _pnl_usd
+        _rows_data.append({
+            "ticker": _tkr, "shares": _shrs, "avg": _avg,
+            "price": _price, "pnl_usd": _pnl_usd, "pnl_pct": _pnl_pct, "mkt_val": _mkt_val
+        })
+
+    _total_pnl_pct = ((_total_val - _total_cost) / _total_cost * 100) if _total_cost > 0 else 0.0
+
+    st.markdown('<div class="sec-hdr" style="border-top:none;padding-top:8px;">Portfolio Summary</div>',
+                unsafe_allow_html=True)
+    _pc = "#3fb950" if _total_pnl >= 0 else "#f85149"
+    st.markdown(f"""
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;
+                margin:0 12px 12px;overflow:hidden;">
+      <div class="sum-row">
+        <span class="sum-lbl">Market Value</span>
+        <span class="sum-val">${_total_val:,.2f}</span>
+      </div>
+      <div class="sum-row">
+        <span class="sum-lbl">Total Cost</span>
+        <span class="sum-val">${_total_cost:,.2f}</span>
+      </div>
+      <div class="sum-row" style="border-bottom:none;">
+        <span class="sum-lbl">Total P&amp;L</span>
+        <span class="sum-val" style="color:{_pc};">${_total_pnl:+,.2f} ({_total_pnl_pct:+.2f}%)</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-hdr">Holdings</div>', unsafe_allow_html=True)
+    for _h in _rows_data:
+        _pc2 = "#3fb950" if _h["pnl_usd"] >= 0 else "#f85149"
+        _p_s = f"${_h['price']:.4f}" if 0 < _h['price'] < 10 else (f"${_h['price']:.2f}" if _h['price'] > 0 else "—")
+        _a_s = f"${_h['avg']:.4f}" if 0 < _h['avg'] < 10 else f"${_h['avg']:.2f}"
+        st.markdown(f"""
+        <div class="pos-card" style="margin:4px 12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <span class="pos-ticker">{_h['ticker']}</span>
+            <span class="{('pos-pnl-pos' if _h['pnl_usd'] >= 0 else 'pos-pnl-neg')}">${_h['pnl_usd']:+,.2f} ({_h['pnl_pct']:+.2f}%)</span>
+          </div>
+          <div class="pos-meta">
+            {_h['shares']:.0f} shares &nbsp;|&nbsp; Avg {_a_s} &nbsp;|&nbsp; Now {_p_s}
+          </div>
+          <div class="pos-meta" style="margin-top:4px;color:#8b949e;">
+            Market value: ${_h['mkt_val']:,.2f}
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown('<div class="refresh-hint">Live prices — updates every 60s</div>',
+                unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MORE TAB — sub-navigation for Accuracy, Paper Trading, Deep Dive, Control
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _mob_more_screen():
+    _MORE_TABS = [
+        ("accuracy",  "Accuracy"),
+        ("account",   "Paper Trades"),
+        ("control",   "Control"),
+        ("deep_dive", "Deep Dive"),
+    ]
+    _mc = st.columns(4)
+    for _col, (_k, _lbl) in zip(_mc, _MORE_TABS):
+        _active = st.session_state.screen == _k
+        _wrap = "nav-active" if _active else ""
+        with _col:
+            st.markdown(f'<div class="{_wrap}">', unsafe_allow_html=True)
+            if st.button(_lbl, key=f"more_{_k}", use_container_width=True):
+                st.session_state.screen = _k
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+    # EOD Report download link
+    try:
+        import json as _json
+        with open("latest_report.json") as _rf:
+            _rdata = _json.load(_rf)
+        _rdate = _rdata.get("date", "")
+        _rpath = _rdata.get("path", "")
+        if _rpath:
+            st.markdown(f"""
+            <div style="background:#161b22;border:1px solid rgba(88,166,255,0.3);border-radius:8px;
+                        padding:10px 14px;margin:0 12px 12px;display:flex;
+                        align-items:center;justify-content:space-between;">
+              <div>
+                <div style="font-size:0.78em;font-weight:600;color:#58a6ff;">EOD Report</div>
+                <div style="font-size:0.68em;color:#484f58;">Generated {_rdate}</div>
+              </div>
+              <div style="font-size:0.72em;color:#8b949e;">{_rpath.split('/')[-1]}</div>
+            </div>
+            """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+    # Dispatch sub-screen
+    if st.session_state.screen == "accuracy":
+        _accuracy_screen()
+    elif st.session_state.screen == "account":
+        _account_screen()
+    elif st.session_state.screen == "control":
+        _mob_control_screen()
+    elif st.session_state.screen == "deep_dive":
+        _mob_deep_dive_screen()
+    else:
+        _accuracy_screen()
+
+
+@st.fragment(run_every=60)
+def _mob_deep_dive_screen():
+    """Per-ticker deep dive: search by ticker, show all signal history + outcomes."""
+    _dd_ticker = st.text_input("Ticker", key="dd_ticker_input",
+                               placeholder="Enter ticker (e.g. QUBT)").upper().strip()
+    if not _dd_ticker:
+        st.markdown('<div style="padding:20px 16px;color:#484f58;font-size:0.82em;">Enter a ticker to deep dive.</div>',
+                    unsafe_allow_html=True)
+        return
+
+    try:
+        from db.database import get_signal_log
+        _df = get_signal_log(days=90)
+        if not _df.empty:
+            _df = _df[_df["ticker"] == _dd_ticker]
+    except Exception as _e:
+        st.error(f"Load failed: {_e}")
+        return
+
+    if _df is None or (hasattr(_df, "empty") and _df.empty):
+        st.markdown(f'<div style="padding:20px 16px;color:#484f58;font-size:0.82em;">No signals for {_dd_ticker} in last 90 days.</div>',
+                    unsafe_allow_html=True)
+        return
+
+    st.markdown(f'<div class="sec-hdr" style="border-top:none;">Signal History — {_dd_ticker} (last 90d)</div>',
+                unsafe_allow_html=True)
+    _dd_rows = _df.to_dict("records")
+    for _r in _dd_rows[:30]:
+        _sc   = _score_color(_r.get("score"))
+        _lbl  = _r.get("signal_label", "—")
+        _sc_v = f"{float(_r.get('score', 0)):.0f}" if _r.get("score") else "—"
+        _pr_v = f"${float(_r.get('price_at_signal', 0)):.4f}" if _r.get("price_at_signal") else "—"
+        _1d   = _fmt_ret(_r.get("pct_change_1day"))
+        _5d   = _fmt_ret(_r.get("pct_change_5day"))
+        _ts   = _fmt_ts_et(_r.get("created_at"))
+        st.markdown(f"""
+        <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;
+                    padding:10px 14px;margin:4px 12px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:0.88em;
+                         font-weight:700;color:{_sc};">{_sc_v}pt</span>
+            <span style="font-size:0.72em;color:#484f58;">{_ts}</span>
+          </div>
+          <div style="font-size:0.78em;color:#8b949e;">{_lbl} &nbsp;|&nbsp; {_pr_v}</div>
+          <div style="font-size:0.72em;margin-top:4px;">
+            <span style="color:#484f58;">1D: </span>
+            <span style="{('color:#3fb950' if _1d.startswith('+') else 'color:#f85149' if _1d.startswith('-') else 'color:#484f58')};">{_1d}</span>
+            &nbsp;&nbsp;
+            <span style="color:#484f58;">5D: </span>
+            <span style="{('color:#3fb950' if _5d.startswith('+') else 'color:#f85149' if _5d.startswith('-') else 'color:#484f58')};">{_5d}</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown('<div class="refresh-hint">Last 90 days — updates every 60s</div>',
+                unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SCREEN DISPATCH
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1607,9 +1861,9 @@ elif _screen == "signals":
     _mob_signals_screen()
 elif _screen == "alerts":
     _mob_alerts_screen()
-elif _screen == "accuracy":
-    _accuracy_screen()
-elif _screen == "account":
-    _account_screen()
-elif _screen == "control":
-    _mob_control_screen()
+elif _screen == "portfolio":
+    _mob_portfolio_screen()
+elif _screen in _MORE_SCREENS or _screen == "more":
+    _mob_more_screen()
+else:
+    _mob_status_screen()

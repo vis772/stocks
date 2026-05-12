@@ -2015,17 +2015,57 @@ def get_scanner_logs(limit: int = 50) -> List[dict]:
 
 # ─── Shared query functions (used by both app.py and mobile.py) ───────────────
 
+def _compute_scanner_status(mode: str, last_heartbeat, paused: bool) -> str:
+    """Compute unified human-readable status from mode + heartbeat age."""
+    try:
+        from zoneinfo import ZoneInfo
+        et = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+    except ImportError:
+        import pytz
+        et = datetime.now(pytz.timezone("America/New_York")).replace(tzinfo=None)
+
+    # Check heartbeat age
+    hb_secs = 99999
+    if last_heartbeat:
+        try:
+            hb_dt = last_heartbeat if isinstance(last_heartbeat, datetime) else \
+                    datetime.fromisoformat(str(last_heartbeat).replace("Z", ""))
+            hb_dt = hb_dt.replace(tzinfo=None) if hasattr(hb_dt, 'tzinfo') and hb_dt.tzinfo else hb_dt
+            hb_secs = int((datetime.utcnow() - hb_dt).total_seconds())
+        except Exception:
+            pass
+
+    if paused:
+        return "Paused"
+    is_weekend = et.weekday() >= 5
+    if is_weekend:
+        return "Sleeping"
+    h, m = et.hour, et.minute
+    is_premarket  = (h >= 4) and ((h < 9) or (h == 9 and m < 30))
+    is_market     = ((h > 9) or (h == 9 and m >= 30)) and (h < 16)
+    is_afterhours = (h == 16) and (m <= 59)
+    if h < 4 or (h == 16 and m > 59) or h >= 17:
+        return "Sleeping"
+    if is_premarket:
+        return "Pre-market"
+    if is_market:
+        return "Offline" if hb_secs > 45 * 60 else "Active"
+    if is_afterhours:
+        return "After-hours"
+    return "Sleeping"
+
+
 def get_scanner_state() -> dict:
     """Return combined scanner_state + scanner_control dict for status display."""
     date_str = datetime.now().strftime("%Y-%m-%d")
     result = {
         "current_mode": "UNKNOWN", "paused": False,
         "last_heartbeat": None, "scan_count": 0,
-        "signals_today": 0, "signals_suppressed_today": 0,
+        "signals_today": 0, "alerts_today": 0, "signals_suppressed_today": 0,
         "universe_size": 0, "open_positions": 0,
         "data_quality_tiingo": 0.0, "data_quality_yfinance": 0.0, "data_quality_stale": 0.0,
         "last_conviction_run": None, "last_accuracy_run": None,
-        "scanner_started_at": None,
+        "scanner_started_at": None, "status": "Unknown",
     }
     try:
         if _is_postgres():
@@ -2063,6 +2103,10 @@ def get_scanner_state() -> dict:
                 "SELECT COUNT(*) FROM signal_log WHERE DATE(created_at) = %s", (date_str,)
             )
             result["signals_today"] = cur.fetchone()[0] or 0
+            cur.execute(
+                "SELECT COUNT(*) FROM alert_log WHERE DATE(created_at) = %s", (date_str,)
+            )
+            result["alerts_today"] = cur.fetchone()[0] or 0
             cur.close(); conn.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
@@ -2087,9 +2131,17 @@ def get_scanner_state() -> dict:
                 "SELECT COUNT(*) FROM signal_log WHERE DATE(created_at) = ?", (date_str,)
             )
             result["signals_today"] = cur.fetchone()[0] or 0
+            cur.execute(
+                "SELECT COUNT(*) FROM alert_log WHERE DATE(created_at) = ?", (date_str,)
+            )
+            result["alerts_today"] = cur.fetchone()[0] or 0
             conn.close()
     except Exception as e:
         print(f"  [db] get_scanner_state failed: {e}")
+    # Compute unified human-readable status (single source of truth for both UIs)
+    result["status"] = _compute_scanner_status(
+        result["current_mode"], result.get("last_heartbeat"), result["paused"]
+    )
     return result
 
 
