@@ -35,7 +35,7 @@ class ConvictionEngine:
 
     # ── Step 1: Eligibility gate ──────────────────────────────────────────────
 
-    def is_eligible(self, ticker: str, data: dict) -> bool:
+    def is_eligible(self, ticker: str, data: dict, session: str = "afterhours") -> bool:
         """Must pass ALL checks to be considered."""
         composite = _safe(data.get("composite_score", 0))
         if composite < 68:
@@ -55,7 +55,8 @@ class ConvictionEngine:
                 pass
 
         rvol = _safe(data.get("rvol", 0))
-        if rvol < 1.3:
+        rvol_min = 0.5 if session == "preopen" else 1.3
+        if rvol < rvol_min:
             return False
 
         price = _safe(data.get("price", 0))
@@ -231,7 +232,7 @@ class ConvictionEngine:
         rank by conviction, return top 5.
         """
         candidates = self._load_todays_candidates()
-        eligible   = [d for d in candidates if self.is_eligible(d["ticker"], d)]
+        eligible   = [d for d in candidates if self.is_eligible(d["ticker"], d, session=session)]
         scored     = sorted(eligible, key=lambda d: self.conviction_score(d["ticker"], d), reverse=True)
         top5       = scored[:5]
 
