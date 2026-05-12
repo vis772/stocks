@@ -16,7 +16,7 @@ from config import DEFAULT_UNIVERSE, SCORING_WEIGHTS, RISK_FLAGS
 from db.database import (initialize_db, upsert_holding, delete_holding, get_portfolio,
                           get_connection, validate_session, invalidate_session,
                           create_session, get_user_by_username, create_user, update_last_login,
-                          get_all_users)
+                          get_all_users, delete_user, change_user_password)
 from auth import check_password, hash_password, validate_password_strength
 from core.scanner import scan_ticker, scan_universe
 from analysis.portfolio import analyze_holding, compute_portfolio_summary
@@ -1008,17 +1008,14 @@ def render_deep_dive(r):
 def _require_auth() -> dict:
     """
     Validates the current session. Returns the user dict if authenticated.
-    Shows the login/register page and calls st.stop() if not.
+    Shows the login page and calls st.stop() if not.
     """
     token = st.session_state.get("_session_token")
     if token:
         user = validate_session(token)
         if user:
             return user
-        # Token expired or invalid — clear it
         st.session_state.pop("_session_token", None)
-
-    view = st.session_state.get("_auth_view", "login")
 
     _, col, _ = st.columns([1, 1.6, 1])
     with col:
@@ -1030,54 +1027,19 @@ def _require_auth() -> dict:
                       color:var(--t3);letter-spacing:0.2em;margin-top:4px;">TERMINAL</div>
         </div>""", unsafe_allow_html=True)
 
-        if view == "login":
-            with st.form("_login_form", clear_on_submit=False):
-                username = st.text_input("Username", placeholder="username")
-                password = st.text_input("Password", placeholder="••••••••", type="password")
-                submitted = st.form_submit_button("Sign in", use_container_width=True, type="primary")
-            if submitted:
-                u = get_user_by_username(username)
-                if u and check_password(password, u["password_hash"]):
-                    tok = create_session(u["id"])
-                    update_last_login(u["id"])
-                    st.session_state["_session_token"] = tok
-                    st.session_state.pop("_auth_view", None)
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password.")
-            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-            if st.button("Create an account", use_container_width=True):
-                st.session_state["_auth_view"] = "register"
+        with st.form("_login_form", clear_on_submit=False):
+            username  = st.text_input("Username", placeholder="username")
+            password  = st.text_input("Password", placeholder="••••••••", type="password")
+            submitted = st.form_submit_button("Sign in", use_container_width=True, type="primary")
+        if submitted:
+            u = get_user_by_username(username)
+            if u and check_password(password, u["password_hash"]):
+                tok = create_session(u["id"])
+                update_last_login(u["id"])
+                st.session_state["_session_token"] = tok
                 st.rerun()
-
-        else:  # register
-            with st.form("_register_form", clear_on_submit=False):
-                new_user  = st.text_input("Username", placeholder="username")
-                new_email = st.text_input("Email",    placeholder="you@example.com")
-                new_pass  = st.text_input("Password", placeholder="min 8 characters", type="password")
-                new_pass2 = st.text_input("Confirm password", placeholder="repeat password", type="password")
-                submitted = st.form_submit_button("Create account", use_container_width=True, type="primary")
-            if submitted:
-                err = validate_password_strength(new_pass)
-                if err:
-                    st.error(err)
-                elif new_pass != new_pass2:
-                    st.error("Passwords don't match.")
-                elif not new_user.strip() or not new_email.strip():
-                    st.error("All fields are required.")
-                else:
-                    try:
-                        uid = create_user(new_user.strip(), new_email.strip(), hash_password(new_pass))
-                        tok = create_session(uid)
-                        st.session_state["_session_token"] = tok
-                        st.session_state.pop("_auth_view", None)
-                        st.rerun()
-                    except Exception as _reg_err:
-                        st.error(f"Registration failed — username or email already taken.")
-            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-            if st.button("Back to sign in", use_container_width=True):
-                st.session_state["_auth_view"] = "login"
-                st.rerun()
+            else:
+                st.error("Invalid username or password.")
 
         st.markdown('<div class="disc" style="margin-top:20px;">Research tool · Not financial advice</div>',
                     unsafe_allow_html=True)
@@ -2337,40 +2299,106 @@ Each stock scores 0–100 across five components. Adjust weights in the **Config
 
     if _current_user["role"] == "admin":
         st.markdown("---")
-        st.markdown('<div class="sh">Admin Panel</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sh">Manage Users</div>', unsafe_allow_html=True)
         try:
-            users = get_all_users()
-            st.markdown(f'**{len(users)} registered user(s)**')
-            rows_html = ""
-            for u in users:
-                last = str(u.get("last_login") or "—")[:16]
-                since = str(u.get("created_at") or "—")[:10]
-                role_color = "#c2610f" if u["role"] == "admin" else "#334155"
-                rows_html += (
-                    f'<div class="stat-row">'
-                    f'<span class="sval b" style="width:130px;">{u["username"]}</span>'
-                    f'<span class="slbl" style="width:200px;">{u["email"]}</span>'
-                    f'<span style="width:70px;font-family:\'JetBrains Mono\',monospace;font-size:0.72em;'
-                    f'color:{role_color};font-weight:600;">{u["role"].upper()}</span>'
-                    f'<span class="slbl" style="width:100px;">{since}</span>'
-                    f'<span class="slbl" style="width:130px;text-align:right;">{last}</span>'
-                    f'</div>'
-                )
-            st.markdown(
-                '<div style="background:var(--bgcard);border:1px solid var(--border);border-radius:8px;padding:10px 16px;">'
-                + '<div class="stat-row" style="margin-bottom:4px;">'
-                + '<span class="slbl" style="width:130px;">Username</span>'
-                + '<span class="slbl" style="width:200px;">Email</span>'
-                + '<span class="slbl" style="width:70px;">Role</span>'
-                + '<span class="slbl" style="width:100px;">Joined</span>'
-                + '<span class="slbl" style="width:130px;text-align:right;">Last login</span>'
-                + '</div>'
-                + rows_html
-                + '</div>',
-                unsafe_allow_html=True
-            )
+            _adm_users = get_all_users() or []
         except Exception as _adm_e:
-            st.error(f"Admin panel error: {_adm_e}")
+            st.error(f"User management unavailable: {_adm_e}")
+            _adm_users = []
+
+        # ── User list ─────────────────────────────────────────────────────────
+        if _adm_users:
+            _hdr_cols = st.columns([2, 2, 1.2, 1.5, 1.5, 1])
+            for _h, _lbl in zip(_hdr_cols, ["Username", "Display Name", "Role", "Joined", "Last Login", ""]):
+                _h.markdown(f'<span class="slbl">{_lbl}</span>', unsafe_allow_html=True)
+
+            for _u in _adm_users:
+                _uid    = _u["id"]
+                _uname  = _u["username"]
+                _udname = _u.get("display_name") or "—"
+                _urole  = _u.get("role", "user")
+                _ujoin  = str(_u.get("created_at") or "—")[:10]
+                _ulast  = str(_u.get("last_login") or "—")[:16]
+                _rc     = "#c2610f" if _urole == "admin" else "var(--t3)"
+                _self   = (_uid == _current_user.get("id"))
+
+                _c1, _c2, _c3, _c4, _c5, _c6 = st.columns([2, 2, 1.2, 1.5, 1.5, 1])
+                _c1.markdown(f'<span class="sval b">{_uname}</span>', unsafe_allow_html=True)
+                _c2.markdown(f'<span class="slbl">{_udname}</span>', unsafe_allow_html=True)
+                _c3.markdown(
+                    f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.72em;'
+                    f'font-weight:600;color:{_rc};">{_urole.upper()}</span>',
+                    unsafe_allow_html=True,
+                )
+                _c4.markdown(f'<span class="slbl">{_ujoin}</span>', unsafe_allow_html=True)
+                _c5.markdown(f'<span class="slbl">{_ulast}</span>', unsafe_allow_html=True)
+                with _c6:
+                    if not _self:
+                        if st.button("Delete", key=f"adm_del_{_uid}", type="secondary"):
+                            if delete_user(_uid):
+                                st.success(f"Deleted {_uname}")
+                                st.rerun()
+                            else:
+                                st.error("Delete failed")
+                    else:
+                        st.markdown('<span class="slbl">you</span>', unsafe_allow_html=True)
+
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        # ── Add user ──────────────────────────────────────────────────────────
+        with st.expander("Add user", expanded=False):
+            _ac1, _ac2 = st.columns(2)
+            with _ac1:
+                _nu_user  = st.text_input("Username",     key="adm_nu_user",  placeholder="username")
+                _nu_pass  = st.text_input("Password",     key="adm_nu_pass",  type="password",
+                                          placeholder="min 6 characters")
+            with _ac2:
+                _nu_dname = st.text_input("Display Name", key="adm_nu_dname", placeholder="display name")
+                _nu_role  = st.selectbox("Role",          ["user", "admin"],  key="adm_nu_role")
+            if st.button("Create user", key="adm_nu_submit", type="primary"):
+                _nu_user = (_nu_user or "").strip()
+                _nu_pass = (_nu_pass or "").strip()
+                _err = validate_password_strength(_nu_pass) if len(_nu_pass) >= 8 else (
+                    "Password must be at least 8 characters." if _nu_pass else "Password required."
+                )
+                if not _nu_user:
+                    st.error("Username required.")
+                elif _err:
+                    st.error(_err)
+                else:
+                    try:
+                        _email = f"{_nu_user}@axiom.local"
+                        create_user(_nu_user, _email, hash_password(_nu_pass), _nu_role,
+                                    display_name=(_nu_dname or _nu_user).strip())
+                        st.success(f"Created user: {_nu_user}")
+                        st.rerun()
+                    except Exception as _cue:
+                        st.error(f"Failed: {_cue}")
+
+        # ── Change password ───────────────────────────────────────────────────
+        with st.expander("Change password", expanded=False):
+            if _adm_users:
+                _cp_names = [_u["username"] for _u in _adm_users]
+                _cp_c1, _cp_c2 = st.columns(2)
+                with _cp_c1:
+                    _cp_sel  = st.selectbox("User", _cp_names, key="adm_cp_sel")
+                with _cp_c2:
+                    _cp_pass = st.text_input("New password", key="adm_cp_pass", type="password",
+                                             placeholder="min 8 characters")
+                if st.button("Update password", key="adm_cp_submit", type="primary"):
+                    _cp_pass = (_cp_pass or "").strip()
+                    _cp_err  = validate_password_strength(_cp_pass) if len(_cp_pass) >= 8 else (
+                        "Password must be at least 8 characters." if _cp_pass else "Password required."
+                    )
+                    if _cp_err:
+                        st.error(_cp_err)
+                    else:
+                        try:
+                            _cp_uid = next(u["id"] for u in _adm_users if u["username"] == _cp_sel)
+                            change_user_password(_cp_uid, hash_password(_cp_pass))
+                            st.success(f"Password updated for {_cp_sel}")
+                        except Exception as _cpe:
+                            st.error(f"Failed: {_cpe}")
 
 
 # ── TAB 8: CONFIG ─────────────────────────────────────────────────────────────
