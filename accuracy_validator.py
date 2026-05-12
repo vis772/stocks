@@ -54,6 +54,41 @@ def get_close_n_trading_days_after(ticker: str, entry_date, n: int):
     return after[n - 1][1]
 
 
+def _fetch_closes_after(ticker: str, entry_date) -> dict:
+    """
+    Single yf.download() per signal. Returns {1: close, 3: close, 5: close}
+    for whichever horizons have data. entry_date is excluded (strictly after).
+    """
+    import yfinance as yf
+    from datetime import timedelta
+
+    if isinstance(entry_date, str):
+        entry_date = datetime.fromisoformat(entry_date.replace("Z", "")).date()
+    elif hasattr(entry_date, "date"):
+        entry_date = entry_date.date()
+
+    end = entry_date + timedelta(days=22)  # enough for 5 trading days + holidays
+
+    try:
+        df = yf.download(ticker, start=str(entry_date), end=str(end),
+                         progress=False, auto_adjust=True)
+    except Exception:
+        return {}
+
+    if df is None or df.empty:
+        return {}
+
+    close_col = df["Close"]
+    if isinstance(close_col, type(df)):   # MultiIndex → DataFrame, take first col
+        close_col = close_col.iloc[:, 0]
+    closes = close_col.dropna()
+
+    idx_dates = [d.date() if hasattr(d, "date") else d for d in closes.index]
+    after = [float(c) for d, c in zip(idx_dates, closes) if d > entry_date]
+
+    return {n: after[n - 1] for n in [1, 3, 5] if len(after) >= n}
+
+
 def _safe(v, fallback=0.0):
     try:
         f = float(v)
@@ -77,92 +112,116 @@ class AccuracyValidator:
 
     def grade_signals(self) -> int:
         """
-        Grade all ungraded signals where 5+ trading days of data exist.
-        Writes outcome_1d/3d/5d (% return) directly to signal_log.
-        Returns number of signals successfully graded.
+        Grade signals horizon-by-horizon as soon as data is available.
+
+        Pass 1 — outcome_1d IS NULL, signal >= 1 day old:
+            Write outcome_1d now; also write 3d/5d if already available.
+        Pass 2 — outcome_1d set but outcome_5d still NULL, signal >= 3 days old:
+            Fill in remaining 3d/5d outcomes as data becomes available.
+
+        _write_signal_log_outcomes() uses COALESCE so passing None never
+        overwrites a previously graded outcome.
         """
-        graded = 0
-        failed = 0
+        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+
+        _LABELS = (
+            "'Strong Buy Candidate','Speculative Buy','Watchlist',"
+            "'Hold','Trim','Sell','Avoid','Gap-Up'"
+        )
+        _BASE = (
+            "price_at_signal IS NOT NULL AND price_at_signal > 0 "
+            f"AND signal_label IN ({_LABELS})"
+        )
+
+        graded  = 0
+        failed  = 0
         skipped = 0
 
-        try:
-            from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+        def _query(pg_sql, sq_sql):
+            try:
+                if _is_postgres():
+                    conn = _get_pg_conn(); cur = conn.cursor()
+                    cur.execute(pg_sql); rows = cur.fetchall()
+                    cur.close(); conn.close()
+                else:
+                    conn = _get_sqlite_conn(); cur = conn.cursor()
+                    cur.execute(sq_sql); rows = cur.fetchall()
+                    conn.close()
+                return rows
+            except Exception as e:
+                print(f"  [accuracy] query failed: {e}")
+                return []
 
-            if _is_postgres():
-                conn = _get_pg_conn(); cur = conn.cursor()
-                cur.execute("""
-                    SELECT id, ticker, score, price_at_signal, created_at
-                    FROM signal_log
-                    WHERE outcome_5d IS NULL
-                      AND price_at_signal IS NOT NULL
-                      AND price_at_signal > 0
-                      AND created_at <= NOW() - INTERVAL '8 days'
-                    ORDER BY created_at ASC
-                    LIMIT 300
-                """)
-                rows = cur.fetchall()
-                cur.close(); conn.close()
-            else:
-                conn = _get_sqlite_conn(); cur = conn.cursor()
-                cur.execute("""
-                    SELECT id, ticker, score, price_at_signal, created_at
-                    FROM signal_log
-                    WHERE outcome_5d IS NULL
-                      AND price_at_signal IS NOT NULL
-                      AND price_at_signal > 0
-                      AND created_at <= datetime('now', '-8 days')
-                    ORDER BY created_at ASC
-                    LIMIT 300
-                """)
-                rows = cur.fetchall()
-                conn.close()
-
+        def _process(rows, label):
+            nonlocal graded, failed, skipped
             total = len(rows)
-            print(f"  [accuracy] Found {total} ungraded signals to process")
-
+            print(f"  [accuracy] {label}: {total} signals")
             for i, row in enumerate(rows, 1):
-                sig_id, ticker, score, entry_price, created_at = row[0], row[1], row[2], row[3], row[4]
-
+                sig_id, ticker, entry_price, created_at, o1, o3, o5 = row
                 try:
-                    ret_1d = ret_3d = ret_5d = None
-
-                    c1 = get_close_n_trading_days_after(ticker, created_at, 1)
-                    if c1 is not None:
-                        ret_1d = round((c1 - entry_price) / entry_price * 100, 3)
-
-                    c3 = get_close_n_trading_days_after(ticker, created_at, 3)
-                    if c3 is not None:
-                        ret_3d = round((c3 - entry_price) / entry_price * 100, 3)
-
-                    c5 = get_close_n_trading_days_after(ticker, created_at, 5)
-                    if c5 is not None:
-                        ret_5d = round((c5 - entry_price) / entry_price * 100, 3)
-
-                    if ret_5d is None:
+                    closes = _fetch_closes_after(ticker, created_at)
+                    if not closes:
                         skipped += 1
-                    else:
-                        _write_signal_log_outcomes(sig_id, ret_1d, ret_3d, ret_5d)
-                        # Also keep signal_outcomes populated for compute_metrics()
-                        _write_graded_outcome(sig_id, {
-                            "outcome_1d": "win" if ret_1d and ret_1d > WIN_THRESHOLD * 100 else
-                                          "loss" if ret_1d and ret_1d < LOSS_THRESHOLD * 100 else "neutral",
-                            "outcome_3d": "win" if ret_3d and ret_3d > WIN_THRESHOLD * 100 else
-                                          "loss" if ret_3d and ret_3d < LOSS_THRESHOLD * 100 else "neutral",
-                            "outcome_5d": "win" if ret_5d > WIN_THRESHOLD * 100 else
-                                          "loss" if ret_5d < LOSS_THRESHOLD * 100 else "neutral",
-                            "ret_1d": ret_1d, "ret_3d": ret_3d, "ret_5d": ret_5d,
-                        })
-                        graded += 1
+                        continue
 
-                except Exception as _sig_e:
+                    def _ret(n, existing):
+                        if existing is not None or n not in closes:
+                            return None
+                        return round((closes[n] - entry_price) / entry_price * 100, 3)
+
+                    ret_1d = _ret(1, o1)
+                    ret_3d = _ret(3, o3)
+                    ret_5d = _ret(5, o5)
+
+                    if ret_1d is None and ret_3d is None and ret_5d is None:
+                        skipped += 1
+                        continue
+
+                    _write_signal_log_outcomes(sig_id, ret_1d, ret_3d, ret_5d)
+
+                    # Keep signal_outcomes populated for compute_metrics()
+                    so_upd = {}
+                    for col, ret in [("outcome_1d", ret_1d), ("outcome_3d", ret_3d), ("outcome_5d", ret_5d)]:
+                        if ret is not None:
+                            so_upd[col] = ("win"  if ret >  WIN_THRESHOLD  * 100 else
+                                           "loss" if ret <  LOSS_THRESHOLD * 100 else "neutral")
+                            so_upd[f"ret_{col[8:]}"] = ret
+                    if so_upd:
+                        _write_graded_outcome(sig_id, so_upd)
+
+                    graded += 1
+                except Exception as _e:
                     failed += 1
-                    print(f"  [accuracy] {ticker} (id={sig_id}) failed: {_sig_e}")
+                    print(f"  [accuracy] {ticker} id={sig_id} error: {_e}")
 
                 if i % 10 == 0:
                     print(f"  [AccuracyValidator] Graded {i}/{total}...")
 
-        except Exception as e:
-            print(f"  [accuracy] grade_signals outer error: {e}")
+        # Pass 1: signals where outcome_1d hasn't been touched yet (>= 1 day old)
+        _process(
+            _query(
+                f"SELECT id,ticker,price_at_signal,created_at,outcome_1d,outcome_3d,outcome_5d "
+                f"FROM signal_log WHERE outcome_1d IS NULL AND {_BASE} "
+                f"AND created_at <= NOW() - INTERVAL '1 day' ORDER BY created_at ASC LIMIT 300",
+                f"SELECT id,ticker,price_at_signal,created_at,outcome_1d,outcome_3d,outcome_5d "
+                f"FROM signal_log WHERE outcome_1d IS NULL AND {_BASE} "
+                f"AND created_at <= datetime('now','-1 day') ORDER BY created_at ASC LIMIT 300",
+            ),
+            "Pass 1 (outcome_1d IS NULL, >=1d old)"
+        )
+
+        # Pass 2: partially-graded signals — outcome_1d set but outcome_5d still NULL (>= 3 days old)
+        _process(
+            _query(
+                f"SELECT id,ticker,price_at_signal,created_at,outcome_1d,outcome_3d,outcome_5d "
+                f"FROM signal_log WHERE outcome_1d IS NOT NULL AND outcome_5d IS NULL AND {_BASE} "
+                f"AND created_at <= NOW() - INTERVAL '3 days' ORDER BY created_at ASC LIMIT 300",
+                f"SELECT id,ticker,price_at_signal,created_at,outcome_1d,outcome_3d,outcome_5d "
+                f"FROM signal_log WHERE outcome_1d IS NOT NULL AND outcome_5d IS NULL AND {_BASE} "
+                f"AND created_at <= datetime('now','-3 days') ORDER BY created_at ASC LIMIT 300",
+            ),
+            "Pass 2 (outcome_5d IS NULL, >=3d old)"
+        )
 
         summary = f"[AccuracyValidator] Done. Graded: {graded}, Failed: {failed}, Skipped: {skipped}"
         print(summary)
@@ -492,14 +551,20 @@ def _write_graded_outcome(sig_id: int, updates: dict) -> None:
 
 
 def _write_signal_log_outcomes(sig_id: int, ret_1d, ret_3d, ret_5d) -> None:
-    """Write outcome_1d/3d/5d (% returns) and graded_at directly to signal_log."""
+    """
+    Write outcome_1d/3d/5d (% returns) and graded_at to signal_log.
+    Uses COALESCE so passing None never overwrites an already-graded outcome.
+    """
     try:
         from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
         if _is_postgres():
             conn = _get_pg_conn(); cur = conn.cursor()
             cur.execute("""
                 UPDATE signal_log
-                SET outcome_1d = %s, outcome_3d = %s, outcome_5d = %s, graded_at = NOW()
+                SET outcome_1d = COALESCE(%s, outcome_1d),
+                    outcome_3d = COALESCE(%s, outcome_3d),
+                    outcome_5d = COALESCE(%s, outcome_5d),
+                    graded_at  = NOW()
                 WHERE id = %s
             """, (ret_1d, ret_3d, ret_5d, sig_id))
             conn.commit(); cur.close(); conn.close()
@@ -507,7 +572,10 @@ def _write_signal_log_outcomes(sig_id: int, ret_1d, ret_3d, ret_5d) -> None:
             conn = _get_sqlite_conn()
             conn.execute("""
                 UPDATE signal_log
-                SET outcome_1d = ?, outcome_3d = ?, outcome_5d = ?, graded_at = datetime('now')
+                SET outcome_1d = COALESCE(?, outcome_1d),
+                    outcome_3d = COALESCE(?, outcome_3d),
+                    outcome_5d = COALESCE(?, outcome_5d),
+                    graded_at  = datetime('now')
                 WHERE id = ?
             """, (ret_1d, ret_3d, ret_5d, sig_id))
             conn.commit(); conn.close()
