@@ -1,6 +1,6 @@
 # conviction_engine.py
 # Synthesizes ALL available signals into a ranked, actionable buy list.
-# Runs at 4:00 PM ET (close) and 8:30 PM ET (afterhours).
+# Runs at 8:55 AM ET (preopen), 4:00 PM ET (close), and 8:30 PM ET (afterhours).
 # Max 5 names per session. Writes to conviction_buys table.
 
 import os
@@ -35,7 +35,7 @@ class ConvictionEngine:
 
     # ── Step 1: Eligibility gate ──────────────────────────────────────────────
 
-    def is_eligible(self, ticker: str, data: dict) -> bool:
+    def is_eligible(self, ticker: str, data: dict, session: str = "afterhours") -> bool:
         """Must pass ALL checks to be considered."""
         composite = _safe(data.get("composite_score", 0))
         if composite < 68:
@@ -55,7 +55,8 @@ class ConvictionEngine:
                 pass
 
         rvol = _safe(data.get("rvol", 0))
-        if rvol < 1.3:
+        rvol_min = 0.5 if session == "preopen" else 1.3
+        if rvol < rvol_min:
             return False
 
         price = _safe(data.get("price", 0))
@@ -231,7 +232,7 @@ class ConvictionEngine:
         rank by conviction, return top 5.
         """
         candidates = self._load_todays_candidates()
-        eligible   = [d for d in candidates if self.is_eligible(d["ticker"], d)]
+        eligible   = [d for d in candidates if self.is_eligible(d["ticker"], d, session=session)]
         scored     = sorted(eligible, key=lambda d: self.conviction_score(d["ticker"], d), reverse=True)
         top5       = scored[:5]
 
@@ -509,8 +510,14 @@ def send_buy_list_alert(buy_list: list, session: str) -> None:
                 f"#{b['rank']} {b['ticker']} ({b['conviction']:.0f}) {hold_abbr} | "
                 f"Entry ${p.get('entry','?')} stop ${p.get('stop_loss','?')}"
             )
+        title_map = {
+            "preopen":   "Axiom — Pre-Open Conviction (8:55 AM)",
+            "close":     "Axiom — Close Conviction (4 PM)",
+            "afterhours": "Axiom — Tonight's Buys",
+        }
+        alert_title = title_map.get(session, f"Axiom — Conviction ({session})")
         send_alert(
-            title="Axiom — Tonight's Buys",
+            title=alert_title,
             message="\n".join(lines),
             priority=PRIORITY_HIGH,
         )
@@ -519,7 +526,7 @@ def send_buy_list_alert(buy_list: list, session: str) -> None:
 
 
 def run_conviction_engine(session: str = "afterhours") -> list:
-    """Entry point called by scanner_loop at 4 PM and 8:30 PM ET."""
+    """Entry point called by scanner_loop at 8:55 AM, 4 PM, and 8:30 PM ET."""
     print(f"\n[CONVICTION] Running conviction engine for session={session}...")
     try:
         from accuracy_validator import AccuracyValidator
