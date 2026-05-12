@@ -1603,6 +1603,102 @@ def _mob_control_screen():
                     unsafe_allow_html=True,
                 )
 
+    st.markdown('<div class="sec-hdr">Conviction List</div>', unsafe_allow_html=True)
+
+    try:
+        from conviction_engine import get_latest_conviction_list as _gcl_mob
+        _cv_mob = _gcl_mob(max_age_minutes=90)
+    except Exception:
+        _cv_mob = {"entries": [], "is_stale": True, "is_yesterday": False}
+
+    _cv_mob_gen = _cv_mob.get("generated_at")
+    _cv_mob_ts = "—"
+    if _cv_mob_gen:
+        try:
+            _cv_mob_dt = _cv_mob_gen if isinstance(_cv_mob_gen, datetime) else datetime.fromisoformat(str(_cv_mob_gen).replace("Z",""))
+            _cv_mob_ts = _cv_mob_dt.strftime("%-I:%M %p")
+        except Exception:
+            _cv_mob_ts = str(_cv_mob_gen)[:16]
+
+    if _cv_mob.get("is_yesterday"):
+        st.markdown(
+            '<div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.3);'
+            'border-radius:8px;padding:8px 12px;margin:4px 12px 8px;font-size:0.72em;color:#d97706;">'
+            'Market closed — last session list</div>',
+            unsafe_allow_html=True
+        )
+
+    if st.button(f"CONVICTION LIST — {_cv_mob_ts}", key="conv_mob_btn",
+                 use_container_width=True, type="primary"):
+        st.session_state.show_conviction_mob = not st.session_state.get("show_conviction_mob", False)
+        if st.session_state.get("show_conviction_mob") and _cv_mob.get("is_stale", True):
+            with st.spinner("Generating..."):
+                try:
+                    from conviction_engine import generate_live_conviction_list
+                    _cv_mob["entries"] = generate_live_conviction_list(session="market")
+                except Exception:
+                    pass
+        st.rerun()
+
+    if st.session_state.get("show_conviction_mob", False):
+        _mob_cv_entries = _cv_mob.get("entries", [])
+        if not _mob_cv_entries:
+            st.markdown(
+                '<div style="padding:16px 12px;color:#484f58;font-size:0.8em;text-align:center;">'
+                'No high-conviction setups. Need score >= 75 Strong/Spec Buy signals.</div>',
+                unsafe_allow_html=True
+            )
+        else:
+            _CONV_C = {"Very High": "#3fb950", "High": "#58a6ff", "Medium": "#d97706", "Low": "#8b949e"}
+            for _me in _mob_cv_entries:
+                _mc_c = _CONV_C.get(_me.get("ai_conviction",""), "#8b949e")
+                _mpct = _me.get("pct_change_today") or 0
+                _mpct_c = "#3fb950" if float(_mpct) >= 0 else "#f85149"
+                _msc = _me.get("composite") or _me.get("score") or _me.get("conviction") or 0
+                st.markdown(f"""
+                <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;
+                            padding:12px 14px;margin:4px 12px 8px;">
+                  <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:0.9em;
+                                 font-weight:700;color:#58a6ff;">#{_me.get('rank','?')} {_me.get('ticker','')}</span>
+                    <span style="font-size:0.72em;color:#8b949e;">Score {float(_msc):.0f}</span>
+                  </div>
+                  <div style="font-size:0.72em;color:#484f58;margin-bottom:6px;">
+                    Today: <span style="color:{_mpct_c};">{float(_mpct):+.1f}%</span>
+                    &nbsp;|&nbsp; {_me.get('signal_label','')}
+                  </div>
+                  <div style="font-size:0.78em;color:#c9d1d9;margin-bottom:6px;line-height:1.5;">
+                    {_me.get('ai_key_reason') or _me.get('reasoning','—')}
+                  </div>
+                  <div style="font-size:0.70em;color:#484f58;margin-bottom:4px;">
+                    <span style="color:{_mc_c};font-weight:600;">{_me.get('ai_conviction','')}</span>
+                    &nbsp;|&nbsp; Catalyst: {_me.get('ai_catalyst_quality','')}
+                    &nbsp;|&nbsp; Time: {_me.get('ai_time_sensitivity','—')}
+                  </div>
+                  <div style="font-size:0.68em;color:#484f58;">
+                    Entry: {_me.get('ai_entry_suggestion') or f"${float(_me.get('entry',0)):.2f}"}
+                    &nbsp;|&nbsp; Stop: {float(_me.get('ai_stop_pct') or 0):.1f}%
+                    &nbsp;|&nbsp; Target: +{float(_me.get('ai_target_pct') or 0):.0f}%
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # PDF download for mobile
+            try:
+                from conviction_engine import build_conviction_pdf
+                _mob_pdf = build_conviction_pdf(_mob_cv_entries, generated_at=_cv_mob_gen)
+                if _mob_pdf:
+                    st.download_button(
+                        label="DOWNLOAD PDF",
+                        data=_mob_pdf,
+                        file_name=f"AxiomConvictionList_{datetime.now().strftime('%Y-%m-%d')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key="conv_mob_pdf"
+                    )
+            except Exception:
+                pass
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PORTFOLIO SCREEN — real holdings with live prices

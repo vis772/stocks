@@ -1184,6 +1184,34 @@ with st.sidebar:
         </div>
         """, unsafe_allow_html=True)
 
+    st.markdown('<div style="padding:0 4px;"><div class="sh" style="margin-top:12px;">Conviction List</div></div>', unsafe_allow_html=True)
+
+    _cv_ts = None
+    try:
+        from conviction_engine import get_latest_conviction_list as _gcl
+        _cv_latest = _gcl(max_age_minutes=90)
+        _cv_ts = _cv_latest.get("generated_at")
+    except Exception:
+        _cv_latest = {"entries": [], "is_stale": True, "is_yesterday": False}
+
+    _cv_ts_str = "—"
+    if _cv_ts:
+        try:
+            _cv_dt = _cv_ts if isinstance(_cv_ts, datetime) else datetime.fromisoformat(str(_cv_ts).replace("Z",""))
+            _cv_ts_str = _cv_dt.strftime("%-I:%M %p")
+        except Exception:
+            _cv_ts_str = str(_cv_ts)[:16]
+
+    st.markdown(
+        f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.62em;'
+        f'color:var(--t3);padding:2px 4px 6px;">Last updated: {_cv_ts_str}</div>',
+        unsafe_allow_html=True
+    )
+    if st.button("CONVICTION LIST — Updated Live", key="conv_sidebar_btn",
+                 use_container_width=True, type="primary"):
+        st.session_state.show_conviction = not st.session_state.get("show_conviction", False)
+        st.rerun()
+
 
 # ── Session-state: scoring weights (loaded from saved config or defaults) ─────
 if "scoring_weights" not in st.session_state:
@@ -1193,6 +1221,142 @@ if "scoring_weights" not in st.session_state:
 # ══════════════════════════════════════════════════════════════════════════════
 # LIVE FRAGMENT FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _render_conviction_panel(cv_data: dict):
+    """Render the conviction list cards + PDF download."""
+    entries = cv_data.get("entries", [])
+    gen_at  = cv_data.get("generated_at")
+    is_yesterday = cv_data.get("is_yesterday", False)
+    is_stale = cv_data.get("is_stale", False)
+
+    # Format header timestamps
+    try:
+        if gen_at:
+            _gdt = gen_at if isinstance(gen_at, datetime) else datetime.fromisoformat(str(gen_at).replace("Z",""))
+            gen_str = _gdt.strftime("%-I:%M %p ET")
+            # Next update = gen_at + 30 min
+            next_dt = _gdt + timedelta(minutes=30)
+            next_str = next_dt.strftime("%-I:%M %p ET")
+        else:
+            gen_str = "—"
+            next_str = "—"
+    except Exception:
+        gen_str = str(gen_at)[:16] if gen_at else "—"
+        next_str = "—"
+
+    date_str = datetime.now().strftime("%A %B %-d %Y")
+
+    if is_yesterday:
+        st.markdown(
+            '<div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.3);'
+            'border-radius:8px;padding:8px 14px;margin-bottom:10px;font-family:\'JetBrains Mono\','
+            'monospace;font-size:0.72em;color:#d97706;">'
+            'Market closed — showing last session conviction list. '
+            'Next update: Tomorrow 9:30 AM ET</div>',
+            unsafe_allow_html=True
+        )
+    elif is_stale:
+        st.markdown(
+            '<div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.3);'
+            'border-radius:8px;padding:8px 14px;margin-bottom:10px;font-family:\'JetBrains Mono\','
+            'monospace;font-size:0.72em;color:#d97706;">Data may be stale. Refresh to update.</div>',
+            unsafe_allow_html=True
+        )
+
+    st.markdown(
+        f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.68em;color:var(--t2);'
+        f'margin-bottom:8px;">'
+        f'<span style="font-weight:700;font-size:1.1em;">CONVICTION LIST — {date_str}</span><br>'
+        f'Generated: {gen_str} &nbsp;|&nbsp; Next update: {next_str}</div>',
+        unsafe_allow_html=True
+    )
+
+    if not entries:
+        st.markdown(
+            '<div style="background:var(--bgcard);border:1px solid var(--border);border-radius:8px;'
+            'padding:20px;text-align:center;color:#64748b;font-family:\'JetBrains Mono\',monospace;'
+            'font-size:0.8em;">No high-conviction setups right now. '
+            'Scanner needs score >= 75 Strong/Spec Buy signals with catalysts.</div>',
+            unsafe_allow_html=True
+        )
+        return
+
+    _CONV_COLOR = {"Very High": "#16a34a", "High": "#1d6fa5", "Medium": "#c2610f", "Low": "#94a3b8"}
+    _CAT_COLOR  = {"Very Strong": "#16a34a", "Strong": "#1d6fa5", "Moderate": "#c2610f", "Weak": "#94a3b8"}
+
+    # Two-column grid
+    _cols = st.columns(2)
+    for i, e in enumerate(entries):
+        with _cols[i % 2]:
+            conv_c = _CONV_COLOR.get(e.get("ai_conviction",""), "#94a3b8")
+            cat_c  = _CAT_COLOR.get(e.get("ai_catalyst_quality",""), "#94a3b8")
+            pct = e.get("pct_change_today") or 0
+            vol = e.get("volume_ratio") or e.get("rvol") or 1.0
+            si  = e.get("short_interest") or 0
+            fl  = e.get("float_shares") or 0
+            score = e.get("composite") or e.get("score") or e.get("conviction") or 0
+            pct_c = "#16a34a" if float(pct) >= 0 else "#f85149"
+            entry = e.get("entry") or 0
+            stop  = e.get("stop_loss") or 0
+            t1    = e.get("target_1") or 0
+            st.markdown(f"""
+            <div style="background:var(--bgcard);border:1px solid var(--border);border-radius:10px;
+                        padding:14px 16px;margin-bottom:12px;">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:1.0em;font-weight:700;
+                             color:#58a6ff;">RANK {e.get('rank','?')} — {e.get('ticker','')}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:var(--t2);">Score: {float(score):.0f}</span>
+              </div>
+              <div style="font-size:0.72em;color:var(--t3);margin-bottom:8px;">
+                {e.get('signal_label','')}
+                {f' &nbsp;|&nbsp; SI: {float(si):.1f}%' if si else ''}
+                {f' &nbsp;|&nbsp; Float: {float(fl):.0f}M' if fl else ''}
+                &nbsp;|&nbsp; Today: <span style="color:{pct_c};">{float(pct):+.1f}%</span>
+                &nbsp;|&nbsp; Vol: {float(vol):.1f}x
+              </div>
+              <div style="margin-bottom:8px;">
+                <span style="font-size:0.72em;font-weight:600;color:{conv_c};font-family:'JetBrains Mono',monospace;">
+                  Conviction: {e.get('ai_conviction','')}
+                </span>
+                &nbsp;&nbsp;
+                <span style="font-size:0.72em;color:{cat_c};font-family:'JetBrains Mono',monospace;">
+                  Catalyst: {e.get('ai_catalyst_quality','')}
+                </span>
+              </div>
+              <div style="font-size:0.78em;color:var(--t2);margin-bottom:8px;line-height:1.5;">
+                {e.get('ai_key_reason') or e.get('reasoning','—')}
+              </div>
+              <div style="font-size:0.72em;color:var(--t3);margin-bottom:4px;">
+                <b>Entry:</b> {e.get('ai_entry_suggestion') or f'${float(entry):.2f}'}
+                &nbsp;&nbsp;
+                <b>Stop:</b> {float(e.get('ai_stop_pct') or e.get('stop_pct') or 0):.1f}% below
+                &nbsp;&nbsp;
+                <b>Target:</b> +{float(e.get('ai_target_pct') or 0):.0f}% upside
+              </div>
+              {f'<div style="font-size:0.70em;color:#64748b;margin-bottom:4px;"><b>Risk:</b> {e.get("ai_risk","")}</div>' if e.get('ai_risk') else ''}
+              <div style="font-size:0.68em;font-family:'JetBrains Mono',monospace;color:#1d6fa5;margin-top:6px;">
+                Time: {e.get('ai_time_sensitivity','—')} &nbsp;|&nbsp; Hold: {e.get('hold_type','')}
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # PDF download
+    try:
+        from conviction_engine import build_conviction_pdf
+        _pdf_bytes = build_conviction_pdf(entries, generated_at=gen_at, session=cv_data.get("session","market"))
+        if _pdf_bytes:
+            _pdf_date = datetime.now().strftime("%Y-%m-%d")
+            st.download_button(
+                label="DOWNLOAD PDF",
+                data=_pdf_bytes,
+                file_name=f"AxiomConvictionList_{_pdf_date}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key="conviction_pdf_download"
+            )
+    except Exception as _pdfe:
+        pass
+
 
 @st.fragment(run_every=15)
 def _live_control():
@@ -1371,6 +1535,43 @@ def _live_control():
         'color:var(--t3);margin-top:12px;text-align:center;">Live — updates every 15 seconds</div>',
         unsafe_allow_html=True
     )
+
+    st.markdown('<div class="ctrl-section">Conviction List</div>', unsafe_allow_html=True)
+
+    _cv_col1, _cv_col2 = st.columns([3, 1])
+    with _cv_col1:
+        _cv_stale_info = ""
+        try:
+            from conviction_engine import get_latest_conviction_list as _gcl2
+            _cv_data = _gcl2(max_age_minutes=90)
+            _cv_gen = _cv_data.get("generated_at")
+            if _cv_gen:
+                try:
+                    _cv_gdt = _cv_gen if isinstance(_cv_gen, datetime) else datetime.fromisoformat(str(_cv_gen).replace("Z",""))
+                    _cv_stale_info = _cv_gdt.strftime("%-I:%M %p")
+                except Exception:
+                    _cv_stale_info = str(_cv_gen)[:16]
+        except Exception:
+            _cv_data = {"entries": [], "is_stale": True, "is_yesterday": False}
+        _cv_is_stale = _cv_data.get("is_stale", True)
+        _cv_is_yest = _cv_data.get("is_yesterday", False)
+        _cv_label = "CONVICTION LIST — Updated Live" if not _cv_is_stale else "CONVICTION LIST — Refresh Now"
+        if st.button(_cv_label, use_container_width=True, key="conv_ctrl_btn", type="primary"):
+            st.session_state.show_conviction = not st.session_state.get("show_conviction", False)
+            if st.session_state.get("show_conviction") and _cv_is_stale:
+                with st.spinner("Generating conviction list..."):
+                    try:
+                        from conviction_engine import generate_live_conviction_list
+                        _cv_data["entries"] = generate_live_conviction_list(session="market")
+                    except Exception as _cve:
+                        st.error(f"Generation failed: {_cve}")
+            st.rerun()
+    with _cv_col2:
+        if _cv_stale_info:
+            st.markdown(f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.65em;color:var(--t3);padding-top:10px;">{_cv_stale_info}</div>', unsafe_allow_html=True)
+
+    if st.session_state.get("show_conviction", False):
+        _render_conviction_panel(_cv_data)
 
 
 @st.fragment(run_every=10)
@@ -2115,6 +2316,34 @@ with tab6:
         mc2.metric("Resolved (5-day)", resolved)
         mc3.metric("Overall Win Rate", f"{wr:.1f}%" if wr is not None else "—")
         mc4.metric("Avg 5-day Gain (wins)", f"{ag:+.2f}%" if ag is not None else "—")
+
+        # Conviction list win rate
+        try:
+            from conviction_engine import get_conviction_win_rate
+            _cv_wr = get_conviction_win_rate()
+            if _cv_wr.get("n", 0) > 0:
+                _cv_wr_val  = _cv_wr.get("win_rate") or 0
+                _cv_wr_clr  = "#16a34a" if _cv_wr_val >= 55 else "#f85149"
+                _cv_wr_n    = _cv_wr.get("n", 0)
+                _cv_wr_gain = _cv_wr.get("avg_gain")
+                _cv_gain_html = (
+                    f'<span style="font-size:0.72em;color:var(--t3);">Avg gain: {_cv_wr_gain:+.2f}%</span>'
+                    if _cv_wr_gain is not None else ""
+                )
+                st.markdown(
+                    f'<div style="background:rgba(29,111,165,0.08);border:1px solid rgba(29,111,165,0.3);'
+                    f'border-radius:8px;padding:8px 16px;margin-top:8px;display:flex;align-items:center;gap:20px;">'
+                    f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.72em;font-weight:700;'
+                    f'color:#58a6ff;">CONVICTION LIST</span>'
+                    f'<span style="font-size:0.75em;color:var(--t2);">Win Rate: '
+                    f'<b style="color:{_cv_wr_clr};">{_cv_wr_val:.1f}%</b></span>'
+                    f'<span style="font-size:0.72em;color:var(--t3);">{_cv_wr_n} resolved</span>'
+                    f'{_cv_gain_html}'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+        except Exception:
+            pass
 
         st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
 

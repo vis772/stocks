@@ -349,6 +349,20 @@ def _init_postgres():
         "ALTER TABLE signal_log       ADD COLUMN IF NOT EXISTS outcome_3d               FLOAT",
         "ALTER TABLE signal_log       ADD COLUMN IF NOT EXISTS outcome_5d               FLOAT",
         "ALTER TABLE signal_log       ADD COLUMN IF NOT EXISTS graded_at                TIMESTAMP",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS signal_label       TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS pct_change_today   REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS volume_ratio        REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS short_interest      REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS catalyst_text       TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_conviction       TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_catalyst_quality TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_key_reason       TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_entry_suggestion TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_stop_pct         REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_target_pct       REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_risk             TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_time_sensitivity TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS outcome_label       TEXT DEFAULT 'pending'",
     ]:
         cur.execute(ddl)
 
@@ -667,6 +681,20 @@ def _init_sqlite():
         "ALTER TABLE signal_log       ADD COLUMN outcome_3d               REAL",
         "ALTER TABLE signal_log       ADD COLUMN outcome_5d               REAL",
         "ALTER TABLE signal_log       ADD COLUMN graded_at                TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN signal_label       TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN pct_change_today   REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN volume_ratio        REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN short_interest      REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN catalyst_text       TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN ai_conviction       TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN ai_catalyst_quality TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN ai_key_reason       TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN ai_entry_suggestion TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN ai_stop_pct         REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN ai_target_pct       REAL",
+        "ALTER TABLE conviction_buys ADD COLUMN ai_risk             TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN ai_time_sensitivity TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN outcome_label       TEXT DEFAULT 'pending'",
     ]:
         try:
             cur.execute(col_sql)

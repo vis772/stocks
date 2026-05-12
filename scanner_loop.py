@@ -140,6 +140,7 @@ class ScannerState:
         self.premarket_low:     Dict[str, float] = {}
         self.level_session_date: str = ""
         self.last_prediction_run:    datetime = now_et() - timedelta(hours=2)
+        self.last_conviction_live_run: datetime = now_et() - timedelta(hours=2)
         self.signals_suppressed:     int = 0
         self.universe_size:          int = 0
         self.open_positions:         int = 0
@@ -1362,6 +1363,16 @@ def run_scanner():
                     run_prediction_scan(watchlist, state, session_mode="MARKET")
                     state.last_prediction_run = et
                     _log("info", "Prediction scan complete")
+                # Conviction list refresh every 30 min during market hours
+                if is_market_hours() and (et - state.last_conviction_live_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
+                    try:
+                        from conviction_engine import generate_live_conviction_list
+                        generate_live_conviction_list(session="market")
+                        state.last_conviction_run_ts = et.isoformat()
+                        print("  [conviction] Live list refreshed")
+                    except Exception as _cve_live:
+                        print(f"  [conviction] live refresh failed: {_cve_live}")
+                    state.last_conviction_live_run = et
                 # 30-min digest
                 if (et - last_digest_time).total_seconds() >= 1800 and state.alert_log:
                     alert_digest(state.alert_log[-10:], top_movers=top_movers[:5])
