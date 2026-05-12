@@ -1733,15 +1733,19 @@ def _seed_admin_user_sqlite():
         print(f"  [db] Admin seed failed: {e}")
 
 
-def create_user(username: str, email: str, password_hash: str, role: str = "user") -> int:
+def create_user(username: str, email: str, password_hash: str,
+                role: str = "user", display_name: str = None) -> int:
     """Insert a new user. Returns the new user id. Raises on duplicate username/email."""
+    uname = username.strip()
+    umail = email.strip().lower()
+    dname = (display_name or uname).strip()
     if _is_postgres():
         conn = _get_pg_conn()
         cur  = conn.cursor()
         cur.execute("""
-            INSERT INTO users (username, email, password_hash, role)
-            VALUES (%s, %s, %s, %s) RETURNING id
-        """, (username.strip(), email.strip().lower(), password_hash, role))
+            INSERT INTO users (username, email, password_hash, role, display_name)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id
+        """, (uname, umail, password_hash, role, dname))
         uid = cur.fetchone()[0]
         conn.commit(); cur.close(); conn.close()
         return uid
@@ -1749,9 +1753,9 @@ def create_user(username: str, email: str, password_hash: str, role: str = "user
         conn = _get_sqlite_conn()
         cur  = conn.cursor()
         cur.execute("""
-            INSERT INTO users (username, email, password_hash, role)
-            VALUES (?, ?, ?, ?)
-        """, (username.strip(), email.strip().lower(), password_hash, role))
+            INSERT INTO users (username, email, password_hash, role, display_name)
+            VALUES (?, ?, ?, ?, ?)
+        """, (uname, umail, password_hash, role, dname))
         uid = cur.lastrowid
         conn.commit(); conn.close()
         return uid
@@ -1889,21 +1893,60 @@ def get_all_users() -> list:
     """Admin-only: return all users (no password hashes)."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("SELECT id, username, email, role, created_at, last_login FROM users ORDER BY created_at")
-            rows = cur.fetchall()
-            cur.close(); conn.close()
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT id, username, email, role, display_name, created_at, last_login
+                FROM users ORDER BY created_at
+            """)
+            rows = cur.fetchall(); cur.close(); conn.close()
         else:
-            conn = _get_sqlite_conn()
-            cur  = conn.cursor()
-            cur.execute("SELECT id, username, email, role, created_at, last_login FROM users ORDER BY created_at")
-            rows = cur.fetchall()
-            conn.close()
-        return [{"id": r[0], "username": r[1], "email": r[2],
-                 "role": r[3], "created_at": r[4], "last_login": r[5]} for r in rows]
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT id, username, email, role, display_name, created_at, last_login
+                FROM users ORDER BY created_at
+            """)
+            rows = cur.fetchall(); conn.close()
+        return [{"id": r[0], "username": r[1], "email": r[2], "role": r[3],
+                 "display_name": r[4], "created_at": r[5], "last_login": r[6]} for r in rows]
     except Exception as e:
         print(f"  [db] get_all_users failed: {e}")
+        return []
+
+
+def delete_user(user_id: int) -> bool:
+    """Delete a user and their sessions. Returns True on success."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("DELETE FROM user_sessions WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        print(f"  [db] delete_user failed: {e}")
+        return False
+
+
+def change_user_password(user_id: int, new_hash: str) -> bool:
+    """Update password hash for a user. Returns True on success."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (new_hash, user_id))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user_id))
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        print(f"  [db] change_user_password failed: {e}")
+        return False
 
 
 # ─── Scanner Logs ──────────────────────────────────────────────────────────────

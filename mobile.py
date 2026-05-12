@@ -1489,6 +1489,113 @@ def _mob_control_screen():
 
     st.markdown('<div class="refresh-hint">Live — updates every 15s</div>', unsafe_allow_html=True)
 
+    # ── Admin: Manage Users ───────────────────────────────────────────────────
+    if _auth.get("role") == "admin":
+        st.markdown('<div class="sec-hdr">Manage Users</div>', unsafe_allow_html=True)
+
+        try:
+            from db.database import get_all_users, delete_user, create_user, change_user_password
+            from auth import hash_password
+            _users = get_all_users() or []
+        except Exception as _ue:
+            st.error(f"User management unavailable: {_ue}")
+            _users = []
+
+        # ── User list ─────────────────────────────────────────────────────────
+        for _u in _users:
+            _uid      = _u["id"]
+            _uname    = _u["username"]
+            _udname   = _u.get("display_name") or _uname
+            _urole    = _u.get("role", "user")
+            _ullogin  = _u.get("last_login")
+            try:
+                _ll_str = _mins_ago(_ullogin) if _ullogin else "never"
+            except Exception:
+                _ll_str = "—"
+
+            _role_color = "#f85149" if _urole == "admin" else "#8b949e"
+            st.markdown(f"""
+            <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;
+                        padding:10px 14px;margin:0 12px 6px;display:flex;
+                        align-items:center;justify-content:space-between;">
+              <div>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:0.9em;
+                             font-weight:600;color:#e6edf3;">{_uname}</span>
+                <span style="font-size:0.7em;color:#8b949e;margin-left:8px;">{_udname}</span>
+                <div style="margin-top:3px;">
+                  <span style="font-size:0.65em;color:{_role_color};
+                               text-transform:uppercase;letter-spacing:0.08em;">{_urole}</span>
+                  <span style="font-size:0.65em;color:#484f58;margin-left:8px;">
+                    last login {_ll_str}</span>
+                </div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            _dc1, _dc2 = st.columns([3, 1])
+            with _dc2:
+                _self = (_uid == _auth.get("id"))
+                if st.button("DELETE", key=f"del_user_{_uid}",
+                             use_container_width=True, disabled=_self):
+                    if delete_user(_uid):
+                        st.success(f"Deleted {_uname}")
+                        st.rerun()
+                    else:
+                        st.error("Delete failed")
+            if _self:
+                st.markdown(
+                    '<div style="font-size:0.65em;color:#484f58;padding:0 12px 4px;'
+                    'text-align:right;">cannot delete yourself</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # ── Add user ──────────────────────────────────────────────────────────
+        with st.expander("ADD USER", expanded=False):
+            _nu_user  = st.text_input("Username", key="nu_username", placeholder="username")
+            _nu_dname = st.text_input("Display Name", key="nu_dname", placeholder="display name")
+            _nu_pass  = st.text_input("Password", key="nu_pass", type="password")
+            _nu_role  = st.selectbox("Role", ["user", "admin"], key="nu_role")
+            if st.button("CREATE USER", key="nu_submit", use_container_width=True):
+                _nu_user = (_nu_user or "").strip()
+                _nu_pass = (_nu_pass or "").strip()
+                if not _nu_user or not _nu_pass:
+                    st.error("Username and password required")
+                elif len(_nu_pass) < 6:
+                    st.error("Password must be at least 6 characters")
+                else:
+                    try:
+                        _ph = hash_password(_nu_pass)
+                        _email = f"{_nu_user}@axiom.local"
+                        create_user(_nu_user, _email, _ph, _nu_role,
+                                    display_name=(_nu_dname or _nu_user).strip())
+                        st.success(f"Created user: {_nu_user}")
+                        st.rerun()
+                    except Exception as _cue:
+                        st.error(f"Failed: {_cue}")
+
+        # ── Change password ───────────────────────────────────────────────────
+        with st.expander("CHANGE PASSWORD", expanded=False):
+            if _users:
+                _cp_names = [_u["username"] for _u in _users]
+                _cp_sel   = st.selectbox("User", _cp_names, key="cp_user_sel")
+                _cp_pass  = st.text_input("New Password", key="cp_new_pass", type="password")
+                if st.button("UPDATE PASSWORD", key="cp_submit", use_container_width=True):
+                    _cp_pass = (_cp_pass or "").strip()
+                    if len(_cp_pass) < 6:
+                        st.error("Password must be at least 6 characters")
+                    else:
+                        try:
+                            _cp_uid = next(u["id"] for u in _users if u["username"] == _cp_sel)
+                            change_user_password(_cp_uid, hash_password(_cp_pass))
+                            st.success(f"Password updated for {_cp_sel}")
+                        except Exception as _cpe:
+                            st.error(f"Failed: {_cpe}")
+            else:
+                st.markdown(
+                    '<div style="font-size:0.78em;color:#484f58;padding:4px 0;">No users found.</div>',
+                    unsafe_allow_html=True,
+                )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SCREEN DISPATCH
