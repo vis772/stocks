@@ -195,9 +195,15 @@ def run_one_pass():
             else:
                 new_1hr = _fetch_close_on_day(ticker, created_at + timedelta(hours=1))
 
-        # 1day: fill once ≥24 hours old
-        if price_1day is None and age_hrs >= 24:
-            new_1day = _fetch_close_on_day(ticker, created_at + timedelta(days=1))
+        # 1day: fill once ≥24h old; also fill same-session signals after market close
+        if price_1day is None:
+            if age_hrs >= 24:
+                new_1day = _fetch_close_on_day(ticker, created_at + timedelta(days=1))
+            elif age_hrs >= 1.0:
+                _et = _now_et()
+                # After regular close on a weekday: use today's closing price as 1day
+                if _et.weekday() < 5 and _et.hour >= 16:
+                    new_1day = _fetch_price_now(ticker)
 
         # 5day: fill once ≥5 calendar days old
         if price_5day is None and age_hrs >= 5 * 24:

@@ -2209,7 +2209,8 @@ with tab6:
         if sig_df.empty:
             st.markdown('<div class="box">No signals logged yet.</div>', unsafe_allow_html=True)
         else:
-            _outcome_color = {"win": "#16a34a", "loss": "#dc2626", "neutral": "#94a3b8", "pending": "#c2610f"}
+            _outcome_color = {"win": "#16a34a", "loss": "#dc2626", "neutral": "#94a3b8",
+                              "pending": "#c2610f", "pending_5day": "#d97706"}
             rows_html = ""
             for _, row in sig_df.head(40).iterrows():
                 ol  = row.get("outcome_label") or "pending"

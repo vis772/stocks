@@ -1475,6 +1475,9 @@ def update_signal_outcome(signal_id: int, price_1hr: Optional[float] = None,
                 label = "loss"
             else:
                 label = "neutral"
+        elif pct_1day is not None:
+            # 1day is known but 5day not yet filled — interim resolution
+            label = "pending_5day"
         else:
             label = "pending"
 
