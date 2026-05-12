@@ -334,7 +334,21 @@ def _init_postgres():
         "ALTER TABLE conviction_buys  ADD COLUMN IF NOT EXISTS shares             REAL",
         "ALTER TABLE conviction_buys  ADD COLUMN IF NOT EXISTS limit_entry        REAL",
         "ALTER TABLE conviction_buys  ADD COLUMN IF NOT EXISTS conviction_score   REAL",
-        "ALTER TABLE scanner_control  ADD COLUMN IF NOT EXISTS current_mode       TEXT DEFAULT 'UNKNOWN'",
+        "ALTER TABLE scanner_control  ADD COLUMN IF NOT EXISTS current_mode              TEXT DEFAULT 'UNKNOWN'",
+        "ALTER TABLE scanner_state    ADD COLUMN IF NOT EXISTS signals_suppressed_today INTEGER DEFAULT 0",
+        "ALTER TABLE scanner_state    ADD COLUMN IF NOT EXISTS universe_size             INTEGER DEFAULT 0",
+        "ALTER TABLE scanner_state    ADD COLUMN IF NOT EXISTS data_quality_tiingo       FLOAT DEFAULT 0",
+        "ALTER TABLE scanner_state    ADD COLUMN IF NOT EXISTS data_quality_yfinance     FLOAT DEFAULT 0",
+        "ALTER TABLE scanner_state    ADD COLUMN IF NOT EXISTS data_quality_stale        FLOAT DEFAULT 0",
+        "ALTER TABLE scanner_state    ADD COLUMN IF NOT EXISTS last_conviction_run       TIMESTAMP",
+        "ALTER TABLE scanner_state    ADD COLUMN IF NOT EXISTS last_accuracy_run         TIMESTAMP",
+        "ALTER TABLE scanner_state    ADD COLUMN IF NOT EXISTS open_positions            INTEGER DEFAULT 0",
+        "ALTER TABLE signal_log       ADD COLUMN IF NOT EXISTS quality_tag               TEXT",
+        "ALTER TABLE users            ADD COLUMN IF NOT EXISTS display_name              TEXT",
+        "ALTER TABLE signal_log       ADD COLUMN IF NOT EXISTS outcome_1d               FLOAT",
+        "ALTER TABLE signal_log       ADD COLUMN IF NOT EXISTS outcome_3d               FLOAT",
+        "ALTER TABLE signal_log       ADD COLUMN IF NOT EXISTS outcome_5d               FLOAT",
+        "ALTER TABLE signal_log       ADD COLUMN IF NOT EXISTS graded_at                TIMESTAMP",
     ]:
         cur.execute(ddl)
 
@@ -638,7 +652,21 @@ def _init_sqlite():
         "ALTER TABLE conviction_buys  ADD COLUMN shares            REAL",
         "ALTER TABLE conviction_buys  ADD COLUMN limit_entry       REAL",
         "ALTER TABLE conviction_buys  ADD COLUMN conviction_score  REAL",
-        "ALTER TABLE scanner_control  ADD COLUMN current_mode      TEXT DEFAULT 'UNKNOWN'",
+        "ALTER TABLE scanner_control  ADD COLUMN current_mode              TEXT DEFAULT 'UNKNOWN'",
+        "ALTER TABLE scanner_state    ADD COLUMN signals_suppressed_today INTEGER DEFAULT 0",
+        "ALTER TABLE scanner_state    ADD COLUMN universe_size             INTEGER DEFAULT 0",
+        "ALTER TABLE scanner_state    ADD COLUMN data_quality_tiingo       REAL DEFAULT 0",
+        "ALTER TABLE scanner_state    ADD COLUMN data_quality_yfinance     REAL DEFAULT 0",
+        "ALTER TABLE scanner_state    ADD COLUMN data_quality_stale        REAL DEFAULT 0",
+        "ALTER TABLE scanner_state    ADD COLUMN last_conviction_run       TEXT",
+        "ALTER TABLE scanner_state    ADD COLUMN last_accuracy_run         TEXT",
+        "ALTER TABLE scanner_state    ADD COLUMN open_positions            INTEGER DEFAULT 0",
+        "ALTER TABLE signal_log       ADD COLUMN quality_tag               TEXT",
+        "ALTER TABLE users            ADD COLUMN display_name              TEXT",
+        "ALTER TABLE signal_log       ADD COLUMN outcome_1d               REAL",
+        "ALTER TABLE signal_log       ADD COLUMN outcome_3d               REAL",
+        "ALTER TABLE signal_log       ADD COLUMN outcome_5d               REAL",
+        "ALTER TABLE signal_log       ADD COLUMN graded_at                TEXT",
     ]:
         try:
             cur.execute(col_sql)
@@ -957,7 +985,9 @@ def load_scanner_state() -> dict:
             cur  = conn.cursor()
             cur.execute("""
                 SELECT alerted_today, known_filings, scan_count, last_updated,
-                       vwap_snapshot, momentum_ranking
+                       vwap_snapshot, momentum_ranking,
+                       signals_suppressed_today, universe_size, open_positions,
+                       last_conviction_run, last_accuracy_run
                 FROM scanner_state WHERE date = %s
             """, (date_str,))
             row = cur.fetchone()
@@ -965,13 +995,18 @@ def load_scanner_state() -> dict:
             conn.close()
             if row:
                 return {
-                    "date":             date_str,
-                    "alerted_today":    json.loads(row[0] or "[]"),
-                    "known_filings":    json.loads(row[1] or "[]"),
-                    "scan_count":       row[2] or 0,
-                    "last_updated":     row[3] or "",
-                    "vwap_snapshot":    json.loads(row[4] or "{}"),
-                    "momentum_ranking": json.loads(row[5] or "[]"),
+                    "date":                     date_str,
+                    "alerted_today":            json.loads(row[0] or "[]"),
+                    "known_filings":            json.loads(row[1] or "[]"),
+                    "scan_count":               row[2] or 0,
+                    "last_updated":             row[3] or "",
+                    "vwap_snapshot":            json.loads(row[4] or "{}"),
+                    "momentum_ranking":         json.loads(row[5] or "[]"),
+                    "signals_suppressed_today": row[6] or 0,
+                    "universe_size":            row[7] or 0,
+                    "open_positions":           row[8] or 0,
+                    "last_conviction_run":      row[9],
+                    "last_accuracy_run":        row[10],
                 }
         except Exception as e:
             print(f"  [db] State load failed: {e}")
@@ -992,15 +1027,22 @@ def save_scanner_state(state_dict: dict):
             cur.execute("""
                 INSERT INTO scanner_state
                     (date, alerted_today, known_filings, scan_count, last_updated,
-                     vwap_snapshot, momentum_ranking)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                     vwap_snapshot, momentum_ranking,
+                     signals_suppressed_today, universe_size, open_positions,
+                     last_conviction_run, last_accuracy_run)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (date) DO UPDATE SET
-                    alerted_today    = EXCLUDED.alerted_today,
-                    known_filings    = EXCLUDED.known_filings,
-                    scan_count       = EXCLUDED.scan_count,
-                    last_updated     = EXCLUDED.last_updated,
-                    vwap_snapshot    = EXCLUDED.vwap_snapshot,
-                    momentum_ranking = EXCLUDED.momentum_ranking
+                    alerted_today             = EXCLUDED.alerted_today,
+                    known_filings             = EXCLUDED.known_filings,
+                    scan_count                = EXCLUDED.scan_count,
+                    last_updated              = EXCLUDED.last_updated,
+                    vwap_snapshot             = EXCLUDED.vwap_snapshot,
+                    momentum_ranking          = EXCLUDED.momentum_ranking,
+                    signals_suppressed_today  = EXCLUDED.signals_suppressed_today,
+                    universe_size             = EXCLUDED.universe_size,
+                    open_positions            = EXCLUDED.open_positions,
+                    last_conviction_run       = EXCLUDED.last_conviction_run,
+                    last_accuracy_run         = EXCLUDED.last_accuracy_run
             """, (
                 date_str,
                 json.dumps(list(state_dict.get("alerted_today", []))),
@@ -1009,6 +1051,11 @@ def save_scanner_state(state_dict: dict):
                 state_dict.get("last_updated", ""),
                 json.dumps(state_dict.get("vwap_snapshot", {})),
                 json.dumps(state_dict.get("momentum_ranking", [])),
+                state_dict.get("signals_suppressed_today", 0),
+                state_dict.get("universe_size", 0),
+                state_dict.get("open_positions", 0),
+                state_dict.get("last_conviction_run"),
+                state_dict.get("last_accuracy_run"),
             ))
             conn.commit()
             cur.close()
@@ -1324,7 +1371,7 @@ def log_signal(ticker: str, signal_label: str, score: float,
                score_breakdown: dict, price_at_signal: float,
                volume_at_signal: float, alert_type: str,
                quant_adj: float = None, source_quality: str = None,
-               session_mode: str = None) -> Optional[int]:
+               session_mode: str = None, quality_tag: str = None) -> Optional[int]:
     """Log a scanner signal. Returns the signal_log row id or None on failure."""
     breakdown_json = json.dumps(score_breakdown)
     try:
@@ -1335,12 +1382,12 @@ def log_signal(ticker: str, signal_label: str, score: float,
                 INSERT INTO signal_log
                     (ticker, signal_label, score, score_breakdown,
                      price_at_signal, volume_at_signal, alert_type,
-                     quant_adj, source_quality, session_mode)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                     quant_adj, source_quality, session_mode, quality_tag)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
             """, (ticker, signal_label, _f(score), breakdown_json,
                   _f(price_at_signal), _f(volume_at_signal), alert_type,
                   _f(quant_adj) if quant_adj is not None else None,
-                  source_quality, session_mode or "MARKET"))
+                  source_quality, session_mode or "MARKET", quality_tag))
             sig_id = cur.fetchone()[0]
             cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (%s)", (sig_id,))
             conn.commit(); cur.close(); conn.close()
@@ -1352,12 +1399,12 @@ def log_signal(ticker: str, signal_label: str, score: float,
                 INSERT INTO signal_log
                     (ticker, signal_label, score, score_breakdown,
                      price_at_signal, volume_at_signal, alert_type,
-                     quant_adj, source_quality, session_mode)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                     quant_adj, source_quality, session_mode, quality_tag)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """, (ticker, signal_label, _f(score), breakdown_json,
                   _f(price_at_signal), _f(volume_at_signal), alert_type,
                   _f(quant_adj) if quant_adj is not None else None,
-                  source_quality, session_mode or "MARKET"))
+                  source_quality, session_mode or "MARKET", quality_tag))
             sig_id = cur.lastrowid
             cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (?)", (sig_id,))
             conn.commit(); conn.close()
@@ -1715,7 +1762,7 @@ def get_user_by_username(username: str) -> Optional[dict]:
         conn = _get_pg_conn()
         cur  = conn.cursor()
         cur.execute(
-            "SELECT id, username, email, password_hash, role, last_login FROM users WHERE username = %s",
+            "SELECT id, username, email, password_hash, role, last_login, display_name FROM users WHERE username = %s",
             (username.strip(),)
         )
         row = cur.fetchone()
@@ -1723,12 +1770,13 @@ def get_user_by_username(username: str) -> Optional[dict]:
         if not row:
             return None
         return {"id": row[0], "username": row[1], "email": row[2],
-                "password_hash": row[3], "role": row[4], "last_login": row[5]}
+                "password_hash": row[3], "role": row[4], "last_login": row[5],
+                "display_name": row[6]}
     else:
         conn = _get_sqlite_conn()
         cur  = conn.cursor()
         cur.execute(
-            "SELECT id, username, email, password_hash, role, last_login FROM users WHERE username = ?",
+            "SELECT id, username, email, password_hash, role, last_login, display_name FROM users WHERE username = ?",
             (username.strip(),)
         )
         row = cur.fetchone()
@@ -1736,7 +1784,8 @@ def get_user_by_username(username: str) -> Optional[dict]:
         if not row:
             return None
         return {"id": row[0], "username": row[1], "email": row[2],
-                "password_hash": row[3], "role": row[4], "last_login": row[5]}
+                "password_hash": row[3], "role": row[4], "last_login": row[5],
+                "display_name": row[6]}
 
 
 def update_last_login(user_id: int):
@@ -1919,4 +1968,406 @@ def get_scanner_logs(limit: int = 50) -> List[dict]:
     except Exception as e:
         print(f"  [db] get_scanner_logs failed: {e}")
         return []
+
+
+# ─── Shared query functions (used by both app.py and mobile.py) ───────────────
+
+def get_scanner_state() -> dict:
+    """Return combined scanner_state + scanner_control dict for status display."""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    result = {
+        "current_mode": "UNKNOWN", "paused": False,
+        "last_heartbeat": None, "scan_count": 0,
+        "signals_today": 0, "signals_suppressed_today": 0,
+        "universe_size": 0, "open_positions": 0,
+        "data_quality_tiingo": 0.0, "data_quality_yfinance": 0.0, "data_quality_stale": 0.0,
+        "last_conviction_run": None, "last_accuracy_run": None,
+        "scanner_started_at": None,
+    }
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT paused, current_mode, scanner_started_at, updated_at
+                FROM scanner_control WHERE id = 1
+            """)
+            row = cur.fetchone()
+            if row:
+                result["paused"]            = bool(row[0])
+                result["current_mode"]      = row[1] or "UNKNOWN"
+                result["scanner_started_at"] = row[2]
+                result["last_heartbeat"]    = row[3]
+            cur.execute("""
+                SELECT scan_count, last_updated,
+                       signals_suppressed_today, universe_size, open_positions,
+                       data_quality_tiingo, data_quality_yfinance, data_quality_stale,
+                       last_conviction_run, last_accuracy_run
+                FROM scanner_state WHERE date = %s
+            """, (date_str,))
+            row = cur.fetchone()
+            if row:
+                result["scan_count"]               = row[0] or 0
+                if row[1]: result["last_heartbeat"] = row[1]
+                result["signals_suppressed_today"] = row[2] or 0
+                result["universe_size"]            = row[3] or 0
+                result["open_positions"]           = row[4] or 0
+                result["data_quality_tiingo"]      = float(row[5] or 0)
+                result["data_quality_yfinance"]    = float(row[6] or 0)
+                result["data_quality_stale"]       = float(row[7] or 0)
+                result["last_conviction_run"]      = row[8]
+                result["last_accuracy_run"]        = row[9]
+            cur.execute(
+                "SELECT COUNT(*) FROM signal_log WHERE DATE(created_at) = %s", (date_str,)
+            )
+            result["signals_today"] = cur.fetchone()[0] or 0
+            cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute(
+                "SELECT paused, current_mode, scanner_started_at, updated_at "
+                "FROM scanner_control WHERE id = 1"
+            )
+            row = cur.fetchone()
+            if row:
+                result["paused"]             = bool(row[0])
+                result["current_mode"]       = row[1] or "UNKNOWN"
+                result["scanner_started_at"] = row[2]
+                result["last_heartbeat"]     = row[3]
+            cur.execute(
+                "SELECT scan_count, last_updated FROM scanner_state WHERE date = ?", (date_str,)
+            )
+            row = cur.fetchone()
+            if row:
+                result["scan_count"] = row[0] or 0
+                if row[1]: result["last_heartbeat"] = row[1]
+            cur.execute(
+                "SELECT COUNT(*) FROM signal_log WHERE DATE(created_at) = ?", (date_str,)
+            )
+            result["signals_today"] = cur.fetchone()[0] or 0
+            conn.close()
+    except Exception as e:
+        print(f"  [db] get_scanner_state failed: {e}")
+    return result
+
+
+def get_accuracy_metrics() -> list:
+    """Return per-bucket rows from accuracy_metrics table."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT bucket, sample_n, win_rate, profit_factor, ev_per_trade,
+                       sharpe, t_stat, p_value, disabled, updated_at
+                FROM accuracy_metrics ORDER BY bucket
+            """)
+            rows = cur.fetchall(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT bucket, sample_n, win_rate, profit_factor, ev_per_trade,
+                       sharpe, t_stat, p_value, disabled, updated_at
+                FROM accuracy_metrics ORDER BY bucket
+            """)
+            rows = cur.fetchall(); conn.close()
+        return [
+            {"bucket": r[0], "n": r[1] or 0, "win_rate": r[2],
+             "profit_factor": r[3], "ev_per_trade": r[4], "sharpe": r[5],
+             "t_stat": r[6], "p_value": r[7], "disabled": bool(r[8]),
+             "updated_at": r[9]}
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"  [db] get_accuracy_metrics failed: {e}")
         return []
+
+
+def get_validator_health() -> dict:
+    """Return the latest validator_health row."""
+    result = {
+        "signals_graded": 0, "signals_pending": 0,
+        "oldest_pending": None, "error_msg": "", "check_time": None,
+    }
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT signals_graded, signals_pending, oldest_pending, error_msg, check_time
+                FROM validator_health ORDER BY id DESC LIMIT 1
+            """)
+            row = cur.fetchone(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT signals_graded, signals_pending, oldest_pending, error_msg, check_time
+                FROM validator_health ORDER BY id DESC LIMIT 1
+            """)
+            row = cur.fetchone(); conn.close()
+        if row:
+            result = {
+                "signals_graded":  row[0] or 0,
+                "signals_pending": row[1] or 0,
+                "oldest_pending":  row[2],
+                "error_msg":       row[3] or "",
+                "check_time":      row[4],
+            }
+    except Exception as e:
+        print(f"  [db] get_validator_health failed: {e}")
+    return result
+
+
+def get_account_summary() -> dict:
+    """Return pt_account row as a dict."""
+    cols = ["balance", "equity", "day_start_equity", "total_pnl", "realized_pnl",
+            "unrealized_pnl", "total_trades", "winning_trades", "losing_trades",
+            "win_rate", "profit_factor", "max_drawdown", "peak_equity", "sharpe"]
+    defaults = dict(zip(cols, [100000.0, 100000.0, 100000.0, 0.0, 0.0, 0.0,
+                                0, 0, 0, 0.0, 0.0, 0.0, 100000.0, 0.0]))
+    try:
+        q = ", ".join(cols)
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute(f"SELECT {q} FROM pt_account WHERE id = 1")
+            row = cur.fetchone(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute(f"SELECT {q} FROM pt_account WHERE id = 1")
+            row = cur.fetchone(); conn.close()
+        if row:
+            return {c: (float(v) if v is not None else 0.0) for c, v in zip(cols, row)}
+    except Exception as e:
+        print(f"  [db] get_account_summary failed: {e}")
+    return defaults
+
+
+def get_open_positions() -> list:
+    """Return all open pt_positions rows as list of dicts."""
+    cols = ["ticker", "side", "shares", "avg_cost", "current_price", "market_value",
+            "unrealized_pnl", "unrealized_pct", "stop_loss", "target_1", "target_2",
+            "target_3", "hold_type", "entry_reason", "conviction", "mae", "mfe", "opened_at"]
+    try:
+        q = ", ".join(cols)
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute(f"SELECT {q} FROM pt_positions ORDER BY market_value DESC NULLS LAST")
+            rows = cur.fetchall(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute(f"SELECT {q} FROM pt_positions ORDER BY market_value DESC")
+            rows = cur.fetchall(); conn.close()
+        return [dict(zip(cols, row)) for row in rows]
+    except Exception as e:
+        print(f"  [db] get_open_positions failed: {e}")
+        return []
+
+
+def get_open_position_count() -> int:
+    """Return count of open pt_positions rows."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM pt_positions")
+            n = cur.fetchone()[0]; cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM pt_positions")
+            n = cur.fetchone()[0]; conn.close()
+        return n or 0
+    except Exception:
+        return 0
+
+
+def get_recent_trades(n: int = 10) -> list:
+    """Return last n closed pt_trades rows."""
+    cols = ["ticker", "side", "shares", "entry_price", "exit_price", "entry_at", "exit_at",
+            "hold_days", "gross_pnl", "net_pnl", "pnl_pct", "exit_reason", "hold_type", "conviction"]
+    try:
+        q = ", ".join(cols)
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute(f"SELECT {q} FROM pt_trades ORDER BY exit_at DESC LIMIT %s", (n,))
+            rows = cur.fetchall(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute(f"SELECT {q} FROM pt_trades ORDER BY exit_at DESC LIMIT ?", (n,))
+            rows = cur.fetchall(); conn.close()
+        return [dict(zip(cols, row)) for row in rows]
+    except Exception as e:
+        print(f"  [db] get_recent_trades failed: {e}")
+        return []
+
+
+def get_equity_curve(n: int = 200) -> list:
+    """Return last n pt_equity_curve rows, oldest-first for charting."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT recorded_at, equity FROM (
+                    SELECT recorded_at, equity FROM pt_equity_curve
+                    ORDER BY recorded_at DESC LIMIT %s
+                ) sub ORDER BY recorded_at ASC
+            """, (n,))
+            rows = cur.fetchall(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT recorded_at, equity FROM (
+                    SELECT recorded_at, equity FROM pt_equity_curve
+                    ORDER BY recorded_at DESC LIMIT ?
+                ) sub ORDER BY recorded_at ASC
+            """, (n,))
+            rows = cur.fetchall(); conn.close()
+        return [{"recorded_at": r[0], "equity": float(r[1]) if r[1] else 0.0} for r in rows]
+    except Exception as e:
+        print(f"  [db] get_equity_curve failed: {e}")
+        return []
+
+
+def get_graded_signals(n: int = 20) -> list:
+    """Return last n signals with graded 5d outcomes (reads signal_log directly)."""
+    cols = ["ticker", "score", "signal_label", "price_at_signal", "created_at",
+            "ret_1d", "ret_3d", "ret_5d"]
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT ticker, score, signal_label, price_at_signal, created_at,
+                       outcome_1d, outcome_3d, outcome_5d
+                FROM signal_log
+                WHERE outcome_5d IS NOT NULL
+                ORDER BY created_at DESC LIMIT %s
+            """, (n,))
+            rows = cur.fetchall(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT ticker, score, signal_label, price_at_signal, created_at,
+                       outcome_1d, outcome_3d, outcome_5d
+                FROM signal_log
+                WHERE outcome_5d IS NOT NULL
+                ORDER BY created_at DESC LIMIT ?
+            """, (n,))
+            rows = cur.fetchall(); conn.close()
+        return [dict(zip(cols, row)) for row in rows]
+    except Exception as e:
+        print(f"  [db] get_graded_signals failed: {e}")
+        return []
+
+
+def get_rolling_win_rate() -> list:
+    """Return daily win rate over last 37 days from signal_log.outcome_5d."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT DATE(created_at) AS signal_date,
+                       SUM(CASE WHEN outcome_5d > 2.0 THEN 1 ELSE 0 END)::float
+                           / NULLIF(COUNT(*), 0) AS win_rate,
+                       COUNT(*) AS n
+                FROM signal_log
+                WHERE outcome_5d IS NOT NULL
+                  AND created_at >= NOW() - INTERVAL '37 days'
+                GROUP BY DATE(created_at)
+                ORDER BY signal_date
+            """)
+            rows = cur.fetchall(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT DATE(created_at) AS signal_date,
+                       CAST(SUM(CASE WHEN outcome_5d > 2.0 THEN 1 ELSE 0 END) AS REAL)
+                           / NULLIF(COUNT(*), 0) AS win_rate,
+                       COUNT(*) AS n
+                FROM signal_log
+                WHERE outcome_5d IS NOT NULL
+                  AND created_at >= datetime('now', '-37 days')
+                GROUP BY DATE(created_at)
+                ORDER BY signal_date
+            """)
+            rows = cur.fetchall(); conn.close()
+        return [{"date": str(r[0]), "win_rate": float(r[1]) if r[1] else 0.0, "n": r[2]}
+                for r in rows]
+    except Exception as e:
+        print(f"  [db] get_rolling_win_rate failed: {e}")
+        return []
+
+
+def get_overall_accuracy() -> dict:
+    """Return overall accuracy stats from signal_log.outcome_* for the last 90 days."""
+    result = {
+        "total": 0, "win_rate_1d": None, "win_rate_3d": None, "win_rate_5d": None,
+        "profit_factor": None, "ev": None, "sharpe": None,
+    }
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT
+                    COUNT(*) AS n,
+                    SUM(CASE WHEN outcome_1d > 2.0 THEN 1 ELSE 0 END)::float
+                        / NULLIF(SUM(CASE WHEN outcome_1d IS NOT NULL THEN 1 ELSE 0 END), 0) AS wr1,
+                    SUM(CASE WHEN outcome_3d > 2.0 THEN 1 ELSE 0 END)::float
+                        / NULLIF(SUM(CASE WHEN outcome_3d IS NOT NULL THEN 1 ELSE 0 END), 0) AS wr3,
+                    SUM(CASE WHEN outcome_5d > 2.0 THEN 1 ELSE 0 END)::float
+                        / NULLIF(SUM(CASE WHEN outcome_5d IS NOT NULL THEN 1 ELSE 0 END), 0) AS wr5,
+                    AVG(outcome_5d) AS avg_ret,
+                    STDDEV(outcome_5d) AS std_ret
+                FROM signal_log
+                WHERE created_at >= NOW() - INTERVAL '90 days'
+            """)
+            row = cur.fetchone(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT
+                    COUNT(*) AS n,
+                    CAST(SUM(CASE WHEN outcome_1d > 2.0 THEN 1 ELSE 0 END) AS REAL)
+                        / NULLIF(SUM(CASE WHEN outcome_1d IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    CAST(SUM(CASE WHEN outcome_3d > 2.0 THEN 1 ELSE 0 END) AS REAL)
+                        / NULLIF(SUM(CASE WHEN outcome_3d IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    CAST(SUM(CASE WHEN outcome_5d > 2.0 THEN 1 ELSE 0 END) AS REAL)
+                        / NULLIF(SUM(CASE WHEN outcome_5d IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    AVG(outcome_5d),
+                    NULL
+                FROM signal_log
+                WHERE created_at >= datetime('now', '-90 days')
+            """)
+            row = cur.fetchone(); conn.close()
+        if row and row[0]:
+            result["total"]       = row[0]
+            result["win_rate_1d"] = round(float(row[1]) * 100, 1) if row[1] else None
+            result["win_rate_3d"] = round(float(row[2]) * 100, 1) if row[2] else None
+            result["win_rate_5d"] = round(float(row[3]) * 100, 1) if row[3] else None
+            if row[4] and row[5] and float(row[5]) > 0:
+                result["sharpe"] = round(float(row[4]) / float(row[5]) * (252 ** 0.5), 2)
+    except Exception as e:
+        print(f"  [db] get_overall_accuracy failed: {e}")
+    return result
+
+
+def seed_mobile_admin() -> None:
+    """Ensure 'admin'/'axiom2026' exists in users table. No-op if admin already exists."""
+    try:
+        user = get_user_by_username("admin")
+        if user is not None:
+            return
+        from auth import hash_password
+        ph_hash = hash_password("axiom2026")
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO users (username, email, password_hash, display_name, role)
+                VALUES (%s, %s, %s, %s, 'admin')
+                ON CONFLICT DO NOTHING
+            """, ("admin", "admin@admin.local", ph_hash, "Vishwa"))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("""
+                INSERT OR IGNORE INTO users (username, email, password_hash, display_name, role)
+                VALUES (?, ?, ?, ?, 'admin')
+            """, ("admin", "admin@admin.local", ph_hash, "Vishwa"))
+            conn.commit(); conn.close()
+        print("  [db] Mobile admin 'admin' seeded")
+    except Exception as e:
+        print(f"  [db] seed_mobile_admin failed: {e}")

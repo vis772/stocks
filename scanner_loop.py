@@ -139,7 +139,12 @@ class ScannerState:
         self.premarket_high:    Dict[str, float] = {}
         self.premarket_low:     Dict[str, float] = {}
         self.level_session_date: str = ""
-        self.last_prediction_run: datetime = now_et() - timedelta(hours=2)
+        self.last_prediction_run:    datetime = now_et() - timedelta(hours=2)
+        self.signals_suppressed:     int = 0
+        self.universe_size:          int = 0
+        self.open_positions:         int = 0
+        self.last_conviction_run_ts: Optional[str] = None
+        self.last_accuracy_run_ts:   Optional[str] = None
         self._load()
 
     def _load(self):
@@ -169,13 +174,18 @@ class ScannerState:
                     "dist_pct": dist_pct,
                 }
             save_scanner_state({
-                "date":             now_et().strftime("%Y-%m-%d"),
-                "alerted_today":    list(self.alerted_today),
-                "known_filings":    list(self.known_filings),
-                "scan_count":       self.scan_count,
-                "last_updated":     now_et().isoformat(),
-                "vwap_snapshot":    vwap_snap,
-                "momentum_ranking": self._momentum_ranking_cache,
+                "date":                     now_et().strftime("%Y-%m-%d"),
+                "alerted_today":            list(self.alerted_today),
+                "known_filings":            list(self.known_filings),
+                "scan_count":               self.scan_count,
+                "last_updated":             now_et().isoformat(),
+                "vwap_snapshot":            vwap_snap,
+                "momentum_ranking":         self._momentum_ranking_cache,
+                "signals_suppressed_today": self.signals_suppressed,
+                "universe_size":            self.universe_size,
+                "open_positions":           self.open_positions,
+                "last_conviction_run":      self.last_conviction_run_ts,
+                "last_accuracy_run":        self.last_accuracy_run_ts,
             })
         except Exception as e:
             print(f"  [state] Save failed: {e}")
@@ -909,6 +919,7 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                 from db.database import should_suppress
                 if should_suppress(ticker, signal_label, window_minutes=5):
                     print(f"  [dedup] Suppressed {ticker} {signal_label} — duplicate within 5min")
+                    state.signals_suppressed += 1
                     continue
             except Exception:
                 pass
@@ -929,6 +940,16 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                     signal_label = result.get("signal", "Hold")  # re-evaluate after adjustment
                 except Exception as _qerr:
                     print(f"  [quant] {ticker} error: {_qerr}")
+
+            # Signal quality tag
+            _rvol = state.last_rvol.get(ticker, 1.0)
+            _qt_adj = float(quant_adj) if quant_adj else 0.0
+            if score >= 75 and _qt_adj >= 5 and _rvol >= 2.0:
+                quality_tag = "HIGH"
+            elif score >= 65 and _rvol >= 1.3:
+                quality_tag = "MEDIUM"
+            else:
+                quality_tag = "LOW"
 
             # Log every signal regardless of score — full data for accuracy test
             try:
@@ -957,6 +978,7 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                     quant_adj        = quant_adj,
                     source_quality   = source_qual,
                     session_mode     = session_mode,
+                    quality_tag      = quality_tag,
                 )
                 if sig_id:
                     print(f"  [signal_log] ✓ {ticker} | {signal_label} | score={score:.0f} | quant={quant_adj:+.1f} | id={sig_id}")
@@ -1001,6 +1023,14 @@ def run_scanner():
         print("  ✓ DB initialized")
     except Exception as _dbi_e:
         print(f"  [startup] DB init failed: {_dbi_e}")
+
+    try:
+        print("[AccuracyValidator] Running startup grade...")
+        from accuracy_validator import AccuracyValidator
+        AccuracyValidator().grade_signals()
+        print("[AccuracyValidator] Startup grade complete")
+    except Exception as _av_e:
+        print(f"  [startup] AccuracyValidator startup grade failed: {_av_e}")
 
     # ── Startup status ────────────────────────────────────────────────────────
     _et_start = now_et()
@@ -1195,6 +1225,7 @@ def run_scanner():
                     watchlist = DEFAULT_UNIVERSE
                     print(f"  Using default universe: {len(watchlist)} stocks")
                 _ensure_stream(watchlist)
+            state.universe_size = len(watchlist)
 
             # Morning brief at 8:30 AM ET
             if et.hour == 8 and et.minute >= 30 and not morning_brief_sent and watchlist:
@@ -1221,9 +1252,14 @@ def run_scanner():
                     except Exception as _pbo:
                         print(f"  [broker] open-bell update failed: {_pbo}")
 
-            # Reset eod flag at midnight
+            # Reset eod flag + daily counters at midnight ET
             if et.hour == 0 and et.minute < 5:
                 eod_report_sent = False
+                _midnight_key = f"midnight_reset_{today_str}"
+                if not state.already_alerted(_midnight_key):
+                    state.signals_suppressed = 0
+                    state.mark_alerted(_midnight_key)
+                    _log("info", "Daily reset complete — signal counters reset")
 
             # ── PREMARKET mode ────────────────────────────────────────────────
             if mode == "PREMARKET":
@@ -1283,6 +1319,11 @@ def run_scanner():
                     _log("info", f"Scan #{state.scan_count} complete — no alerts")
                 top_movers = _build_momentum_ranking(watchlist, state)
                 if state.scan_count % 5 == 0:
+                    try:
+                        from db.database import get_open_position_count
+                        state.open_positions = get_open_position_count()
+                    except Exception:
+                        pass
                     state.save()
                 # Prediction scan every 30 minutes
                 if (et - state.last_prediction_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
@@ -1312,6 +1353,7 @@ def run_scanner():
                         try:
                             from conviction_engine import run_conviction_engine
                             run_conviction_engine(session="close")
+                            state.last_conviction_run_ts = now_et().isoformat()
                             state.mark_alerted(_close_key)
                             # Wire conviction buys into paper broker
                             try:
@@ -1431,6 +1473,7 @@ def run_scanner():
                         try:
                             from conviction_engine import run_conviction_engine
                             run_conviction_engine(session="afterhours")
+                            state.last_conviction_run_ts = now_et().isoformat()
                             state.mark_alerted(_ah_key)
                         except Exception as _cve2:
                             print(f"  [conviction] afterhours scan failed: {_cve2}")
@@ -1442,6 +1485,7 @@ def run_scanner():
                         try:
                             from accuracy_validator import run_nightly_validation
                             run_nightly_validation()
+                            state.last_accuracy_run_ts = now_et().isoformat()
                             state.mark_alerted(_acc_key)
                         except Exception as _ave:
                             print(f"  [accuracy] nightly validation failed: {_ave}")
@@ -1486,6 +1530,7 @@ def run_scanner():
                         try:
                             from accuracy_validator import run_nightly_validation
                             run_nightly_validation()
+                            state.last_accuracy_run_ts = now_et().isoformat()
                             state.mark_alerted(_acc_key2)
                         except Exception as _ave2:
                             print(f"  [accuracy] nightly validation failed: {_ave2}")

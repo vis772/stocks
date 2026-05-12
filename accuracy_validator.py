@@ -19,6 +19,41 @@ SCORE_BUCKETS = [
 ]
 
 
+def get_close_n_trading_days_after(ticker: str, entry_date, n: int):
+    """Return close price n trading days after entry_date, or None if unavailable."""
+    import yfinance as yf
+    from datetime import timedelta
+
+    if isinstance(entry_date, str):
+        entry_date = datetime.fromisoformat(entry_date.replace("Z", "")).date()
+    elif hasattr(entry_date, "date"):
+        entry_date = entry_date.date()
+
+    start = entry_date
+    end   = entry_date + timedelta(days=n * 3 + 7)  # buffer for weekends/holidays
+
+    try:
+        df = yf.download(ticker, start=str(start), end=str(end),
+                         progress=False, auto_adjust=True)
+    except Exception:
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    close_col = df["Close"]
+    if hasattr(close_col, "squeeze"):
+        close_col = close_col.squeeze()
+
+    closes = close_col.dropna()
+    idx_dates = [d.date() if hasattr(d, "date") else d for d in closes.index]
+    after = [(d, float(c)) for d, c in zip(idx_dates, closes) if d > entry_date]
+
+    if len(after) < n:
+        return None
+    return after[n - 1][1]
+
+
 def _safe(v, fallback=0.0):
     try:
         f = float(v)
@@ -42,104 +77,103 @@ class AccuracyValidator:
 
     def grade_signals(self) -> int:
         """
-        Grade all ungraded signals where outcome_1d is available.
-        Returns number of signals graded.
+        Grade all ungraded signals where 5+ trading days of data exist.
+        Writes outcome_1d/3d/5d (% return) directly to signal_log.
+        Returns number of signals successfully graded.
         """
         graded = 0
+        failed = 0
+        skipped = 0
+
         try:
             from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
-            import yfinance as yf
 
             if _is_postgres():
                 conn = _get_pg_conn(); cur = conn.cursor()
                 cur.execute("""
-                    SELECT sl.id, sl.ticker, sl.score, sl.price_at_signal, sl.created_at,
-                           so.outcome_1d, so.outcome_3d, so.outcome_5d
-                    FROM signal_log sl
-                    JOIN signal_outcomes so ON so.signal_id = sl.id
-                    WHERE so.outcome_5d IS NULL
-                      AND sl.created_at <= NOW() - INTERVAL '1 day'
-                    ORDER BY sl.created_at ASC
-                    LIMIT 200
+                    SELECT id, ticker, score, price_at_signal, created_at
+                    FROM signal_log
+                    WHERE outcome_5d IS NULL
+                      AND price_at_signal IS NOT NULL
+                      AND price_at_signal > 0
+                      AND created_at <= NOW() - INTERVAL '8 days'
+                    ORDER BY created_at ASC
+                    LIMIT 300
                 """)
                 rows = cur.fetchall()
                 cur.close(); conn.close()
             else:
                 conn = _get_sqlite_conn(); cur = conn.cursor()
                 cur.execute("""
-                    SELECT sl.id, sl.ticker, sl.score, sl.price_at_signal, sl.created_at,
-                           so.outcome_1d, so.outcome_3d, so.outcome_5d
-                    FROM signal_log sl
-                    JOIN signal_outcomes so ON so.signal_id = sl.id
-                    WHERE so.outcome_5d IS NULL
-                      AND sl.created_at <= datetime('now', '-1 day')
-                    ORDER BY sl.created_at ASC
-                    LIMIT 200
+                    SELECT id, ticker, score, price_at_signal, created_at
+                    FROM signal_log
+                    WHERE outcome_5d IS NULL
+                      AND price_at_signal IS NOT NULL
+                      AND price_at_signal > 0
+                      AND created_at <= datetime('now', '-8 days')
+                    ORDER BY created_at ASC
+                    LIMIT 300
                 """)
                 rows = cur.fetchall()
                 conn.close()
 
-            for row in rows:
-                sig_id, ticker, score, entry_price, created_at = row[0], row[1], row[2], row[3], row[4]
-                o1d, o3d, o5d = row[5], row[6], row[7]
+            total = len(rows)
+            print(f"  [accuracy] Found {total} ungraded signals to process")
 
-                if not entry_price or entry_price <= 0:
-                    continue
+            for i, row in enumerate(rows, 1):
+                sig_id, ticker, score, entry_price, created_at = row[0], row[1], row[2], row[3], row[4]
 
                 try:
-                    hist = yf.Ticker(ticker).history(period="15d", auto_adjust=True)
-                    if hist is None or hist.empty:
-                        continue
-                    closes = hist["Close"].dropna().tolist()
-                    if len(closes) < 2:
-                        continue
+                    ret_1d = ret_3d = ret_5d = None
 
-                    # Find prices 1, 3, 5 days after signal
-                    if isinstance(created_at, str):
-                        sig_dt = datetime.fromisoformat(created_at.replace("Z", ""))
+                    c1 = get_close_n_trading_days_after(ticker, created_at, 1)
+                    if c1 is not None:
+                        ret_1d = round((c1 - entry_price) / entry_price * 100, 3)
+
+                    c3 = get_close_n_trading_days_after(ticker, created_at, 3)
+                    if c3 is not None:
+                        ret_3d = round((c3 - entry_price) / entry_price * 100, 3)
+
+                    c5 = get_close_n_trading_days_after(ticker, created_at, 5)
+                    if c5 is not None:
+                        ret_5d = round((c5 - entry_price) / entry_price * 100, 3)
+
+                    if ret_5d is None:
+                        skipped += 1
                     else:
-                        sig_dt = created_at.replace(tzinfo=None) if hasattr(created_at, 'replace') else created_at
-
-                    idx_dates = hist.index.normalize().tolist()
-                    sig_date  = sig_dt.date() if hasattr(sig_dt, 'date') else sig_dt
-
-                    price_on = {}
-                    for offset, key in [(1, "1d"), (3, "3d"), (5, "5d")]:
-                        try:
-                            target = sig_date
-                            trading_days_after = 0
-                            for i, d in enumerate(idx_dates):
-                                dt = d.date() if hasattr(d, 'date') else d
-                                if dt > target:
-                                    trading_days_after += 1
-                                    if trading_days_after == offset:
-                                        price_on[key] = float(closes[i])
-                                        break
-                        except Exception:
-                            pass
-
-                    updates = {}
-                    for key, col in [("1d", "outcome_1d"), ("3d", "outcome_3d"), ("5d", "outcome_5d")]:
-                        if key in price_on:
-                            ret = (price_on[key] - entry_price) / entry_price
-                            if ret > WIN_THRESHOLD:
-                                updates[col] = "win"
-                            elif ret < LOSS_THRESHOLD:
-                                updates[col] = "loss"
-                            else:
-                                updates[col] = "neutral"
-                            updates[f"ret_{key}"] = round(ret * 100, 3)
-
-                    if updates:
-                        _write_graded_outcome(sig_id, updates)
+                        _write_signal_log_outcomes(sig_id, ret_1d, ret_3d, ret_5d)
+                        # Also keep signal_outcomes populated for compute_metrics()
+                        _write_graded_outcome(sig_id, {
+                            "outcome_1d": "win" if ret_1d and ret_1d > WIN_THRESHOLD * 100 else
+                                          "loss" if ret_1d and ret_1d < LOSS_THRESHOLD * 100 else "neutral",
+                            "outcome_3d": "win" if ret_3d and ret_3d > WIN_THRESHOLD * 100 else
+                                          "loss" if ret_3d and ret_3d < LOSS_THRESHOLD * 100 else "neutral",
+                            "outcome_5d": "win" if ret_5d > WIN_THRESHOLD * 100 else
+                                          "loss" if ret_5d < LOSS_THRESHOLD * 100 else "neutral",
+                            "ret_1d": ret_1d, "ret_3d": ret_3d, "ret_5d": ret_5d,
+                        })
                         graded += 1
-                except Exception:
-                    pass
+
+                except Exception as _sig_e:
+                    failed += 1
+                    print(f"  [accuracy] {ticker} (id={sig_id}) failed: {_sig_e}")
+
+                if i % 10 == 0:
+                    print(f"  [AccuracyValidator] Graded {i}/{total}...")
 
         except Exception as e:
-            print(f"  [accuracy] grade_signals failed: {e}")
+            print(f"  [accuracy] grade_signals outer error: {e}")
 
-        print(f"  [accuracy] Graded {graded} signals")
+        summary = f"[AccuracyValidator] Done. Graded: {graded}, Failed: {failed}, Skipped: {skipped}"
+        print(summary)
+
+        if graded > 0:
+            try:
+                from alerts import send_alert, PRIORITY_NORMAL
+                send_alert(title="Accuracy Grader", message=summary, priority=PRIORITY_NORMAL)
+            except Exception:
+                pass
+
         return graded
 
     def compute_metrics(self) -> dict:
@@ -455,6 +489,30 @@ def _write_graded_outcome(sig_id: int, updates: dict) -> None:
             conn.commit(); conn.close()
     except Exception as e:
         print(f"  [accuracy] _write_graded_outcome failed for sig_id={sig_id}: {e}")
+
+
+def _write_signal_log_outcomes(sig_id: int, ret_1d, ret_3d, ret_5d) -> None:
+    """Write outcome_1d/3d/5d (% returns) and graded_at directly to signal_log."""
+    try:
+        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                UPDATE signal_log
+                SET outcome_1d = %s, outcome_3d = %s, outcome_5d = %s, graded_at = NOW()
+                WHERE id = %s
+            """, (ret_1d, ret_3d, ret_5d, sig_id))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("""
+                UPDATE signal_log
+                SET outcome_1d = ?, outcome_3d = ?, outcome_5d = ?, graded_at = datetime('now')
+                WHERE id = ?
+            """, (ret_1d, ret_3d, ret_5d, sig_id))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [accuracy] _write_signal_log_outcomes failed for sig_id={sig_id}: {e}")
 
 
 def run_nightly_validation():

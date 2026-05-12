@@ -1229,25 +1229,16 @@ if "scoring_weights" not in st.session_state:
     st.session_state["scoring_weights"] = _overrides.get("scoring_weights", dict(SCORING_WEIGHTS))
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN TABS
+# LIVE FRAGMENT FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
-tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["Control", "Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info", "Config", "Paper Trading"])
 
-
-# ── TAB 0: CONTROL ───────────────────────────────────────────────────────────
-with tab0:
-    # Auto-refresh every 60 seconds via JS
-    st.markdown(
-        '<script>setTimeout(function(){window.location.reload();},60000);</script>',
-        unsafe_allow_html=True
-    )
-
-    # ── Load control state ────────────────────────────────────────────────────
+@st.fragment(run_every=15)
+def _live_control():
     try:
         from db.database import get_scanner_control, set_scanner_control, get_control_stats
         _ctl = get_scanner_control()
         _sts = get_control_stats()
-    except Exception as _ce:
+    except Exception:
         _ctl = {"paused": False, "force_scan": False, "scanner_started_at": None}
         _sts = {"signals_today": 0, "alerts_today": 0, "top_signal": None,
                 "scan_count": 0, "last_updated": None}
@@ -1258,7 +1249,6 @@ with tab0:
     _last_upd    = _sts.get("last_updated")
     _cur_mode    = _ctl.get("current_mode", "UNKNOWN")
 
-    # ── Minutes since last scan ───────────────────────────────────────────────
     _mins_ago = None
     if _last_upd:
         try:
@@ -1268,20 +1258,16 @@ with tab0:
         except Exception:
             pass
 
-    # ── Scanner uptime ────────────────────────────────────────────────────────
     _uptime_str = "Unknown"
     if _started_at:
         try:
             _sa = datetime.fromisoformat(str(_started_at).replace("Z", "+00:00"))
             _sa_naive = _sa.replace(tzinfo=None) if _sa.tzinfo else _sa
             _up_secs = int((datetime.utcnow() - _sa_naive).total_seconds())
-            _up_h = _up_secs // 3600
-            _up_m = (_up_secs % 3600) // 60
-            _uptime_str = f"{_up_h}h {_up_m}m"
+            _uptime_str = f"{_up_secs // 3600}h {(_up_secs % 3600) // 60}m"
         except Exception:
             pass
 
-    # ── Mode → display config ─────────────────────────────────────────────────
     _MODE_UI = {
         "MARKET":     ("#16a34a", "rgba(22,163,74,0.07)",   "rgba(22,163,74,0.2)",
                        "MARKET — scanning every 60s",
@@ -1303,7 +1289,6 @@ with tab0:
                        "Waiting for scanner heartbeat."),
     }
 
-    # ── 1. STATUS INDICATOR ───────────────────────────────────────────────────
     st.markdown('<div class="ctrl-section">Scanner Status</div>', unsafe_allow_html=True)
 
     if _paused:
@@ -1313,7 +1298,6 @@ with tab0:
         _status_lbl = "PAUSED — manual hold"
         _status_sub = "Scanner is holding. Tap Resume to restart."
     else:
-        # Use the mode the scanner last wrote; fall back to OFFLINE if stale
         _offline = _mins_ago is not None and _mins_ago > 10 and _cur_mode in ("MARKET", "PREMARKET")
         if _offline:
             _dot_color  = "#dc2626"
@@ -1343,7 +1327,6 @@ with tab0:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── 2. PAUSE / RESUME ─────────────────────────────────────────────────────
     st.markdown('<div class="ctrl-section">Scanner Control</div>', unsafe_allow_html=True)
 
     _c1, _c2 = st.columns(2)
@@ -1366,7 +1349,7 @@ with tab0:
                     st.error(f"Failed: {_e}")
 
     with _c2:
-        _fscan_label = "SCANNING..." if _force_scan else "SCAN NOW"
+        _fscan_label    = "SCANNING..." if _force_scan else "SCAN NOW"
         _fscan_disabled = _force_scan
         if st.button(_fscan_label, use_container_width=True, key="ctrl_forcescan",
                      disabled=_fscan_disabled):
@@ -1384,13 +1367,12 @@ with tab0:
             unsafe_allow_html=True
         )
 
-    # ── 3. QUICK SUMMARY ─────────────────────────────────────────────────────
     st.markdown('<div class="ctrl-section">Quick Summary</div>', unsafe_allow_html=True)
 
-    _top = _sts.get("top_signal")
-    _top_str = f"{_top['ticker']} — {_top['label']} — Score {_top['score']:.0f}" if _top else "No signals yet"
-
-    _mode_color = {"MARKET": "g", "PREMARKET": "a", "AFTERHOURS": "a"}.get(_cur_mode, "")
+    _top          = _sts.get("top_signal")
+    _top_str      = (f"{_top['ticker']} — {_top['label']} — Score {_top['score']:.0f}"
+                     if _top else "No signals yet")
+    _mode_color   = {"MARKET": "g", "PREMARKET": "a", "AFTERHOURS": "a"}.get(_cur_mode, "")
     _last_scan_str = f"{_mins_ago}m ago" if _mins_ago is not None else "—"
 
     st.markdown(f"""
@@ -1424,9 +1406,233 @@ with tab0:
 
     st.markdown(
         '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.65em;'
-        'color:var(--t3);margin-top:12px;text-align:center;">Auto-refreshes every 60 seconds</div>',
+        'color:var(--t3);margin-top:12px;text-align:center;">Live — updates every 15 seconds</div>',
         unsafe_allow_html=True
     )
+
+
+@st.fragment(run_every=10)
+def _live_alerts_feed():
+    alert_log = []
+    try:
+        from db.database import load_alerts
+        alert_log = list(reversed(load_alerts(100)))
+    except Exception:
+        try:
+            import json as _json
+            with open("alert_log.json") as f:
+                alert_log = list(reversed(_json.load(f)))
+        except Exception:
+            pass
+
+    scanner_state = {}
+    try:
+        from db.database import load_scanner_state
+        scanner_state = load_scanner_state()
+    except Exception:
+        try:
+            import json as _json
+            with open("scanner_state.json") as f:
+                scanner_state = _json.load(f)
+        except Exception:
+            pass
+
+    scan_count   = scanner_state.get("scan_count", 0)
+    last_updated = scanner_state.get("last_updated", "—")
+    is_running   = scan_count > 0
+
+    col_s1, col_s2, col_s3 = st.columns(3)
+    col_s1.metric("Scanner Status", "RUNNING" if is_running else "WAITING")
+    col_s2.metric("Scans Today",    scan_count)
+    col_s3.metric("Last Scan",      last_updated[11:16] if len(last_updated) > 11 else "—")
+
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+    momentum = scanner_state.get("momentum_ranking", [])
+    if momentum:
+        st.markdown('<div class="sh">Momentum Ranking</div>', unsafe_allow_html=True)
+        top = momentum[:15]
+        cols_per_row = 5
+        for row_start in range(0, len(top), cols_per_row):
+            chunk = top[row_start:row_start + cols_per_row]
+            mcols = st.columns(cols_per_row)
+            for mc, m in zip(mcols, chunk):
+                chg   = m.get("change", 0)
+                score = m.get("score", 0)
+                above = m.get("above_vwap")
+                rvol  = m.get("rvol", 1)
+                chg_c = "#16a34a" if chg >= 0 else "#dc2626"
+                vwap_badge = ('<span style="color:#16a34a;font-size:0.7em;">+V</span>'
+                              if above else '<span style="color:#dc2626;font-size:0.7em;">-V</span>')
+                mc.markdown(f"""
+                <div style="background:var(--bgcard);border:1px solid var(--border);border-radius:6px;
+                            padding:8px 10px;text-align:center;transition:border-color 0.2s;"
+                     onmouseover="this.style.borderColor='var(--borderhi)'"
+                     onmouseout="this.style.borderColor='var(--border)'">
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:0.85em;color:#1d6fa5;
+                               font-weight:600;letter-spacing:0.05em;">{m['ticker']}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:0.8em;color:{chg_c};
+                               font-weight:600;margin:2px 0;">{chg:+.1f}%</div>
+                  <div style="display:flex;justify-content:center;gap:6px;margin-top:2px;">
+                    {vwap_badge}
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:0.65em;color:#64748b;">{rvol:.1f}×</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:0.65em;color:#94a3b8;">{score:.0f}pt</span>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+    vwap_snap = scanner_state.get("vwap_snapshot", {})
+    if vwap_snap:
+        st.markdown('<div class="sh" style="margin-top:14px;">Live VWAP Status</div>', unsafe_allow_html=True)
+        above_list = sorted(
+            [(t, d) for t, d in vwap_snap.items() if d.get("above")],
+            key=lambda x: x[1]["dist_pct"], reverse=True
+        )
+        below_list = sorted(
+            [(t, d) for t, d in vwap_snap.items() if d.get("above") is False],
+            key=lambda x: x[1]["dist_pct"]
+        )
+        va, vb = st.columns(2)
+        with va:
+            st.markdown(
+                f'<div style="color:#16a34a;font-size:0.68em;font-family:\'JetBrains Mono\','
+                f'monospace;letter-spacing:0.1em;margin-bottom:5px;">ABOVE VWAP ({len(above_list)})</div>',
+                unsafe_allow_html=True)
+            for ticker, d in above_list[:12]:
+                st.markdown(f"""
+                <div style="display:flex;justify-content:space-between;align-items:center;
+                            padding:3px 8px;border-left:2px solid rgba(22,163,74,0.25);
+                            background:rgba(22,163,74,0.03);border-radius:0 3px 3px 0;margin-bottom:2px;">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#1d6fa5;">{ticker}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.68em;color:#64748b;">${d['price']:.3f}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#16a34a;font-weight:600;">+{d['dist_pct']:.1f}%</span>
+                </div>""", unsafe_allow_html=True)
+        with vb:
+            st.markdown(
+                f'<div style="color:#dc2626;font-size:0.68em;font-family:\'JetBrains Mono\','
+                f'monospace;letter-spacing:0.1em;margin-bottom:5px;">BELOW VWAP ({len(below_list)})</div>',
+                unsafe_allow_html=True)
+            for ticker, d in below_list[:12]:
+                st.markdown(f"""
+                <div style="display:flex;justify-content:space-between;align-items:center;
+                            padding:3px 8px;border-left:2px solid rgba(220,38,38,0.25);
+                            background:rgba(220,38,38,0.03);border-radius:0 3px 3px 0;margin-bottom:2px;">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#1d6fa5;">{ticker}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.68em;color:#64748b;">${d['price']:.3f}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#dc2626;font-weight:600;">{d['dist_pct']:.1f}%</span>
+                </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
+    try:
+        from db.database import load_watchlist
+        wl_data    = load_watchlist()
+        wl_tickers = wl_data.get("tickers", [])
+        wl_stats   = wl_data.get("stats", {})
+
+        st.markdown('<div class="sh">Today\'s Dynamic Watchlist</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="background:rgba(29,111,165,0.04);border:1px solid rgba(29,111,165,0.15);'
+            f'border-radius:8px;padding:12px 16px;font-family:\'JetBrains Mono\',monospace;font-size:0.78em;color:#334155;">'
+            f'<span style="color:#64748b;">Screened:</span> <span style="color:#1d6fa5;">{wl_stats.get("screened",0):,} stocks</span> &nbsp;·&nbsp; '
+            f'<span style="color:#64748b;">Active:</span> <span style="color:#1d6fa5;">{wl_stats.get("interesting",0)}</span> &nbsp;·&nbsp; '
+            f'<span style="color:#64748b;">Watching:</span> <span style="color:#16a34a;">{len(wl_tickers)}</span><br><br>'
+            f'<span style="color:#94a3b8;">{" · ".join(wl_tickers[:30])}{"..." if len(wl_tickers) > 30 else ""}</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+        gap_ups = wl_stats.get("gap_ups", [])
+        if gap_ups:
+            st.markdown(
+                f'<div style="margin-top:8px;color:#16a34a;font-size:0.78em;'
+                f'font-family:\'JetBrains Mono\',monospace;">Gap-ups today: {", ".join(gap_ups)}</div>',
+                unsafe_allow_html=True
+            )
+
+    except FileNotFoundError:
+        st.info("No watchlist generated yet. The scanner builds today's watchlist at 6 AM ET, or you can trigger it manually.")
+        if st.button("Build Watchlist Now", type="primary"):
+            with st.spinner("Scanning universe for active stocks... (this takes 2-3 minutes)"):
+                try:
+                    from morning_screen import build_todays_watchlist
+                    wl = build_todays_watchlist(max_stocks=50)
+                    st.success(f"Built watchlist with {len(wl)} stocks: {', '.join(wl[:10])}...")
+                except Exception as e:
+                    st.error(f"Screen failed: {e}")
+
+    st.markdown('<div class="sh" style="margin-top:16px;">Alert History</div>', unsafe_allow_html=True)
+    if not alert_log:
+        st.markdown("""
+        <div class="empty" style="padding:30px 20px;">
+          <div class="ico" style="font-size:2em;">--</div>
+          <h3 style="font-size:1.2em;">NO ALERTS YET</h3>
+          <p>Alerts appear here when the scanner detects significant activity.<br>
+          Make sure the background scanner is running on Railway.</p>
+        </div>""", unsafe_allow_html=True)
+    else:
+        for alert in alert_log[:30]:
+            al = alert.lower()
+            if "gap-up" in al or "session high" in al or "pre-market high" in al or "pred buy" in al:
+                color = "#16a34a"; bg = "rgba(22,163,74,0.05)"
+            elif "session low" in al or "news" in al or "loss" in al:
+                color = "#dc2626"; bg = "rgba(220,38,38,0.05)"
+            elif "filing" in al:
+                color = "#6d28d9"; bg = "rgba(109,40,217,0.05)"
+            elif "volume spike" in al or "extended" in al or "vwap" in al:
+                color = "#c2610f"; bg = "rgba(194,97,15,0.05)"
+            elif "pred sell" in al:
+                color = "#dc2626"; bg = "rgba(220,38,38,0.05)"
+            else:
+                color = "#475569"; bg = "transparent"
+
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:12px;padding:8px 12px;
+                        background:{bg};border-left:2px solid {color}40;
+                        border-radius:0 6px 6px 0;margin-bottom:4px;">
+                <span style="color:{color};font-family:'JetBrains Mono',monospace;font-size:0.8em;">{alert}</span>
+            </div>""", unsafe_allow_html=True)
+
+    with st.expander("Setup Instructions — How to activate real-time alerts"):
+        st.markdown("""
+        **Step 1: Get Pushover (one-time $5)**
+        1. Go to **pushover.net** → sign up
+        2. Copy your **User Key** from the dashboard
+        3. Click "Create an Application" → copy the **API Token**
+
+        **Step 2: Add keys to Railway**
+        1. Go to your Railway project
+        2. Click your service → **Variables** tab
+        3. Add these variables:
+        ```
+        PUSHOVER_USER_KEY = your_user_key_here
+        PUSHOVER_API_TOKEN = your_api_token_here
+        ANTHROPIC_API_KEY = your_anthropic_key
+        FINNHUB_API_KEY = your_finnhub_key
+        ```
+
+        **Step 3: Deploy the scanner process**
+        1. Make sure your GitHub repo has the new `Procfile` committed
+        2. Railway will automatically run both:
+           - `web` → the Streamlit dashboard
+           - `scanner` → the background real-time scanner
+
+        **What you'll get:**
+        - Push notification within 60 seconds of a volume spike
+        - Alert when a new 8-K is filed for any watchlist stock
+        - Alert when a stock moves >5% in a single minute
+        - Morning brief at 9:25 AM with today's active watchlist
+        """)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN TABS
+# ══════════════════════════════════════════════════════════════════════════════
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["Control", "Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info", "Config", "Paper Trading"])
+
+
+# ── TAB 0: CONTROL ───────────────────────────────────────────────────────────
+with tab0:
+    _live_control()
 
 
 # ── TAB 1: SCANNER ────────────────────────────────────────────────────────────
@@ -1800,12 +2006,13 @@ with tab4:
 # ── TAB 5: LIVE ALERTS ────────────────────────────────────────────────────────
 with tab5:
     st.markdown("## Live Alert Feed")
-    st.markdown('<p style="color:#334155;font-size:0.82em;font-family:\'JetBrains Mono\',monospace;">Real-time alerts from the background scanner. Refreshes every 30 seconds.</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="color:#334155;font-size:0.82em;font-family:\'JetBrains Mono\',monospace;">'
+        'Real-time alerts from the background scanner. Updates every 10 seconds.</p>',
+        unsafe_allow_html=True
+    )
 
-    # Auto-refresh
-    refresh = st.button("Refresh Now", use_container_width=False)
-
-    # ── EOD Report Download ───────────────────────────────────────────────────
+    # ── EOD Report Download (static, no need to fragment) ─────────────────────
     try:
         import json as _json
         with open("latest_report.json") as f:
@@ -1826,218 +2033,7 @@ with tab5:
     except Exception:
         pass
 
-    # Load alert log from shared DB
-    alert_log = []
-    try:
-        from db.database import load_alerts
-        alert_log = list(reversed(load_alerts(100)))
-    except Exception:
-        try:
-            import json as _json
-            with open("alert_log.json") as f:
-                alert_log = list(reversed(_json.load(f)))
-        except Exception:
-            pass
-
-    # Load scanner state from shared DB
-    scanner_state = {}
-    try:
-        from db.database import load_scanner_state
-        scanner_state = load_scanner_state()
-    except Exception:
-        try:
-            with open("scanner_state.json") as f:
-                scanner_state = _json.load(f)
-        except Exception:
-            pass
-
-    # Status bar
-    scan_count   = scanner_state.get("scan_count", 0)
-    last_updated = scanner_state.get("last_updated", "—")
-    is_running   = scan_count > 0
-
-    col_s1, col_s2, col_s3 = st.columns(3)
-    col_s1.metric("Scanner Status", "RUNNING" if is_running else "WAITING")
-    col_s2.metric("Scans Today",    scan_count)
-    col_s3.metric("Last Scan",      last_updated[11:16] if len(last_updated) > 11 else "—")
-
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
-    # ── Momentum Ranking ──────────────────────────────────────────────────────
-    momentum = scanner_state.get("momentum_ranking", [])
-    if momentum:
-        st.markdown('<div class="sh">Momentum Ranking</div>', unsafe_allow_html=True)
-        top = momentum[:15]
-        cols_per_row = 5
-        for row_start in range(0, len(top), cols_per_row):
-            chunk = top[row_start:row_start + cols_per_row]
-            mcols = st.columns(cols_per_row)
-            for mc, m in zip(mcols, chunk):
-                chg   = m.get("change", 0)
-                score = m.get("score", 0)
-                above = m.get("above_vwap")
-                rvol  = m.get("rvol", 1)
-                chg_c = "#16a34a" if chg >= 0 else "#dc2626"
-                vwap_badge = '<span style="color:#16a34a;font-size:0.7em;">+V</span>' if above else '<span style="color:#dc2626;font-size:0.7em;">-V</span>'
-                mc.markdown(f"""
-                <div style="background:var(--bgcard);border:1px solid var(--border);border-radius:6px;
-                            padding:8px 10px;text-align:center;transition:border-color 0.2s;"
-                     onmouseover="this.style.borderColor='var(--borderhi)'"
-                     onmouseout="this.style.borderColor='var(--border)'">
-                  <div style="font-family:'JetBrains Mono',monospace;font-size:0.85em;color:#1d6fa5;
-                               font-weight:600;letter-spacing:0.05em;">{m['ticker']}</div>
-                  <div style="font-family:'JetBrains Mono',monospace;font-size:0.8em;color:{chg_c};
-                               font-weight:600;margin:2px 0;">{chg:+.1f}%</div>
-                  <div style="display:flex;justify-content:center;gap:6px;margin-top:2px;">
-                    {vwap_badge}
-                    <span style="font-family:'JetBrains Mono',monospace;font-size:0.65em;color:#64748b;">{rvol:.1f}×</span>
-                    <span style="font-family:'JetBrains Mono',monospace;font-size:0.65em;color:#94a3b8;">{score:.0f}pt</span>
-                  </div>
-                </div>""", unsafe_allow_html=True)
-
-    # ── Live VWAP Status ──────────────────────────────────────────────────────
-    vwap_snap = scanner_state.get("vwap_snapshot", {})
-    if vwap_snap:
-        st.markdown('<div class="sh" style="margin-top:14px;">Live VWAP Status</div>', unsafe_allow_html=True)
-        above_list = sorted(
-            [(t, d) for t, d in vwap_snap.items() if d.get("above")],
-            key=lambda x: x[1]["dist_pct"], reverse=True
-        )
-        below_list = sorted(
-            [(t, d) for t, d in vwap_snap.items() if d.get("above") is False],
-            key=lambda x: x[1]["dist_pct"]
-        )
-        va, vb = st.columns(2)
-        with va:
-            st.markdown(
-                f'<div style="color:#16a34a;font-size:0.68em;font-family:\'JetBrains Mono\','
-                f'monospace;letter-spacing:0.1em;margin-bottom:5px;">ABOVE VWAP ({len(above_list)})</div>',
-                unsafe_allow_html=True)
-            for ticker, d in above_list[:12]:
-                st.markdown(f"""
-                <div style="display:flex;justify-content:space-between;align-items:center;
-                            padding:3px 8px;border-left:2px solid rgba(22,163,74,0.25);
-                            background:rgba(22,163,74,0.03);border-radius:0 3px 3px 0;margin-bottom:2px;">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#1d6fa5;">{ticker}</span>
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.68em;color:#64748b;">${d['price']:.3f}</span>
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#16a34a;font-weight:600;">+{d['dist_pct']:.1f}%</span>
-                </div>""", unsafe_allow_html=True)
-        with vb:
-            st.markdown(
-                f'<div style="color:#dc2626;font-size:0.68em;font-family:\'JetBrains Mono\','
-                f'monospace;letter-spacing:0.1em;margin-bottom:5px;">BELOW VWAP ({len(below_list)})</div>',
-                unsafe_allow_html=True)
-            for ticker, d in below_list[:12]:
-                st.markdown(f"""
-                <div style="display:flex;justify-content:space-between;align-items:center;
-                            padding:3px 8px;border-left:2px solid rgba(220,38,38,0.25);
-                            background:rgba(220,38,38,0.03);border-radius:0 3px 3px 0;margin-bottom:2px;">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#1d6fa5;">{ticker}</span>
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.68em;color:#64748b;">${d['price']:.3f}</span>
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:0.72em;color:#dc2626;font-weight:600;">{d['dist_pct']:.1f}%</span>
-                </div>""", unsafe_allow_html=True)
-
-    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-
-    # Load today's watchlist from shared DB
-    try:
-        from db.database import load_watchlist
-        wl_data    = load_watchlist()
-        wl_tickers = wl_data.get("tickers", [])
-        wl_stats   = wl_data.get("stats", {})
-
-        st.markdown('<div class="sh">Today\'s Dynamic Watchlist</div>', unsafe_allow_html=True)
-        st.markdown(
-            f'<div style="background:rgba(29,111,165,0.04);border:1px solid rgba(29,111,165,0.15);'
-            f'border-radius:8px;padding:12px 16px;font-family:\'JetBrains Mono\',monospace;font-size:0.78em;color:#334155;">'
-            f'<span style="color:#64748b;">Screened:</span> <span style="color:#1d6fa5;">{wl_stats.get("screened",0):,} stocks</span> &nbsp;·&nbsp; '
-            f'<span style="color:#64748b;">Active:</span> <span style="color:#1d6fa5;">{wl_stats.get("interesting",0)}</span> &nbsp;·&nbsp; '
-            f'<span style="color:#64748b;">Watching:</span> <span style="color:#16a34a;">{len(wl_tickers)}</span><br><br>'
-            f'<span style="color:#94a3b8;">{" · ".join(wl_tickers[:30])}{"..." if len(wl_tickers) > 30 else ""}</span>'
-            f'</div>',
-            unsafe_allow_html=True
-        )
-
-        gap_ups = wl_stats.get("gap_ups", [])
-        if gap_ups:
-            st.markdown(f'<div style="margin-top:8px;color:#16a34a;font-size:0.78em;font-family:\'JetBrains Mono\',monospace;">Gap-ups today: {", ".join(gap_ups)}</div>', unsafe_allow_html=True)
-
-    except FileNotFoundError:
-        st.info("No watchlist generated yet. The scanner builds today's watchlist at 6 AM ET, or you can trigger it manually.")
-        if st.button("Build Watchlist Now", type="primary"):
-            with st.spinner("Scanning universe for active stocks... (this takes 2-3 minutes)"):
-                try:
-                    from morning_screen import build_todays_watchlist
-                    wl = build_todays_watchlist(max_stocks=50)
-                    st.success(f"Built watchlist with {len(wl)} stocks: {', '.join(wl[:10])}...")
-                except Exception as e:
-                    st.error(f"Screen failed: {e}")
-
-    # Alert feed
-    st.markdown('<div class="sh" style="margin-top:16px;">Alert History</div>', unsafe_allow_html=True)
-    if not alert_log:
-        st.markdown("""
-        <div class="empty" style="padding:30px 20px;">
-          <div class="ico" style="font-size:2em;">--</div>
-          <h3 style="font-size:1.2em;">NO ALERTS YET</h3>
-          <p>Alerts appear here when the scanner detects significant activity.<br>
-          Make sure the background scanner is running on Railway.</p>
-        </div>""", unsafe_allow_html=True)
-    else:
-        for alert in alert_log[:30]:
-            # Color code by alert type (keyword-based since emojis removed)
-            al = alert.lower()
-            if "gap-up" in al or "session high" in al or "pre-market high" in al or "pred buy" in al:
-                color = "#16a34a"; bg = "rgba(22,163,74,0.05)"
-            elif "session low" in al or "news" in al or "loss" in al:
-                color = "#dc2626"; bg = "rgba(220,38,38,0.05)"
-            elif "filing" in al:
-                color = "#6d28d9"; bg = "rgba(109,40,217,0.05)"
-            elif "volume spike" in al or "extended" in al or "vwap" in al:
-                color = "#c2610f"; bg = "rgba(194,97,15,0.05)"
-            elif "pred sell" in al:
-                color = "#dc2626"; bg = "rgba(220,38,38,0.05)"
-            else:
-                color = "#475569"; bg = "transparent"
-
-            st.markdown(f"""
-            <div style="display:flex;align-items:center;gap:12px;padding:8px 12px;
-                        background:{bg};border-left:2px solid {color}40;
-                        border-radius:0 6px 6px 0;margin-bottom:4px;">
-                <span style="color:{color};font-family:'JetBrains Mono',monospace;font-size:0.8em;">{alert}</span>
-            </div>""", unsafe_allow_html=True)
-
-    # Setup instructions
-    with st.expander("Setup Instructions — How to activate real-time alerts"):
-        st.markdown("""
-        **Step 1: Get Pushover (one-time $5)**
-        1. Go to **pushover.net** → sign up
-        2. Copy your **User Key** from the dashboard
-        3. Click "Create an Application" → copy the **API Token**
-
-        **Step 2: Add keys to Railway**
-        1. Go to your Railway project
-        2. Click your service → **Variables** tab
-        3. Add these variables:
-        ```
-        PUSHOVER_USER_KEY = your_user_key_here
-        PUSHOVER_API_TOKEN = your_api_token_here
-        ANTHROPIC_API_KEY = your_anthropic_key
-        FINNHUB_API_KEY = your_finnhub_key
-        ```
-
-        **Step 3: Deploy the scanner process**
-        1. Make sure your GitHub repo has the new `Procfile` committed
-        2. Railway will automatically run both:
-           - `web` → the Streamlit dashboard
-           - `scanner` → the background real-time scanner
-
-        **What you'll get:**
-        - Push notification within 60 seconds of a volume spike
-        - Alert when a new 8-K is filed for any watchlist stock
-        - Alert when a stock moves >5% in a single minute
-        - Morning brief at 9:25 AM with today's active watchlist
-        """)
+    _live_alerts_feed()
 
 # ── TAB 6: INFO ───────────────────────────────────────────────────────────────
 with tab6:
