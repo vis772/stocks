@@ -1005,13 +1005,14 @@ def _accuracy_screen():
         return "#3fb950" if wr > 55 else "#f85149" if wr < 45 else "#d29922"
 
     def _metric_card(label, val_str, color="#e6edf3", note=""):
+        note_html = f'<div style="font-size:0.6em;color:#484f58;margin-top:2px;">{note}</div>' if note else ''
         return (f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;'
                 f'padding:10px 12px;margin:0 0 8px;">'
                 f'<div style="font-size:0.6em;color:#484f58;text-transform:uppercase;'
                 f'letter-spacing:0.1em;">{label}</div>'
                 f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:1.3em;'
                 f'font-weight:700;color:{color};">{val_str}</div>'
-                f'{"<div style=\\"font-size:0.6em;color:#484f58;margin-top:2px;\\">" + note + "</div>" if note else ""}'
+                f'{note_html}'
                 f'</div>')
 
     _sample_note = "low sample — less reliable" if _low_sample else ""
