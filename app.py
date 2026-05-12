@@ -2209,10 +2209,15 @@ with tab6:
         if sig_df.empty:
             st.markdown('<div class="box">No signals logged yet.</div>', unsafe_allow_html=True)
         else:
+            # One row per ticker per calendar day — most recent signal wins
+            _dedup_df = sig_df.copy()
+            _dedup_df["_date"] = _dedup_df["created_at"].astype(str).str[:10]
+            _dedup_df = _dedup_df.sort_values("created_at", ascending=False)
+            _dedup_df = _dedup_df.drop_duplicates(subset=["ticker", "_date"], keep="first")
             _outcome_color = {"win": "#16a34a", "loss": "#dc2626", "neutral": "#94a3b8",
                               "pending": "#c2610f", "pending_5day": "#d97706"}
             rows_html = ""
-            for _, row in sig_df.head(40).iterrows():
+            for _, row in _dedup_df.head(40).iterrows():
                 ol  = row.get("outcome_label") or "pending"
                 col = _outcome_color.get(ol, "#94a3b8")
                 p5  = row.get("pct_change_5day")
