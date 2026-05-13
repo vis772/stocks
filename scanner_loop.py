@@ -93,6 +93,33 @@ def now_et():
         return utc_now + timedelta(hours=offset)
 
 
+# ─── Telegram bot restart flag ────────────────────────────────────────────────
+
+def check_restart_flag() -> bool:
+    """
+    Check if a restart was requested via the Telegram bot.
+    The bot writes a 'restart_requested' key to scanner_control.
+    If found, we delete it and return True — caller should sys.exit(0)
+    so Railway restarts the service automatically.
+    """
+    try:
+        from db.database import _get_pg_conn
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM scanner_control WHERE key = 'restart_requested'")
+            row = cur.fetchone()
+            if row:
+                cur.execute("DELETE FROM scanner_control WHERE key = 'restart_requested'")
+                conn.commit()
+                print("[restart] Restart flag detected — exiting for Railway restart")
+                _log("warning", "Restart requested via Telegram bot — restarting service")
+                return True
+        conn.close()
+    except Exception as e:
+        print(f"[restart] Flag check error: {e}")
+    return False
+
+
 def _fh_key() -> str:
     return os.environ.get("FINNHUB_API_KEY", "")
 
@@ -1137,6 +1164,11 @@ def run_scanner():
 
     while True:
         try:
+            # ── Telegram bot restart flag check ──────────────────────────────
+            if check_restart_flag():
+                import sys
+                sys.exit(0)
+
             et        = now_et()
             today_str = et.strftime("%Y-%m-%d")
             mode      = get_scan_mode()
