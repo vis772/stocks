@@ -20,7 +20,8 @@ from tools import (
 
 logger = logging.getLogger(__name__)
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+# Async client — non-blocking, won't freeze the event loop
+client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 SYSTEM_PROMPT = """You are the Axiom Terminal control agent. You have full agentic control over a small-cap stock scanner system. You help the user query data, understand scanner performance, and make controlled changes to the system.
 
@@ -218,8 +219,9 @@ async def run_agent(history: list, user_id: int) -> tuple[str, list, dict | None
 
     # Agentic loop — Claude may call multiple tools
     for _ in range(10):  # Max 10 tool calls per turn
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+        # Async call — doesn't block the event loop
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
             max_tokens=1000,
             system=SYSTEM_PROMPT,
             tools=TOOLS,
@@ -256,14 +258,13 @@ async def run_agent(history: list, user_id: int) -> tuple[str, list, dict | None
                     "description": description,
                     "tool_use_id": block.id
                 }
-                # Return early — ask user to confirm
                 text = _extract_text(response.content)
                 if not text:
                     text = f"I want to: {description}"
                 return text, messages, confirmation_needed
 
             # Execute read-only tools immediately
-            result = _execute_tool(tool_name, tool_input)
+            result = await _execute_tool(tool_name, tool_input)
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
@@ -276,33 +277,36 @@ async def run_agent(history: list, user_id: int) -> tuple[str, list, dict | None
     return "I hit the tool call limit. Please try a simpler request.", messages, None
 
 
-def _execute_tool(name: str, params: dict) -> dict:
+async def _execute_tool(name: str, params: dict) -> dict:
     """Execute a tool and return the result."""
+    import asyncio
     try:
+        # Run sync tool functions in a thread so they don't block the event loop
+        loop = asyncio.get_event_loop()
         if name == "query_database":
-            return query_database(params["sql"], params.get("description", ""))
+            return await loop.run_in_executor(None, lambda: query_database(params["sql"], params.get("description", "")))
         elif name == "get_scanner_status":
-            return get_scanner_status()
+            return await loop.run_in_executor(None, get_scanner_status)
         elif name == "get_accuracy_summary":
-            return get_accuracy_summary(params.get("window", "5day"))
+            return await loop.run_in_executor(None, lambda: get_accuracy_summary(params.get("window", "5day")))
         elif name == "get_signal_log":
-            return get_signal_log(
+            return await loop.run_in_executor(None, lambda: get_signal_log(
                 limit=params.get("limit", 10),
                 signal_label=params.get("signal_label"),
                 ticker=params.get("ticker")
-            )
+            ))
         elif name == "update_weights":
-            return update_weights(params["weights"])
+            return await loop.run_in_executor(None, lambda: update_weights(params["weights"]))
         elif name == "adjust_thresholds":
-            return adjust_thresholds(params["thresholds"])
+            return await loop.run_in_executor(None, lambda: adjust_thresholds(params["thresholds"]))
         elif name == "modify_watchlist":
-            return modify_watchlist(params["action"], params["tickers"])
+            return await loop.run_in_executor(None, lambda: modify_watchlist(params["action"], params["tickers"]))
         elif name == "restart_scanner":
-            return restart_scanner(params["reason"])
+            return await loop.run_in_executor(None, lambda: restart_scanner(params["reason"]))
         else:
             return {"error": f"Unknown tool: {name}"}
     except Exception as e:
-        logger.error(f"Tool error [{name}]: {e}")
+        logger.error(f"Tool error [{name}]: {e}", exc_info=True)
         return {"error": str(e)}
 
 
