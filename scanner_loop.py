@@ -1443,6 +1443,11 @@ def run_scanner():
                             state.mark_alerted(_acc_key)
                         except Exception as _ave:
                             print(f"  [accuracy] nightly validation failed: {_ave}")
+                try:
+                    from reports.checkpoint_reports import check_and_run_checkpoints
+                    check_and_run_checkpoints()
+                except Exception as _cpe:
+                    print(f"  [checkpoint] afterhours checkpoint check failed: {_cpe}")
 
             # ── OVERNIGHT ─────────────────────────────────────────────────────
             else:
