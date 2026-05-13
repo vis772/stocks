@@ -42,7 +42,7 @@ def query_database(sql: str, description: str = "") -> dict:
         with _get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(sql)
-                rows = cur.fetchmany(100)  # Cap at 100 rows
+                rows = cur.fetchmany(100)
                 return {
                     "rows": [dict(r) for r in rows],
                     "count": len(rows),
@@ -54,11 +54,10 @@ def query_database(sql: str, description: str = "") -> dict:
 
 
 def get_scanner_status() -> dict:
-    """Check scanner health — last run time, today's signal count, watchlist size."""
+    """Check scanner health — last run time, today's signal count, watchlist size, current mode."""
     try:
         with _get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Last signal logged
                 cur.execute("""
                     SELECT created_at, ticker, signal_label, score
                     FROM signal_log
@@ -67,23 +66,21 @@ def get_scanner_status() -> dict:
                 """)
                 last_signal = cur.fetchone()
 
-                # Today's signal count
-                cur.execute("""
-                    SELECT COUNT(*) as count
-                    FROM signal_log
-                    WHERE created_at >= CURRENT_DATE
-                """)
+                cur.execute("SELECT COUNT(*) as count FROM signal_log WHERE created_at >= CURRENT_DATE")
                 today_count = cur.fetchone()["count"]
 
-                # Total signal count
                 cur.execute("SELECT COUNT(*) as count FROM signal_log")
                 total_count = cur.fetchone()["count"]
 
-                # Watchlist size
                 cur.execute("SELECT COUNT(*) as count FROM watchlist")
                 watchlist_size = cur.fetchone()["count"]
 
-                # Check if scanner ran in last 45 min (market hours indicator)
+                cur.execute("""
+                    SELECT paused, force_scan, current_mode, scanner_started_at, updated_at
+                    FROM scanner_control WHERE id = 1
+                """)
+                ctrl = cur.fetchone()
+
                 now = datetime.now(timezone.utc)
                 if last_signal and last_signal["created_at"]:
                     last_run = last_signal["created_at"]
@@ -97,6 +94,8 @@ def get_scanner_status() -> dict:
 
                 return {
                     "status": status,
+                    "current_mode": ctrl["current_mode"] if ctrl else "UNKNOWN",
+                    "paused": ctrl["paused"] if ctrl else False,
                     "last_signal": {
                         "ticker": last_signal["ticker"] if last_signal else None,
                         "signal_label": last_signal["signal_label"] if last_signal else None,
@@ -106,7 +105,8 @@ def get_scanner_status() -> dict:
                     "minutes_since_last_signal": round(minutes_since, 1) if minutes_since else None,
                     "signals_today": today_count,
                     "total_signals": total_count,
-                    "watchlist_size": watchlist_size
+                    "watchlist_size": watchlist_size,
+                    "scanner_started_at": str(ctrl["scanner_started_at"]) if ctrl and ctrl["scanner_started_at"] else None,
                 }
     except Exception as e:
         logger.error(f"get_scanner_status error: {e}")
@@ -126,11 +126,9 @@ def get_accuracy_summary(window: str = "5day") -> dict:
     try:
         with _get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Total signals
                 cur.execute("SELECT COUNT(*) as total FROM signal_log")
                 total = cur.fetchone()["total"]
 
-                # Win rates by signal label
                 cur.execute(f"""
                     SELECT
                         sl.signal_label,
@@ -167,11 +165,11 @@ def get_accuracy_summary(window: str = "5day") -> dict:
                         "win_rate_pct": win_rate
                     })
 
-                # Checkpoint progress
+                # Checkpoints: 150 / 350 / 600
                 checkpoints = {
-                    "checkpoint_1": {"target": 150, "reached": total >= 150},
-                    "checkpoint_2": {"target": 350, "reached": total >= 350},
-                    "checkpoint_3": {"target": 600, "reached": total >= 600},
+                    "checkpoint_1": {"target": 150, "label": "Sanity Check", "reached": total >= 150},
+                    "checkpoint_2": {"target": 350, "label": "Preliminary Assessment", "reached": total >= 350},
+                    "checkpoint_3": {"target": 600, "label": "Final Verdict", "reached": total >= 600},
                 }
                 next_checkpoint = None
                 for cp, info in checkpoints.items():
@@ -232,7 +230,7 @@ def get_signal_log(limit: int = 10, signal_label: str = None, ticker: str = None
 # ── WRITE TOOLS (all require confirmation, called only after user confirms) ──
 
 def update_weights(weights: dict) -> dict:
-    """Update scoring component weights in scanner_control."""
+    """Update scoring component weights."""
     required_keys = {"technical", "catalyst", "fundamental", "risk", "sentiment"}
     provided_keys = set(weights.keys())
 
@@ -246,26 +244,20 @@ def update_weights(weights: dict) -> dict:
     try:
         with _get_conn() as conn:
             with conn.cursor() as cur:
-                for component, value in weights.items():
-                    cur.execute("""
-                        UPDATE scanner_control
-                        SET value = %s, updated_at = NOW()
-                        WHERE key = %s
-                    """, (str(value), f"weight_{component}"))
-                    if cur.rowcount == 0:
-                        cur.execute("""
-                            INSERT INTO scanner_control (key, value, updated_at)
-                            VALUES (%s, %s, NOW())
-                        """, (f"weight_{component}", str(value)))
+                cur.execute("UPDATE scanner_control SET updated_at = NOW() WHERE id = 1")
             conn.commit()
-        return {"success": True, "weights_updated": weights}
+        return {
+            "success": True,
+            "weights_updated": weights,
+            "note": "Update the WEIGHT constants in your scanner config and redeploy Service 2 to apply."
+        }
     except Exception as e:
         logger.error(f"update_weights error: {e}")
         return {"error": str(e)}
 
 
 def adjust_thresholds(thresholds: dict) -> dict:
-    """Adjust score thresholds in scanner_control."""
+    """Adjust score thresholds."""
     valid_keys = {"strong_buy", "buy", "short", "strong_short"}
     if not set(thresholds.keys()).issubset(valid_keys):
         return {"error": f"Unknown threshold keys. Valid: {valid_keys}"}
@@ -273,19 +265,13 @@ def adjust_thresholds(thresholds: dict) -> dict:
     try:
         with _get_conn() as conn:
             with conn.cursor() as cur:
-                for key, value in thresholds.items():
-                    cur.execute("""
-                        UPDATE scanner_control
-                        SET value = %s, updated_at = NOW()
-                        WHERE key = %s
-                    """, (str(value), f"threshold_{key}"))
-                    if cur.rowcount == 0:
-                        cur.execute("""
-                            INSERT INTO scanner_control (key, value, updated_at)
-                            VALUES (%s, %s, NOW())
-                        """, (f"threshold_{key}", str(value)))
+                cur.execute("UPDATE scanner_control SET updated_at = NOW() WHERE id = 1")
             conn.commit()
-        return {"success": True, "thresholds_updated": thresholds}
+        return {
+            "success": True,
+            "thresholds_updated": thresholds,
+            "note": "Update PREDICTION_BUY_THRESHOLD / PREDICTION_SELL_THRESHOLD in scanner_loop.py and redeploy Service 2."
+        }
     except Exception as e:
         logger.error(f"adjust_thresholds error: {e}")
         return {"error": str(e)}
@@ -301,15 +287,12 @@ def modify_watchlist(action: str, tickers: list) -> dict:
                 if action == "add":
                     for ticker in tickers:
                         cur.execute("""
-                            INSERT INTO watchlist (ticker, added_at)
-                            VALUES (%s, NOW())
-                            ON CONFLICT (ticker) DO NOTHING
+                            INSERT INTO watchlist (ticker)
+                            VALUES (%s)
+                            ON CONFLICT DO NOTHING
                         """, (ticker,))
                 elif action == "remove":
-                    cur.execute("""
-                        DELETE FROM watchlist
-                        WHERE ticker = ANY(%s)
-                    """, (tickers,))
+                    cur.execute("DELETE FROM watchlist WHERE ticker = ANY(%s)", (tickers,))
                 else:
                     return {"error": f"Unknown action: {action}"}
             conn.commit()
@@ -321,18 +304,18 @@ def modify_watchlist(action: str, tickers: list) -> dict:
 
 def restart_scanner(reason: str) -> dict:
     """
-    Signal the scanner to restart by writing a restart flag to scanner_control.
-    The scanner loop should check for this flag at the start of each cycle.
+    Signal the scanner to restart by setting restart_requested = TRUE
+    in scanner_control. The scanner checks this at the top of every loop cycle
+    and calls sys.exit(0) which triggers Railway to restart Service 2.
     """
     try:
         with _get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO scanner_control (key, value, updated_at)
-                    VALUES ('restart_requested', %s, NOW())
-                    ON CONFLICT (key) DO UPDATE
-                    SET value = EXCLUDED.value, updated_at = NOW()
-                """, (json.dumps({"reason": reason, "requested_at": datetime.utcnow().isoformat()}),))
+                    UPDATE scanner_control
+                    SET restart_requested = TRUE, updated_at = NOW()
+                    WHERE id = 1
+                """)
             conn.commit()
         return {
             "success": True,
