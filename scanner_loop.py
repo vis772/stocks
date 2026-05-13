@@ -953,6 +953,12 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                 state.log_alert(f"PRED SELL {ticker} ({score:.0f}pt)")
                 print(f"  [prediction] SELL {ticker} score={score:.0f}")
 
+    try:
+        from reports.checkpoint_reports import check_and_run_checkpoints
+        check_and_run_checkpoints()
+    except Exception as _cp_e:
+        print(f"  [checkpoint] inline check failed: {_cp_e}")
+
 
 # ─── Main loop ────────────────────────────────────────────────────────────────
 

@@ -1678,7 +1678,8 @@ def save_accuracy_report(report_type: str, checkpoint: int, filename: str,
         print(f"  [db] save_accuracy_report failed: {e}")
 
 
-def get_accuracy_reports() -> List[dict]:
+def get_accuracy_reports() -> Optional[List[dict]]:
+    """Returns list of accuracy report records, or None if the DB read fails."""
     try:
         if _is_postgres():
             conn = _get_pg_conn(); cur = conn.cursor()
@@ -1699,7 +1700,7 @@ def get_accuracy_reports() -> List[dict]:
                 for r in rows]
     except Exception as e:
         print(f"  [db] get_accuracy_reports failed: {e}")
-        return []
+        return None
 
 
 # ─── Users & Sessions ──────────────────────────────────────────────────────────

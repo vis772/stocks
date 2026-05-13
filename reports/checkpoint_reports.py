@@ -730,8 +730,10 @@ def generate_checkpoint_60(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
 
 def check_and_run_checkpoints() -> None:
     """
-    Called at EOD. Generates whichever checkpoint reports are newly due
-    based on total signals logged.
+    Called after each prediction scan and at EOD. Generates whichever
+    checkpoint reports are newly due based on total signals logged.
+    Fired checkpoints are persisted to the accuracy_reports DB table so
+    they never re-trigger across scanner restarts.
     """
     try:
         from db.database import get_signal_log, get_accuracy_reports, save_accuracy_report
@@ -747,7 +749,13 @@ def check_and_run_checkpoints() -> None:
     total_signals = len(df)
     print(f"  [checkpoint] {total_signals} total signals logged")
 
-    existing = {r["report_type"] for r in get_accuracy_reports()}
+    # Read which checkpoints have already fired from DB.
+    # If the read fails we bail out rather than risk re-firing all checkpoints.
+    existing_rows = get_accuracy_reports()
+    if existing_rows is None:
+        print("  [checkpoint] Could not read accuracy_reports — skipping to avoid re-trigger")
+        return
+    existing = {r["report_type"] for r in existing_rows}
 
     CHECKPOINTS = [
         (150, "checkpoint_150", generate_checkpoint_15,
