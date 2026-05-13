@@ -268,7 +268,7 @@ async def run_agent(history: list, user_id: int) -> tuple[str, list, dict | None
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
-                "content": json.dumps(result)
+                "content": json.dumps(result, default=str)
             })
 
         if tool_results:
