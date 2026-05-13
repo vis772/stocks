@@ -44,15 +44,13 @@ def _log(level: str, message: str) -> None:
     except Exception:
         pass
 
-# Tiingo IEX real-time stream — module-level singleton, lazily started by
-# _ensure_stream() once the watchlist is known. No-op when TIINGO_API_KEY unset.
 try:
     from data.tiingo_stream import TiingoStream
 except Exception as _tiingo_import_err:
     TiingoStream = None
     print(f"  [tiingo] import failed: {_tiingo_import_err}")
 _stream: Optional["TiingoStream"] = None
-TIINGO_FRESH_MS = 90_000  # REST polls every 60 s; treat data <90 s old as live
+TIINGO_FRESH_MS = 90_000
 
 # ─── Alert thresholds ─────────────────────────────────────────────────────────
 VOLUME_SPIKE_THRESHOLD     = 2.5
@@ -60,22 +58,21 @@ PRICE_MOVE_THRESHOLD       = 5.0
 PRICE_MOVE_10MIN           = 8.0
 GAP_UP_THRESHOLD           = 4.0
 VWAP_EXTENDED_PCT          = 5.0
-PREDICTION_SCAN_INTERVAL   = 1800   # seconds between full-score prediction scans
-PREDICTION_BUY_THRESHOLD   = 65     # score >= this → prediction_buy
-PREDICTION_SELL_THRESHOLD  = 30     # score <= this → prediction_sell
-PREDICTION_TOP_N           = 10     # how many momentum stocks to score each cycle
+PREDICTION_SCAN_INTERVAL   = 1800
+PREDICTION_BUY_THRESHOLD   = 65
+PREDICTION_SELL_THRESHOLD  = 30
+PREDICTION_TOP_N           = 10
 
 # ─── Market hours in ET ───────────────────────────────────────────────────────
-# Railway runs UTC. We convert to ET for all time checks.
 MARKET_OPEN_HOUR    = 9
 MARKET_OPEN_MIN     = 25
 MARKET_CLOSE_HOUR   = 16
 MARKET_CLOSE_MIN    = 30
-PREMARKET_HOUR          = 4         # IEX pre-market opens at 04:00 ET
-MORNING_SCREEN_HOUR     = 6         # Watchlist rebuild kicks off here
+PREMARKET_HOUR          = 4
+MORNING_SCREEN_HOUR     = 6
 SCAN_INTERVAL_SEC       = 60
-PREMARKET_SCAN_INTERVAL = 90        # Slower cadence — thinner pre-market book
-PREMARKET_SEC_INTERVAL  = 300       # SEC EDGAR poll every 5 min pre-market
+PREMARKET_SCAN_INTERVAL = 90
+PREMARKET_SEC_INTERVAL  = 300
 AFTERHOURS_INTERVAL     = 300
 
 
@@ -85,8 +82,6 @@ def now_et():
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo("America/New_York"))
     except ImportError:
-        # Fallback: UTC-5 (EST) or UTC-4 (EDT)
-        # Simple DST approximation: EDT March-Nov, EST otherwise
         utc_now = datetime.utcnow()
         month = utc_now.month
         offset = -4 if 3 <= month <= 11 else -5
@@ -98,21 +93,24 @@ def now_et():
 def check_restart_flag() -> bool:
     """
     Check if a restart was requested via the Telegram bot.
-    The bot writes a 'restart_requested' key to scanner_control.
-    If found, we delete it and return True — caller should sys.exit(0)
-    so Railway restarts the service automatically.
+    The bot sets restart_requested = TRUE in scanner_control (id=1).
+    If found, we clear it and return True — caller does sys.exit(0)
+    so Railway auto-restarts Service 2.
     """
     try:
         from db.database import _get_pg_conn
         conn = _get_pg_conn()
         with conn.cursor() as cur:
-            cur.execute("SELECT value FROM scanner_control WHERE key = 'restart_requested'")
+            cur.execute("SELECT restart_requested FROM scanner_control WHERE id = 1")
             row = cur.fetchone()
-            if row:
-                cur.execute("DELETE FROM scanner_control WHERE key = 'restart_requested'")
+            if row and row[0]:
+                cur.execute(
+                    "UPDATE scanner_control SET restart_requested = FALSE, updated_at = NOW() WHERE id = 1"
+                )
                 conn.commit()
                 print("[restart] Restart flag detected — exiting for Railway restart")
                 _log("warning", "Restart requested via Telegram bot — restarting service")
+                conn.close()
                 return True
         conn.close()
     except Exception as e:
@@ -151,16 +149,13 @@ class ScannerState:
         self.scan_count:      int = 0
         self.last_sec_check:  datetime = now_et() - timedelta(hours=3)
         self.known_filings:   Set[str] = set()
-        # VWAP accumulators — reset each regular session (9:30 ET)
         self.vwap_cum_tp_vol:   Dict[str, float] = {}
         self.vwap_cum_vol:      Dict[str, float] = {}
         self.above_vwap:        Dict[str, Optional[bool]] = {}
         self.vwap_values:       Dict[str, float] = {}
         self.vwap_session_date: str = ""
-        # Intraday metrics for momentum ranking
         self.last_change_pct:   Dict[str, float] = {}
         self.last_rvol:         Dict[str, float] = {}
-        # Intraday key levels — reset each session day
         self.session_high:      Dict[str, float] = {}
         self.session_low:       Dict[str, float] = {}
         self.premarket_high:    Dict[str, float] = {}
@@ -189,7 +184,6 @@ class ScannerState:
     def save(self):
         try:
             from db.database import save_scanner_state
-            # Build VWAP snapshot from in-memory state
             vwap_snap = {}
             for ticker, vwap in self.vwap_values.items():
                 price    = self.last_prices.get(ticker, 0)
@@ -218,7 +212,6 @@ class ScannerState:
         except Exception as e:
             print(f"  [state] Save failed: {e}")
 
-    # Cached momentum ranking so save() can include it without recomputing
     _momentum_ranking_cache: list = []
 
     def already_alerted(self, key: str) -> bool:
@@ -241,15 +234,12 @@ class ScannerState:
         self.alert_log.append(full_msg)
         if len(self.alert_log) > 100:
             self.alert_log = self.alert_log[-100:]
-        # Save to shared DB so dashboard can read it
         try:
             from db.database import save_alert
-            # Extract ticker from message if present
             ticker = msg.split(" ")[1] if len(msg.split(" ")) > 1 else ""
             save_alert(msg, ticker=ticker)
         except Exception:
             pass
-        # Also write local JSON as fallback
         try:
             with open("alert_log.json", "w") as f:
                 import json as _json
@@ -271,7 +261,6 @@ def is_market_hours() -> bool:
 
 
 def is_premarket() -> bool:
-    """Pre-market window: [04:00, 09:25) ET on weekdays."""
     et = now_et()
     if et.weekday() >= 5:
         return False
@@ -291,7 +280,6 @@ def is_morning_screen_time() -> bool:
 
 
 def get_scan_mode() -> str:
-    """Return one of MARKET / PREMARKET / AFTERHOURS / OVERNIGHT / WEEKEND."""
     et = now_et()
     if et.weekday() >= 5:
         return "WEEKEND"
@@ -310,7 +298,6 @@ def get_scan_mode() -> str:
 # ─── Claude News Analysis ─────────────────────────────────────────────────────
 
 def analyze_news_with_claude(ticker: str, headline: str, summary: str = "") -> dict:
-    """Use Claude Haiku to analyze news for sentiment, context, and alert worthiness."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return _keyword_sentiment(headline)
@@ -370,7 +357,6 @@ def format_news_alert(ticker: str, headline: str, analysis: dict, price: float) 
 # ─── Tiingo stream lifecycle ──────────────────────────────────────────────────
 
 def _stream_subscription_set(watchlist: List[str]) -> List[str]:
-    """Compose the union of watchlist + DEFAULT_UNIVERSE + portfolio tickers."""
     from config import DEFAULT_UNIVERSE
     tickers = set(t.upper() for t in watchlist if t)
     tickers.update(DEFAULT_UNIVERSE)
@@ -385,11 +371,6 @@ def _stream_subscription_set(watchlist: List[str]) -> List[str]:
 
 
 def _ensure_stream(watchlist: List[str]) -> None:
-    """Lazily start the Tiingo WebSocket (no-op if token missing or lib unavailable).
-
-    Called whenever the watchlist changes (morning rebuild, fallback load).
-    Diff-subscribes against current state, so it's safe to call repeatedly.
-    """
     global _stream
     if TiingoStream is None:
         return
@@ -413,23 +394,10 @@ def _ensure_stream(watchlist: List[str]) -> None:
 
 # ─── Intraday levels ──────────────────────────────────────────────────────────
 
-def _check_level_breaks(
-    ticker: str,
-    price: float,
-    change_pct: float,
-    state: ScannerState,
-    et,
-) -> List[str]:
-    """
-    Track session high/low and pre-market high/low.
-    Alert once per hour when price breaks above session high or below session low.
-    Alert once per day when price breaks the pre-market high.
-    Returns list of fired alert messages.
-    """
+def _check_level_breaks(ticker, price, change_pct, state, et) -> List[str]:
     fired = []
     today = et.strftime("%Y-%m-%d")
 
-    # Reset level state on new session day
     if state.level_session_date != today:
         state.session_high      = {}
         state.session_low       = {}
@@ -450,7 +418,6 @@ def _check_level_breaks(
     sess_high = state.session_high.get(ticker, 0.0)
     sess_low  = state.session_low.get(ticker, float("inf"))
 
-    # ── Break above session high ───────────────────────────────────────────────
     if sess_high > 0 and price > sess_high:
         key = f"{ticker}_sess_high_{et.strftime('%Y-%m-%d-%H')}"
         if not state.already_alerted(key):
@@ -460,7 +427,6 @@ def _check_level_breaks(
             state.log_alert(msg)
             fired.append(msg)
 
-    # ── Break below session low ────────────────────────────────────────────────
     if sess_low < float("inf") and price < sess_low:
         key = f"{ticker}_sess_low_{et.strftime('%Y-%m-%d-%H')}"
         if not state.already_alerted(key):
@@ -470,7 +436,6 @@ def _check_level_breaks(
             state.log_alert(msg)
             fired.append(msg)
 
-    # ── Break above pre-market high (once per day) ────────────────────────────
     pm_high = state.premarket_high.get(ticker, 0.0)
     if pm_high > 0 and price > pm_high:
         key = f"{ticker}_pm_high_{today}"
@@ -481,7 +446,6 @@ def _check_level_breaks(
             state.log_alert(msg)
             fired.append(msg)
 
-    # Update levels after checks so comparisons above see the old extremes
     state.session_high[ticker] = max(sess_high, price)
     state.session_low[ticker]  = min(sess_low, price) if sess_low < float("inf") else price
 
@@ -491,10 +455,6 @@ def _check_level_breaks(
 # ─── Momentum ranking ─────────────────────────────────────────────────────────
 
 def _build_momentum_ranking(watchlist: List[str], state: ScannerState) -> List[dict]:
-    """
-    Rank watchlist tickers by intraday momentum: RVOL + price change + VWAP position.
-    Returns list sorted best-first. Updates state._momentum_ranking_cache in place.
-    """
     rows = []
     for ticker in watchlist:
         change = state.last_change_pct.get(ticker, 0)
@@ -504,11 +464,8 @@ def _build_momentum_ranking(watchlist: List[str], state: ScannerState) -> List[d
         vwap   = state.vwap_values.get(ticker, 0)
         dist   = round((price - vwap) / vwap * 100, 2) if vwap > 0 and price > 0 else 0
 
-        # RVOL: 35 pts max at 5× relative volume
         rvol_pts   = min(max(rvol - 1.0, 0) / 4.0 * 35, 35)
-        # Price change: 40 pts for +10% day; penalise losers at half rate
         change_pts = max(min(change / 10.0 * 40, 40), change / 10.0 * 20)
-        # VWAP: 25 pts for being above
         vwap_pts   = 25 if above else 0
 
         score = round(max(0, min(100, rvol_pts + change_pts + vwap_pts)), 1)
@@ -529,23 +486,7 @@ def _build_momentum_ranking(watchlist: List[str], state: ScannerState) -> List[d
 
 # ─── VWAP ─────────────────────────────────────────────────────────────────────
 
-def _update_vwap(
-    ticker: str,
-    price: float,
-    volume: float,
-    high: float,
-    low: float,
-    last_vol: float,
-    state: ScannerState,
-) -> Optional[float]:
-    """
-    Accumulate intraday VWAP using Finnhub cumulative volume.
-
-    Typical price = (H + L + close) / 3.  Delta volume is the incremental
-    shares traded since the last scan.  Resets at the start of each regular
-    session (9:30 AM ET).  Returns the current VWAP or None when there is
-    insufficient data yet.
-    """
+def _update_vwap(ticker, price, volume, high, low, last_vol, state) -> Optional[float]:
     today = now_et().strftime("%Y-%m-%d")
     if state.vwap_session_date != today:
         state.vwap_cum_tp_vol   = {}
@@ -569,21 +510,12 @@ def _update_vwap(
     return vwap
 
 
-def _check_vwap_alerts(
-    ticker: str,
-    price: float,
-    vwap: float,
-    change_pct: float,
-    state: ScannerState,
-    et,
-) -> List[str]:
-    """Fire alerts for VWAP crosses and overextended moves. Returns fired msgs."""
+def _check_vwap_alerts(ticker, price, vwap, change_pct, state, et) -> List[str]:
     fired     = []
-    was_above = state.above_vwap.get(ticker)   # None on first observation
+    was_above = state.above_vwap.get(ticker)
     is_above  = price >= vwap
     state.above_vwap[ticker] = is_above
 
-    # Cross events — requires a prior observation to avoid spurious first-tick alert
     if was_above is not None and was_above != is_above:
         key = f"{ticker}_vwap_cross_{et.strftime('%Y-%m-%d-%H')}_{et.minute // 5}"
         if not state.already_alerted(key):
@@ -593,7 +525,6 @@ def _check_vwap_alerts(
             msg   = f"{ticker} crossed {direction} VWAP ${vwap:.4f}"
             state.log_alert(msg)
             fired.append(msg)
-            # Log paper trade on VWAP reclaim (bullish cross only)
             if is_above:
                 try:
                     from db.database import log_paper_trade
@@ -604,7 +535,6 @@ def _check_vwap_alerts(
                 except Exception:
                     pass
 
-    # Extended above VWAP — once per hour
     if is_above and vwap > 0:
         ext_pct = (price - vwap) / vwap * 100
         if ext_pct >= VWAP_EXTENDED_PCT:
@@ -624,8 +554,6 @@ def _check_vwap_alerts(
 def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
     fired = []
     try:
-        # Finnhub REST quote is still required for cumulative day volume (.v)
-        # and previous close (.pc) — Tiingo IEX doesn't ship those per tick.
         quote = _fh_get("quote", {"symbol": ticker})
         if not quote or not quote.get("c") or quote["c"] <= 0:
             return fired
@@ -635,7 +563,6 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
         high       = quote.get("h") or quote["c"]
         low        = quote.get("l") or quote["c"]
 
-        # Prefer the Tiingo last-tick if it's fresh; else fall back to Finnhub.
         price = quote["c"]
         if _stream is not None:
             try:
@@ -653,27 +580,22 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
         et         = now_et()
         last_vol   = state.last_volumes.get(ticker, 0)
 
-        # ── VWAP (regular session only) ───────────────────────────────────────
         if is_market_hours():
             vwap = _update_vwap(ticker, price, volume, high, low, last_vol, state)
             if vwap is not None:
                 fired.extend(_check_vwap_alerts(ticker, price, vwap, change_pct, state, et))
 
-        # ── Intraday key levels ───────────────────────────────────────────────
         fired.extend(_check_level_breaks(ticker, price, change_pct, state, et))
 
-        # Record per-ticker intraday metrics for momentum ranking
         state.last_change_pct[ticker] = change_pct
 
-        # ── Volume spike ──────────────────────────────────────────────────────
         if last_vol > 0 and volume > 0:
             minutes_into_day = max(1, (et.hour - 9) * 60 + et.minute - 30)
             expected_pct = min(minutes_into_day / 390, 1.0)
             if expected_pct > 0.05:
                 rvol = (volume / expected_pct) / max(last_vol / 0.5, 1)
-                state.last_rvol[ticker] = rvol      # keep for momentum ranking
+                state.last_rvol[ticker] = rvol
                 if rvol > VOLUME_SPIKE_THRESHOLD:
-                    # Key uses hour only — one alert per hour max
                     key = f"{ticker}_volume_{et.strftime('%Y-%m-%d-%H')}"
                     if not state.already_alerted(key):
                         alert_volume_spike(ticker, rvol, price, change_pct)
@@ -683,12 +605,10 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                         fired.append(msg)
         state.last_volumes[ticker] = volume
 
-        # ── Price move since last scan ─────────────────────────────────────────
         last_price = state.last_prices.get(ticker)
         if last_price and last_price > 0:
             move_pct = (price - last_price) / last_price * 100
             if abs(move_pct) >= PRICE_MOVE_THRESHOLD:
-                # Key uses 5-minute window — prevents spam within same 5 min
                 key = f"{ticker}_price_{et.strftime('%Y-%m-%d-%H')}_{et.minute // 5}"
                 if not state.already_alerted(key):
                     alert_price_move(ticker, price, move_pct, "1min")
@@ -697,12 +617,10 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                     state.log_alert(msg)
                     fired.append(msg)
 
-        # ── 10-minute price move ───────────────────────────────────────────────
         price_10min = state.price_at_10min.get(ticker)
         if price_10min and price_10min > 0:
             move_10min = (price - price_10min) / price_10min * 100
             if abs(move_10min) >= PRICE_MOVE_10MIN:
-                # Key uses 10-minute window — prevents spam
                 key = f"{ticker}_10min_{et.strftime('%Y-%m-%d-%H')}_{et.minute // 10}"
                 if not state.already_alerted(key):
                     alert_price_move(ticker, price, move_10min, "10min")
@@ -715,7 +633,6 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
         if state.scan_count % 10 == 0:
             state.price_at_10min[ticker] = price
 
-        # ── Gap check (once per day) ───────────────────────────────────────────
         gap_key = f"{ticker}_gap_{et.strftime('%Y-%m-%d')}"
         if not state.already_alerted(gap_key):
             if change_pct >= GAP_UP_THRESHOLD:
@@ -728,7 +645,6 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 state.mark_alerted(gap_key)
                 state.log_alert(f"{ticker} gap-up {change_pct:+.1f}%")
                 fired.append(f"{ticker} gap-up {change_pct:+.1f}%")
-                # Log paper trade: entry at current price, stop -7%, targets +10% / +20%
                 try:
                     from db.database import log_paper_trade, log_signal
                     log_paper_trade(ticker, "gap_up", price,
@@ -759,7 +675,6 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 )
                 state.mark_alerted(gap_key)
 
-        # ── News check ────────────────────────────────────────────────────────
         today     = et.strftime("%Y-%m-%d")
         yesterday = (et - timedelta(days=1)).strftime("%Y-%m-%d")
         news      = _fh_get("company-news", {"symbol": ticker, "from": yesterday, "to": today})
@@ -835,7 +750,7 @@ def check_sec_filings(watchlist: List[str], state: ScannerState):
         print(f"  [scanner] SEC check failed: {e}")
 
 
-# ─── Fast News Monitor — Top 10 stocks, 4x per minute ────────────────────────
+# ─── Fast News Monitor ────────────────────────────────────────────────────────
 
 def run_news_monitor(watchlist: List[str], state: ScannerState):
     def news_loop():
@@ -902,12 +817,6 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
 # ─── Prediction scan ──────────────────────────────────────────────────────────
 
 def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode: str = "MARKET") -> None:
-    """
-    Run full scan_ticker() on the top-N momentum stocks every 30 minutes.
-    Logs prediction_buy (score >= PREDICTION_BUY_THRESHOLD) and
-    prediction_sell (score <= PREDICTION_SELL_THRESHOLD) as paper trades.
-    Uses ThreadPoolExecutor to avoid blocking the main loop.
-    """
     from core.scanner import scan_ticker
     from db.database import log_paper_trade
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -942,7 +851,6 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
 
             signal_label = result.get("signal", "Hold")
 
-            # Deduplication: suppress if same ticker+signal fired within last 5 min
             try:
                 from db.database import should_suppress
                 if should_suppress(ticker, signal_label, window_minutes=5):
@@ -952,7 +860,6 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
             except Exception:
                 pass
 
-            # Quant adjustment block (must complete in <500ms or is skipped)
             quant_adj    = 0.0
             atr_14       = 0.0
             rsi_quant    = None
@@ -961,15 +868,13 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
             if _QUANT_AVAILABLE:
                 try:
                     quant_adj, atr_14, rsi_quant, sigma_hist = run_quant_for_ticker(ticker, result)
-                    # Apply quant adjustment to final score (additive, capped 0-100)
                     adj_score = round(float(max(0, min(100, score + quant_adj))), 1)
                     print(f"  [quant] {ticker} base={score:.0f} adj={quant_adj:+.1f} final={adj_score:.0f}")
                     score = adj_score
-                    signal_label = result.get("signal", "Hold")  # re-evaluate after adjustment
+                    signal_label = result.get("signal", "Hold")
                 except Exception as _qerr:
                     print(f"  [quant] {ticker} error: {_qerr}")
 
-            # Signal quality tag
             _rvol = state.last_rvol.get(ticker, 1.0)
             _qt_adj = float(quant_adj) if quant_adj else 0.0
             if score >= 75 and _qt_adj >= 5 and _rvol >= 2.0:
@@ -979,7 +884,6 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
             else:
                 quality_tag = "LOW"
 
-            # Log every signal regardless of score — full data for accuracy test
             try:
                 from db.database import log_signal
                 breakdown = {
@@ -1015,14 +919,12 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
             except Exception as _e:
                 print(f"  [signal_log] FAILED for {ticker}: {_e}")
 
-            # Paper trades only for threshold crossings
             if score >= PREDICTION_BUY_THRESHOLD:
                 stop_ = result.get("stop_loss")  or round(price * 0.93, 4)
                 t1    = result.get("target_1")   or round(price * 1.10, 4)
                 t2    = result.get("target_2")   or round(price * 1.20, 4)
                 log_paper_trade(ticker, "prediction_buy", price, stop_, t1, t2,
                                 source_type="prediction_buy", score_at_entry=round(score, 1))
-                # Submit to paper broker so positions appear in dashboard/mobile
                 try:
                     from paper_broker import get_broker
                     get_broker().submit_order(
@@ -1061,7 +963,6 @@ def run_scanner():
     print(f"Time: {now_et().strftime('%Y-%m-%d %H:%M:%S ET')}")
     print("="*60 + "\n")
 
-    # Initialize DB — creates all tables including new ones from this version
     try:
         from db.database import initialize_db
         initialize_db()
@@ -1077,7 +978,6 @@ def run_scanner():
     except Exception as _av_e:
         print(f"  [startup] AccuracyValidator startup grade failed: {_av_e}")
 
-    # ── Startup status ────────────────────────────────────────────────────────
     _et_start = now_et()
     _test_scan_mode = os.environ.get("AXIOM_TEST_SCAN", "").strip() == "1"
     print(f"  [startup] test_scan_mode={_test_scan_mode}  weekday={_et_start.weekday()}")
@@ -1103,14 +1003,13 @@ def run_scanner():
     except Exception as _e:
         print(f"  [scanner] outcome tracker failed to start: {_e}")
 
-    # Record start time in control table; clear any stale force_scan flag
     try:
         from db.database import set_scanner_control
         set_scanner_control(force_scan=False, scanner_started_at=now_et().isoformat())
     except Exception as _ctrl_start_e:
         print(f"  [control] startup init failed: {_ctrl_start_e}")
 
-    # ── Test scan mode: one full cycle regardless of day/market hours ─────────
+    # ── Test scan mode ────────────────────────────────────────────────────────
     if _test_scan_mode:
         print("\n[TEST MODE] Bypassing market-hours guardrail — running one scan cycle")
         try:
@@ -1164,7 +1063,7 @@ def run_scanner():
 
     while True:
         try:
-            # ── Telegram bot restart flag check ──────────────────────────────
+            # ── Telegram bot restart flag ─────────────────────────────────────
             if check_restart_flag():
                 import sys
                 sys.exit(0)
@@ -1173,7 +1072,6 @@ def run_scanner():
             today_str = et.strftime("%Y-%m-%d")
             mode      = get_scan_mode()
 
-            # ── Mode transition: Pushover alert + DB write ────────────────────
             if mode != _last_mode:
                 print(f"\n[MODE] {_last_mode or 'STARTUP'} → {mode} at {et.strftime('%H:%M ET')}")
                 _log("info", f"Mode transition: {_last_mode or 'STARTUP'} → {mode}")
@@ -1182,7 +1080,7 @@ def run_scanner():
                     set_scanner_control(current_mode=mode)
                 except Exception:
                     pass
-                if _last_mode is not None:  # skip the very first iteration
+                if _last_mode is not None:
                     send_alert(
                         title=f"Axiom — {_MODE_LABELS.get(mode, mode)}",
                         message=_MODE_DESC.get(mode, mode),
@@ -1190,7 +1088,6 @@ def run_scanner():
                     )
                 _last_mode = mode
 
-            # ── Control flags: pause / force-scan ────────────────────────────
             try:
                 from db.database import get_scanner_control, set_scanner_control
                 _ctrl = get_scanner_control()
@@ -1225,7 +1122,7 @@ def run_scanner():
             except Exception as _ctrl_e:
                 print(f"  [control] check failed: {_ctrl_e}")
 
-            # ── WEEKEND mode ──────────────────────────────────────────────────
+            # ── WEEKEND ───────────────────────────────────────────────────────
             if mode == "WEEKEND":
                 print(f"  [WEEKEND {et.strftime('%H:%M ET')}] Grading signals / checking universe...")
                 try:
@@ -1233,7 +1130,6 @@ def run_scanner():
                     AccuracyValidator().grade_signals()
                 except Exception as _wknd_av:
                     print(f"  [weekend] grade_signals failed: {_wknd_av}")
-                # Saturday 8 AM ET — full universe refresh
                 if et.weekday() == 5 and et.hour == 8 and et.minute < 10:
                     _sat_key = f"universe_refresh_sat_{today_str}"
                     if not state.already_alerted(_sat_key):
@@ -1243,7 +1139,6 @@ def run_scanner():
                             state.mark_alerted(_sat_key)
                         except Exception as _ure:
                             print(f"  [weekend] universe refresh failed: {_ure}")
-                # Sunday 6 PM ET — prep alert
                 if et.weekday() == 6 and et.hour == 18 and et.minute < 10:
                     _sun_key = f"sunday_prep_{today_str}"
                     if not state.already_alerted(_sun_key):
@@ -1256,8 +1151,7 @@ def run_scanner():
                 time.sleep(_SLEEP_MAP["WEEKEND"])
                 continue
 
-            # ── Common weekday setup ──────────────────────────────────────────
-            # Morning screen at 6 AM ET (once per day)
+            # ── Morning screen at 6 AM ET ─────────────────────────────────────
             if is_morning_screen_time() and last_screen_date != today_str:
                 print("\n[MORNING SCREEN] Building today's watchlist...")
                 watchlist          = build_todays_watchlist(max_stocks=50)
@@ -1267,7 +1161,6 @@ def run_scanner():
                 news_thread        = None
                 _ensure_stream(watchlist)
 
-            # Load watchlist if empty
             if not watchlist:
                 watchlist = load_todays_watchlist()
                 if not watchlist:
@@ -1277,7 +1170,6 @@ def run_scanner():
                 _ensure_stream(watchlist)
             state.universe_size = len(watchlist)
 
-            # Morning brief at 8:30 AM ET
             if et.hour == 8 and et.minute >= 30 and not morning_brief_sent and watchlist:
                 try:
                     with open(WATCHLIST_FILE) as f:
@@ -1291,7 +1183,6 @@ def run_scanner():
                 morning_brief_sent = True
                 state.log_alert(f"Morning brief sent — {len(watchlist)} stocks")
 
-            # Paper broker: update day_start_equity at market open
             if et.hour == 9 and 29 <= et.minute < 35:
                 _open_key = f"broker_open_{today_str}"
                 if not state.already_alerted(_open_key):
@@ -1302,7 +1193,6 @@ def run_scanner():
                     except Exception as _pbo:
                         print(f"  [broker] open-bell update failed: {_pbo}")
 
-            # Reset eod flag + daily counters at midnight ET
             if et.hour == 0 and et.minute < 5:
                 eod_report_sent = False
                 _midnight_key = f"midnight_reset_{today_str}"
@@ -1311,7 +1201,7 @@ def run_scanner():
                     state.mark_alerted(_midnight_key)
                     _log("info", "Daily reset complete — signal counters reset")
 
-            # ── PREMARKET mode ────────────────────────────────────────────────
+            # ── PREMARKET ─────────────────────────────────────────────────────
             if mode == "PREMARKET":
                 state.scan_count += 1
                 print(f"\n[PRE-MARKET #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
@@ -1329,7 +1219,6 @@ def run_scanner():
                             _pre_alerts.extend(future.result())
                         except Exception:
                             pass
-                # Conviction scan 30 min before market open (8:55 AM ET)
                 if et.hour == 8 and 55 <= et.minute <= 59:
                     _preopen_key = f"conviction_preopen_{today_str}"
                     if not state.already_alerted(_preopen_key):
@@ -1341,7 +1230,6 @@ def run_scanner():
                             state.mark_alerted(_preopen_key)
                         except Exception as _cve_pre:
                             print(f"  [conviction] pre-open scan failed: {_cve_pre}")
-
                 try:
                     from paper_broker import get_broker
                     _pb = get_broker()
@@ -1356,7 +1244,7 @@ def run_scanner():
                     print(f"  ✓ No alerts this scan")
                     _log("info", f"Pre-market scan #{state.scan_count} complete — no alerts")
 
-            # ── MARKET mode ───────────────────────────────────────────────────
+            # ── MARKET ────────────────────────────────────────────────────────
             elif mode == "MARKET":
                 state.scan_count += 1
                 print(f"\n[SCAN #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
@@ -1381,21 +1269,18 @@ def run_scanner():
                     print(f"  ✓ No alerts this scan")
                     _log("info", f"Scan #{state.scan_count} complete — no alerts")
                 top_movers = _build_momentum_ranking(watchlist, state)
-                # Save state on every scan (not just every 5th) so status bar stays fresh
                 try:
                     from db.database import get_open_position_count
                     state.open_positions = get_open_position_count()
                 except Exception:
                     pass
                 state.save()
-                # Prediction scan every 30 minutes
                 if (et - state.last_prediction_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
                     print("\n[PREDICTION SCAN] Running 30-min full-score scan...")
                     _log("info", f"Prediction scan started — top {PREDICTION_TOP_N} stocks")
                     run_prediction_scan(watchlist, state, session_mode="MARKET")
                     state.last_prediction_run = et
                     _log("info", "Prediction scan complete")
-                # Conviction list refresh every 30 min during market hours
                 if is_market_hours() and (et - state.last_conviction_live_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
                     try:
                         from conviction_engine import generate_live_conviction_list
@@ -1405,11 +1290,9 @@ def run_scanner():
                     except Exception as _cve_live:
                         print(f"  [conviction] live refresh failed: {_cve_live}")
                     state.last_conviction_live_run = et
-                # 30-min digest
                 if (et - last_digest_time).total_seconds() >= 1800 and state.alert_log:
                     alert_digest(state.alert_log[-10:], top_movers=top_movers[:5])
                     last_digest_time = et
-                # Paper broker: update positions each cycle
                 try:
                     from paper_broker import get_broker
                     _pb = get_broker()
@@ -1418,7 +1301,6 @@ def run_scanner():
                     _pb._snapshot_equity_curve()
                 except Exception as _pbm:
                     print(f"  [broker] market update failed: {_pbm}")
-                # Conviction buy list at 4:00 PM ET
                 if et.hour == 16 and 0 <= et.minute < 5:
                     _close_key = f"conviction_close_{today_str}"
                     if not state.already_alerted(_close_key):
@@ -1428,7 +1310,6 @@ def run_scanner():
                             run_conviction_engine(session="close")
                             state.last_conviction_run_ts = now_et().isoformat()
                             state.mark_alerted(_close_key)
-                            # Wire conviction buys into paper broker
                             try:
                                 from db.database import _get_pg_conn, _is_postgres, _get_sqlite_conn
                                 from paper_broker import get_broker
@@ -1463,14 +1344,12 @@ def run_scanner():
                                     )
                             except Exception as _pb_buy:
                                 print(f"  [broker] conviction buy submit failed: {_pb_buy}")
-                            # Snapshot daily stats at close
                             try:
                                 get_broker().snapshot_daily_stats()
                             except Exception as _pbs:
                                 print(f"  [broker] snapshot_daily_stats failed: {_pbs}")
                         except Exception as _cve:
                             print(f"  [conviction] close scan failed: {_cve}")
-                # EOD report at 4:15 PM ET
                 if et.hour == 16 and 15 <= et.minute < 20 and not eod_report_sent:
                     print("\n[EOD REPORT] Generating end-of-day report...")
                     try:
@@ -1494,12 +1373,11 @@ def run_scanner():
                     except Exception as e:
                         print(f"  [paper] EOD close failed: {e}")
 
-            # ── AFTERHOURS mode ───────────────────────────────────────────────
+            # ── AFTERHOURS ────────────────────────────────────────────────────
             elif mode == "AFTERHOURS":
                 state.scan_count += 1
                 print(f"\n[AH SCAN #{state.scan_count}] {et.strftime('%H:%M:%S ET')} — {len(watchlist)} stocks")
                 _log("info", f"After-hours scan #{state.scan_count} | {et.strftime('%H:%M ET')}")
-                # Fetch AH prices via yfinance prepost=True; alert on >5% move
                 try:
                     import yfinance as yf
                     for _ah_ticker in watchlist[:20]:
@@ -1530,7 +1408,6 @@ def run_scanner():
                             pass
                 except Exception as _yf_ah:
                     print(f"  [AH] yfinance fetch failed: {_yf_ah}")
-                # Paper broker update
                 try:
                     from paper_broker import get_broker
                     _pb3 = get_broker()
@@ -1538,7 +1415,6 @@ def run_scanner():
                     _pb3.update_all_positions()
                 except Exception as _pbah:
                     print(f"  [broker] AH update failed: {_pbah}")
-                # Conviction at 8:30 PM ET
                 if et.hour == 20 and 30 <= et.minute < 35:
                     _ah_key = f"conviction_ah_{today_str}"
                     if not state.already_alerted(_ah_key):
@@ -1550,7 +1426,6 @@ def run_scanner():
                             state.mark_alerted(_ah_key)
                         except Exception as _cve2:
                             print(f"  [conviction] afterhours scan failed: {_cve2}")
-                # Nightly accuracy at 10 PM ET
                 if et.hour == 22 and 0 <= et.minute < 5:
                     _acc_key = f"accuracy_nightly_{today_str}"
                     if not state.already_alerted(_acc_key):
@@ -1563,11 +1438,10 @@ def run_scanner():
                         except Exception as _ave:
                             print(f"  [accuracy] nightly validation failed: {_ave}")
 
-            # ── OVERNIGHT mode ────────────────────────────────────────────────
-            else:  # OVERNIGHT
+            # ── OVERNIGHT ─────────────────────────────────────────────────────
+            else:
                 print(f"  [OVERNIGHT {et.strftime('%H:%M ET')}] Light scan — conviction buys + portfolio")
                 _log("info", f"Overnight scan | {et.strftime('%H:%M ET')}")
-                # SEC EDGAR poll for overnight conviction tickers
                 if (et - state.last_sec_check).total_seconds() >= 300:
                     try:
                         from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
@@ -1587,7 +1461,6 @@ def run_scanner():
                         _overnight_wl = []
                     if _overnight_wl:
                         check_sec_filings(_overnight_wl, state)
-                # Paper broker: maintain positions, no new signals
                 try:
                     from paper_broker import get_broker
                     _pb4 = get_broker()
@@ -1595,7 +1468,6 @@ def run_scanner():
                     _pb4.update_all_positions()
                 except Exception as _pbon:
                     print(f"  [broker] overnight update failed: {_pbon}")
-                # Nightly accuracy at 10 PM ET
                 if et.hour == 22 and 0 <= et.minute < 5:
                     _acc_key2 = f"accuracy_nightly_{today_str}"
                     if not state.already_alerted(_acc_key2):
