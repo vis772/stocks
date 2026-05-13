@@ -55,9 +55,10 @@ class QuantEngine:
     _universe_mom: list = []
     _universe_mu: float = 0.0
     _universe_sigma: float = 1.0
+    _universe_ps: list = []
 
     @classmethod
-    def update_universe_stats(cls, all_tickers: list) -> None:
+    def update_universe_stats(cls, all_tickers: list, scan_results: dict = None) -> None:
         """Compute cross-sectional momentum mean/std across all tickers. Call once per cycle."""
         moms = []
         for t in all_tickers:
@@ -76,6 +77,13 @@ class QuantEngine:
         else:
             cls._universe_mu    = 0.0
             cls._universe_sigma = 1.0
+        cls._universe_ps = []
+        if scan_results:
+            for t in all_tickers:
+                sr = scan_results.get(t, {})
+                ps = sr.get("ps_ratio") or sr.get("priceToSalesTrailing12Months")
+                if ps is not None:
+                    cls._universe_ps.append(_safe(ps))
 
     # ── Momentum block (max +12 pts) ─────────────────────────────────────────
 
