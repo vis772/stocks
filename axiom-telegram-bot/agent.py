@@ -221,7 +221,7 @@ async def run_agent(history: list, user_id: int) -> tuple[str, list, dict | None
     for _ in range(10):  # Max 10 tool calls per turn
         # Async call — doesn't block the event loop
         response = await client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
+            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
             max_tokens=1000,
             system=SYSTEM_PROMPT,
             tools=TOOLS,
