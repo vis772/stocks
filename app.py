@@ -1077,6 +1077,32 @@ with st.sidebar:
     )
     st.markdown('<div class="disc">Research tool · Not financial advice</div>', unsafe_allow_html=True)
 
+    # ── Market Regime Badge ───────────────────────────────────────────────────
+    try:
+        from analysis.regime import get_current_regime, regime_label
+        _regime_data = get_current_regime()
+        _regime      = _regime_data.get("regime", "UNKNOWN")
+        _rlabel, _rcolor, _rsymbol = regime_label(_regime)
+        _r_iwm   = _regime_data.get("iwm_price", 0)
+        _r_vol   = _regime_data.get("volatility_20d", 0)
+        _r_adx   = _regime_data.get("adx_14", 0)
+        st.markdown(
+            f'<div style="margin:8px 4px 4px;padding:8px 12px;border-radius:6px;'
+            f'background:{_rcolor}18;border:1px solid {_rcolor}40;">'
+            f'<div style="display:flex;align-items:center;gap:6px;">'
+            f'<span style="font-size:1.0em;">{_rsymbol}</span>'
+            f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.72em;'
+            f'color:{_rcolor};font-weight:600;letter-spacing:0.05em;">{_rlabel.upper()}</span>'
+            f'</div>'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.6em;color:#64748b;margin-top:3px;">'
+            f'IWM ${_r_iwm:.2f} · ADX {_r_adx:.0f} · Vol {_r_vol:.1f}%'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
+
     # ── Live Holdings Manager ─────────────────────────────────────────────────
     st.markdown('<div style="padding:0 4px;"><div class="sh" style="margin-top:14px;">Holdings</div></div>', unsafe_allow_html=True)
 
@@ -1603,11 +1629,33 @@ def _live_alerts_feed():
     scan_count   = scanner_state.get("scan_count", 0)
     last_updated = scanner_state.get("last_updated", "—")
     is_running   = scan_count > 0
+    _state_regime = scanner_state.get("current_regime", "")
 
-    col_s1, col_s2, col_s3 = st.columns(3)
+    _univ_count = 0
+    try:
+        from universe_manager import get_universe_size
+        _univ_count = get_universe_size()
+    except Exception:
+        _univ_count = scanner_state.get("universe_size", 0)
+
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
     col_s1.metric("Scanner Status", "RUNNING" if is_running else "WAITING")
     col_s2.metric("Scans Today",    scan_count)
     col_s3.metric("Last Scan",      last_updated[11:16] if len(last_updated) > 11 else "—")
+    col_s4.metric("Universe",       f"{_univ_count:,}" if _univ_count else "—")
+
+    if _state_regime:
+        try:
+            from analysis.regime import regime_label as _rl
+            _sl, _sc, _ss = _rl(_state_regime)
+            st.markdown(
+                f'<div style="display:inline-block;margin:4px 0 0;padding:3px 10px;border-radius:4px;'
+                f'background:{_sc}15;border:1px solid {_sc}30;font-family:\'JetBrains Mono\',monospace;'
+                f'font-size:0.7em;color:{_sc};font-weight:600;">{_ss} REGIME: {_sl.upper()}</div>',
+                unsafe_allow_html=True,
+            )
+        except Exception:
+            pass
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
@@ -1693,6 +1741,33 @@ def _live_alerts_feed():
         wl_stats   = wl_data.get("stats", {})
 
         st.markdown('<div class="sh">Today\'s Dynamic Watchlist</div>', unsafe_allow_html=True)
+
+        # Regime + universe size header badges
+        _wl_regime   = wl_stats.get("regime", "")
+        _wl_univ     = wl_stats.get("universe_size", 0)
+        _wl_scored   = wl_stats.get("factor_scored", 0)
+        _wl_mr_count = len(wl_stats.get("mean_rev_setups", []))
+        if _wl_regime or _wl_univ:
+            try:
+                from analysis.regime import regime_label as _rlb
+                _wlrl, _wlrc, _wlrs = _rlb(_wl_regime) if _wl_regime else ("—", "#94a3b8", "—")
+            except Exception:
+                _wlrl, _wlrc, _wlrs = "—", "#94a3b8", "—"
+            st.markdown(
+                f'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">'
+                f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.68em;padding:2px 8px;'
+                f'border-radius:4px;background:{_wlrc}15;color:{_wlrc};border:1px solid {_wlrc}30;">'
+                f'{_wlrs} {_wlrl}</span>'
+                + (f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.68em;padding:2px 8px;'
+                   f'border-radius:4px;background:#1d6fa515;color:#1d6fa5;border:1px solid #1d6fa530;">'
+                   f'{_wl_univ:,} universe · {_wl_scored} factor-scored</span>' if _wl_univ else '')
+                + (f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.68em;padding:2px 8px;'
+                   f'border-radius:4px;background:#c2610f15;color:#c2610f;border:1px solid #c2610f30;">'
+                   f'↔ {_wl_mr_count} mean-rev setup{"s" if _wl_mr_count != 1 else ""}</span>' if _wl_mr_count else '')
+                + f'</div>',
+                unsafe_allow_html=True
+            )
+
         st.markdown(
             f'<div style="background:rgba(29,111,165,0.04);border:1px solid rgba(29,111,165,0.15);'
             f'border-radius:8px;padding:12px 16px;font-family:\'JetBrains Mono\',monospace;font-size:0.78em;color:#334155;">'
@@ -1711,6 +1786,30 @@ def _live_alerts_feed():
                 f'font-family:\'JetBrains Mono\',monospace;">Gap-ups today: {", ".join(gap_ups)}</div>',
                 unsafe_allow_html=True
             )
+
+        # Mean-reversion setups panel
+        _mr_setups = wl_stats.get("mean_rev_setups", [])
+        if _mr_setups:
+            st.markdown(
+                '<div style="margin-top:10px;padding:10px 14px;background:rgba(194,97,15,0.04);'
+                'border:1px solid rgba(194,97,15,0.2);border-radius:8px;">'
+                '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.68em;color:#c2610f;'
+                'font-weight:600;letter-spacing:0.08em;margin-bottom:6px;">↔ MEAN-REVERSION SETUPS</div>',
+                unsafe_allow_html=True
+            )
+            _mr_cols = st.columns(min(len(_mr_setups), 5))
+            for _mrc, _mrt in zip(_mr_cols, _mr_setups[:5]):
+                _mrt_ticker = _mrt if isinstance(_mrt, str) else _mrt.get("ticker", str(_mrt))
+                _mrt_score  = _mrt.get("composite", 0) if isinstance(_mrt, dict) else 0
+                _mrt_z      = _mrt.get("z_sma20", 0) if isinstance(_mrt, dict) else 0
+                _mrc.markdown(
+                    f'<div style="text-align:center;font-family:\'JetBrains Mono\',monospace;">'
+                    f'<div style="font-size:0.85em;color:#1d6fa5;font-weight:600;">{_mrt_ticker}</div>'
+                    + (f'<div style="font-size:0.65em;color:#c2610f;">{_mrt_score:.0f}pt · z{_mrt_z:+.1f}</div>' if _mrt_score else '')
+                    + '</div>',
+                    unsafe_allow_html=True
+                )
+            st.markdown('</div>', unsafe_allow_html=True)
 
     except FileNotFoundError:
         st.info("No watchlist generated yet. The scanner builds today's watchlist at 6 AM ET, or you can trigger it manually.")
@@ -2432,6 +2531,101 @@ with tab6:
                 xaxis=dict(showgrid=False),
             )
             st.plotly_chart(fig_corr, use_container_width=True)
+
+        # ── Factor IC Table ───────────────────────────────────────────────────
+        try:
+            from db.database import get_ic_table
+            _ic_rows = get_ic_table()
+            if _ic_rows:
+                st.markdown('<div class="sh" style="margin-top:18px;">Factor Information Coefficients (IC)</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div style="font-size:0.72em;color:#64748b;font-family:\'JetBrains Mono\',monospace;margin-bottom:8px;">'
+                    'IC = Pearson correlation of factor z-score vs actual 5-day return. Higher |IC| = more predictive. '
+                    'Positive = factor predicts direction correctly.</div>',
+                    unsafe_allow_html=True
+                )
+                _ic_html = (
+                    '<div style="background:var(--bgcard);border:1px solid var(--border);border-radius:8px;padding:10px 16px;">'
+                    '<div class="stat-row" style="margin-bottom:4px;">'
+                    '<span class="slbl" style="width:130px;">Factor</span>'
+                    '<span class="slbl" style="width:80px;text-align:right;">Avg IC</span>'
+                    '<span class="slbl" style="width:80px;text-align:right;">Last IC</span>'
+                    '<span class="slbl" style="width:60px;text-align:right;">n</span>'
+                    '<span class="slbl" style="width:130px;text-align:right;">Updated</span>'
+                    '</div>'
+                )
+                for _ir in _ic_rows[:20]:
+                    _ic_v  = _ir.get("ic_value") or 0
+                    _ic_c  = "#16a34a" if _ic_v > 0.05 else "#dc2626" if _ic_v < -0.05 else "#94a3b8"
+                    _ic_ts = str(_ir.get("calc_date", ""))[:10]
+                    _ic_html += (
+                        f'<div class="stat-row">'
+                        f'<span class="sval b" style="width:130px;">{_ir.get("factor_name","")}</span>'
+                        f'<span class="sval" style="width:80px;text-align:right;color:{_ic_c};font-weight:600;">{_ic_v:+.3f}</span>'
+                        f'<span class="sval" style="width:80px;text-align:right;">{_ir.get("sample_size","")}</span>'
+                        f'<span class="sval" style="width:60px;text-align:right;color:#94a3b8;">{_ir.get("sample_size","")}</span>'
+                        f'<span class="slbl" style="width:130px;text-align:right;">{_ic_ts}</span>'
+                        f'</div>'
+                    )
+                _ic_html += '</div>'
+                st.markdown(_ic_html, unsafe_allow_html=True)
+
+                # Factor decay chart: IC by horizon
+                try:
+                    from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+                    if _is_postgres():
+                        _dc = _get_pg_conn().cursor()
+                        _dc.execute("""
+                            SELECT factor_name, horizon_days, AVG(ic_value) as avg_ic
+                            FROM factor_ic_history
+                            WHERE calc_date >= CURRENT_DATE - 30
+                            GROUP BY factor_name, horizon_days
+                            ORDER BY factor_name, horizon_days
+                        """)
+                        _decay_rows = _dc.fetchall()
+                        _dc.connection.close()
+                    else:
+                        _dc = _get_sqlite_conn()
+                        _decay_rows = _dc.execute("""
+                            SELECT factor_name, horizon_days, AVG(ic_value)
+                            FROM factor_ic_history
+                            WHERE calc_date >= date('now', '-30 days')
+                            GROUP BY factor_name, horizon_days
+                            ORDER BY factor_name, horizon_days
+                        """).fetchall()
+                        _dc.close()
+
+                    if _decay_rows:
+                        _decay_df = pd.DataFrame(_decay_rows, columns=["factor", "horizon", "avg_ic"])
+                        _top_factors = (
+                            _decay_df.groupby("factor")["avg_ic"]
+                            .apply(lambda x: abs(x).mean())
+                            .nlargest(8).index.tolist()
+                        )
+                        _decay_filt = _decay_df[_decay_df["factor"].isin(_top_factors)]
+
+                        st.markdown('<div class="sh" style="margin-top:18px;">Factor Decay (IC by Holding Period)</div>', unsafe_allow_html=True)
+                        _fig_decay = go.Figure()
+                        for _fn in _top_factors:
+                            _fd = _decay_filt[_decay_filt["factor"] == _fn].sort_values("horizon")
+                            _fig_decay.add_trace(go.Scatter(
+                                x=_fd["horizon"], y=_fd["avg_ic"],
+                                mode="lines+markers", name=_fn,
+                                line=dict(width=2),
+                            ))
+                        _fig_decay.update_layout(
+                            height=320, margin=dict(l=0, r=0, t=20, b=0),
+                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            font=dict(family="JetBrains Mono", size=11, color="#334155"),
+                            xaxis=dict(title="Holding Period (days)", tickvals=[1, 3, 5, 10], showgrid=False),
+                            yaxis=dict(title="Avg IC", zeroline=True, zerolinecolor="#dde1ec"),
+                            legend=dict(font=dict(size=10)),
+                        )
+                        st.plotly_chart(_fig_decay, use_container_width=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # ── Recent signal log with outcomes ───────────────────────────────────
         st.markdown('<div class="sh">Recent Signals (30 days)</div>', unsafe_allow_html=True)

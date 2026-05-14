@@ -168,121 +168,247 @@ def screen_for_sec_filings(tickers: List[str]) -> Dict[str, int]:
 
 def build_todays_watchlist(max_stocks: int = 50) -> List[str]:
     """
-    Main function — scans the universe and returns today's active watchlist.
+    Build today's dynamic watchlist from the full 2000+ small-cap universe.
 
     Process:
-    1. Get all US tickers
-    2. Filter to small/mid-cap range
-    3. Quick screen each for activity
-    4. Add news and SEC filing bonus scores
-    5. Return top N by activity score
+      1. Load universe from DB (stock_universe table, 2000+ tickers)
+      2. Batch pre-screen with Finnhub quotes (activity score: gap + rvol proxy)
+      3. SEC filing bonus for top candidates
+      4. Full multi-factor quant scoring on the top ~150 candidates
+      5. Flag mean-reversion setups (z_sma20 < -2 AND composite > 65)
+      6. Return top max_stocks by composite score
     """
-    print(f"\n{'='*50}")
+    print(f"\n{'='*60}")
     print(f"Axiom Terminal Morning Screen — {datetime.now().strftime('%Y-%m-%d %H:%M ET')}")
-    print(f"{'='*50}")
+    print(f"{'='*60}")
 
-    # Step 1: Get universe
-    all_tickers = get_all_us_tickers()
+    # ── Step 1: Universe ──────────────────────────────────────────────────────
+    try:
+        from universe_manager import get_universe_tickers, get_universe_size
+        all_tickers = get_universe_tickers(limit=3000)
+        universe_size = get_universe_size()
+        print(f"  Universe: {universe_size} cached | using {len(all_tickers)} for screen")
+    except Exception as _ue:
+        print(f"  [screen] universe_manager failed ({_ue}) — falling back to Finnhub symbol list")
+        all_tickers = get_all_us_tickers()
+        universe_size = len(all_tickers)
 
-    # Step 2: Filter to reasonable candidates
-    # Use a pre-filter based on price range to avoid API waste
-    # We'll focus on stocks $0.50-$50 which covers our target universe
-    candidate_tickers = all_tickers[:3000]  # Cap at 3000 for rate limit safety
-    print(f"  Screening {len(candidate_tickers)} candidates...")
-
-    # Step 3: Parallel quick screen
-    # Use 10 threads, each making 1 API call per ticker
-    # Rate limit: 60 calls/min = we pace to 50 calls/min to be safe
-    interesting = []
-    batch_size  = 50   # Process 50 at a time, then pause
-
-    for batch_start in range(0, min(len(candidate_tickers), 1500), batch_size):
-        batch = candidate_tickers[batch_start:batch_start + batch_size]
-
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(quick_screen_ticker, t): t for t in batch}
-            for future in as_completed(futures):
-                result = future.result()
-                if result and result["activity"] > 0:
-                    interesting.append(result)
-
-        # Pace to stay under rate limit
-        time.sleep(1.2)
-
-        if len(interesting) >= max_stocks * 3:
-            break  # Have enough candidates, stop early
-
-    print(f"  Found {len(interesting)} active stocks in initial screen")
-
-    if not interesting:
-        print("  No interesting stocks found — using default universe")
+    if not all_tickers:
         from config import DEFAULT_UNIVERSE
         return DEFAULT_UNIVERSE[:max_stocks]
 
-    # Step 4: Sort by activity score
-    interesting.sort(key=lambda x: x["activity"], reverse=True)
-    top_candidates = [s["ticker"] for s in interesting[:max_stocks * 2]]
-
-    # Step 5: Check SEC filings for top candidates (adds bonus score)
-    print(f"  Checking SEC filings for top {len(top_candidates)} candidates...")
-    filing_counts = screen_for_sec_filings(top_candidates)
-
-    # Add filing bonus to activity scores
-    for s in interesting:
-        if s["ticker"] in filing_counts:
-            s["activity"] += filing_counts[s["ticker"]] * 30
-
-    # Re-sort with filing bonus
-    interesting.sort(key=lambda x: x["activity"], reverse=True)
-
-    # Step 6: Take the top stocks
-    final_watchlist = [s["ticker"] for s in interesting[:max_stocks]]
-
-    # Always include portfolio holdings in watchlist
+    # ── Step 2: Batch pre-screen (Finnhub quotes, ~2 min for 2000 stocks) ────
+    print(f"  Pre-screening {len(all_tickers)} tickers via Finnhub quotes...")
     try:
-        from db.database import get_portfolio
-        portfolio_df = get_portfolio()
-        if not portfolio_df.empty:
-            for ticker in portfolio_df["ticker"].tolist():
-                if ticker not in final_watchlist:
-                    final_watchlist.append(ticker)
+        from quant.factor_engine import batch_pre_screen
+        pre_results = batch_pre_screen(all_tickers, max_workers=25, timeout_per_ticker=3.0)
+    except Exception as _bse:
+        print(f"  [screen] batch_pre_screen failed ({_bse}) — using sequential fallback")
+        pre_results = []
+        for batch_start in range(0, min(len(all_tickers), 2000), 50):
+            batch = all_tickers[batch_start:batch_start + 50]
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(quick_screen_ticker, t): t for t in batch}
+                for future in as_completed(futures):
+                    try:
+                        r = future.result()
+                        if r:
+                            pre_results.append((r["ticker"], r["activity"],
+                                                r["price"], r["change_pct"], 1.0))
+                    except Exception:
+                        pass
+            time.sleep(0.8)
+            if len(pre_results) >= max_stocks * 8:
+                break
+
+    # Convert to dict for fast lookup
+    pre_map = {r[0]: {"price": r[2], "change_pct": r[3], "activity": r[1]}
+               for r in pre_results if r[1] > 0}
+
+    interesting = sorted(pre_map.items(), key=lambda x: x[1]["activity"], reverse=True)
+    top_activity = [t for t, _ in interesting[:max_stocks * 5]]  # top 250
+    print(f"  {len(pre_map)} active stocks | top {len(top_activity)} for deep screen")
+
+    if not top_activity:
+        from config import DEFAULT_UNIVERSE
+        return DEFAULT_UNIVERSE[:max_stocks]
+
+    # ── Step 3: SEC filing bonus ──────────────────────────────────────────────
+    print(f"  Checking SEC filings...")
+    filing_counts = screen_for_sec_filings(top_activity[:200])
+    for t in top_activity:
+        if t in filing_counts:
+            pre_map[t]["activity"] = pre_map[t].get("activity", 0) + filing_counts[t] * 35
+    # Re-sort
+    top_activity = sorted(top_activity, key=lambda t: pre_map.get(t, {}).get("activity", 0), reverse=True)
+
+    # ── Step 4: Full factor scoring on top ~150 candidates ────────────────────
+    factor_top_n = min(150, len(top_activity))
+    factor_candidates = top_activity[:factor_top_n]
+    print(f"  Running multi-factor scoring on top {factor_top_n} candidates...")
+
+    scored_stocks: List[Dict] = []
+    mean_rev_setups: List[Dict] = []
+
+    # Get current regime for factor tilt
+    regime = "NEUTRAL"
+    try:
+        from analysis.regime import get_current_regime
+        regime = get_current_regime().get("regime", "NEUTRAL")
     except Exception:
         pass
 
-    print(f"\n  Today's watchlist ({len(final_watchlist)} stocks):")
-    print(f"  {', '.join(final_watchlist[:20])}{'...' if len(final_watchlist) > 20 else ''}")
+    quant_mode = os.environ.get("AXIOM_QUANT_MODE", "1") == "1"
 
-    # Save watchlist to file for scanner_loop to read
-    with open(WATCHLIST_FILE, "w") as f:
-        json.dump({
-            "date":      datetime.now().strftime("%Y-%m-%d"),
-            "generated": datetime.now().isoformat(),
-            "tickers":   final_watchlist,
-            "stats": {
-                "screened":   len(candidate_tickers),
-                "interesting": len(interesting),
-                "watchlist":  len(final_watchlist),
-                "gap_ups":    [s["ticker"] for s in interesting if s["change_pct"] > 3][:10],
-                "gap_downs":  [s["ticker"] for s in interesting if s["change_pct"] < -3][:10],
-                "new_filings": list(filing_counts.keys())[:10],
+    def _score_one(ticker: str) -> Optional[Dict]:
+        try:
+            act_info = pre_map.get(ticker, {})
+            price = act_info.get("price", 0)
+            if price <= 0:
+                return None
+
+            snapshot = {
+                "price":    price,
+                "news_sentiment_score": 50,
+                "sec_catalyst_score":  float(bool(ticker in filing_counts)),
             }
-        }, f, indent=2)
 
-    # Also save to shared PostgreSQL database so dashboard can read it
+            if quant_mode:
+                import yfinance as yf
+                try:
+                    hist = yf.Ticker(ticker).history(period="1y", auto_adjust=True)
+                except Exception:
+                    hist = pd.DataFrame()
+
+                # Enrich snapshot with fundamentals
+                try:
+                    fi = yf.Ticker(ticker).fast_info
+                    snapshot["gross_margins"]    = None
+                    snapshot["revenue_growth"]   = None
+                    snapshot["current_ratio"]    = None
+                    snapshot["debtToEquity"]     = None
+                    info = yf.Ticker(ticker).info
+                    snapshot["gross_margins"]   = info.get("grossMargins")
+                    snapshot["revenue_growth"]  = info.get("revenueGrowth")
+                    snapshot["current_ratio"]   = info.get("currentRatio")
+                    snapshot["debtToEquity"]    = info.get("debtToEquity")
+                    snapshot["market_cap"]      = info.get("marketCap", 0)
+                    snapshot["avg_volume"]      = info.get("averageVolume", 0)
+                    snapshot["short_percent_float"] = info.get("shortPercentOfFloat")
+                except Exception:
+                    hist = pd.DataFrame() if hist.empty else hist
+
+                from quant.factor_engine import MultiFactorScorer
+                scorer = MultiFactorScorer()
+                result = scorer.score_ticker(
+                    ticker, snapshot, hist if not hist.empty else None,
+                    regime=regime, log_factors=True
+                )
+                composite = result.get("composite_score", 50.0)
+                factor_zs = result.get("factor_z_scores", {})
+            else:
+                # Simple activity-based score fallback
+                act = act_info.get("activity", 0)
+                composite = min(85, 40 + act * 0.8)
+                factor_zs = {}
+
+            chg = act_info.get("change_pct", 0)
+            row = {
+                "ticker":          ticker,
+                "composite_score": composite,
+                "price":           price,
+                "change_pct":      round(chg, 2),
+                "activity":        act_info.get("activity", 0),
+                "has_filing":      ticker in filing_counts,
+                "factor_z_scores": factor_zs,
+                "regime":          regime,
+            }
+
+            # Mean reversion setup: near lower Bollinger Band AND decent composite
+            z_sma20 = factor_zs.get("z_sma20", 0)
+            if z_sma20 < -1.5 and composite > 60:
+                row["mean_rev_setup"] = True
+            return row
+        except Exception as _e:
+            print(f"  [screen] {ticker} scoring error: {_e}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futs = {ex.submit(_score_one, t): t for t in factor_candidates}
+        for fut in as_completed(futs, timeout=300):
+            try:
+                r = fut.result()
+                if r:
+                    scored_stocks.append(r)
+                    if r.get("mean_rev_setup"):
+                        mean_rev_setups.append(r)
+            except Exception:
+                pass
+
+    scored_stocks.sort(key=lambda x: x["composite_score"], reverse=True)
+    mean_rev_setups.sort(key=lambda x: x["composite_score"], reverse=True)
+    print(f"  Scored {len(scored_stocks)} stocks | {len(mean_rev_setups)} mean-reversion setups")
+
+    # ── Step 5: Final watchlist ───────────────────────────────────────────────
+    # Top by composite + mean reversion setups + portfolio holdings
+    top_by_score = [s["ticker"] for s in scored_stocks[:max_stocks]]
+    # Add mean reversion setups (up to 5)
+    for s in mean_rev_setups[:5]:
+        if s["ticker"] not in top_by_score:
+            top_by_score.append(s["ticker"])
+    # Add portfolio holdings
+    try:
+        from db.database import get_portfolio
+        pf = get_portfolio()
+        if not pf.empty:
+            for t in pf["ticker"].tolist():
+                if t not in top_by_score:
+                    top_by_score.append(t)
+    except Exception:
+        pass
+
+    final_watchlist = top_by_score[:max_stocks + 10]
+    print(f"\n  Today's watchlist: {len(final_watchlist)} stocks | regime: {regime}")
+    print(f"  Top: {', '.join(final_watchlist[:12])}...")
+    if mean_rev_setups:
+        print(f"  Mean-Rev setups: {', '.join(s['ticker'] for s in mean_rev_setups[:5])}")
+
+    # ── Step 6: Persist ───────────────────────────────────────────────────────
+    gap_ups   = [s["ticker"] for s in scored_stocks if s["change_pct"] > 3][:10]
+    gap_downs = [s["ticker"] for s in scored_stocks if s["change_pct"] < -3][:10]
+
+    stats = {
+        "screened":        len(all_tickers),
+        "universe_size":   universe_size,
+        "pre_screened":    len(pre_map),
+        "factor_scored":   len(scored_stocks),
+        "watchlist":       len(final_watchlist),
+        "gap_ups":         gap_ups,
+        "gap_downs":       gap_downs,
+        "new_filings":     list(filing_counts.keys())[:10],
+        "mean_rev_setups": [s["ticker"] for s in mean_rev_setups[:5]],
+        "regime":          regime,
+        "top_scores":      [{"ticker": s["ticker"], "score": s["composite_score"]}
+                            for s in scored_stocks[:10]],
+    }
+
+    try:
+        with open(WATCHLIST_FILE, "w") as f:
+            json.dump({
+                "date":      datetime.now().strftime("%Y-%m-%d"),
+                "generated": datetime.now().isoformat(),
+                "tickers":   final_watchlist,
+                "stats":     stats,
+            }, f, indent=2)
+    except Exception as _fje:
+        print(f"  [screen] JSON save failed: {_fje}")
+
     try:
         from db.database import save_watchlist
-        stats = {
-            "screened":    len(candidate_tickers),
-            "interesting": len(interesting),
-            "watchlist":   len(final_watchlist),
-            "gap_ups":     [s["ticker"] for s in interesting if s["change_pct"] > 3][:10],
-            "gap_downs":   [s["ticker"] for s in interesting if s["change_pct"] < -3][:10],
-            "new_filings": list(filing_counts.keys())[:10],
-        }
         save_watchlist(final_watchlist, stats)
-        print("  ✓ Watchlist saved to shared database")
-    except Exception as e:
-        print(f"  [db] Watchlist DB save failed: {e}")
+        print("  ✓ Watchlist saved to DB")
+    except Exception as _dbe:
+        print(f"  [screen] DB save failed: {_dbe}")
 
     return final_watchlist
 

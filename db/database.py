@@ -367,6 +367,78 @@ def _init_postgres():
         cur.execute(ddl)
 
     # Migrate existing portfolio rows to admin (user_id=1)
+    # ── Quant upgrade tables ─────────────────────────────────────────────────
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS factor_scores (
+            id          SERIAL PRIMARY KEY,
+            scan_date   DATE NOT NULL,
+            ticker      TEXT NOT NULL,
+            factor_name TEXT NOT NULL,
+            raw_value   REAL,
+            z_score     REAL,
+            created_at  TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_factor_scores_date_ticker
+        ON factor_scores (scan_date, ticker)
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS factor_ic_history (
+            id           SERIAL PRIMARY KEY,
+            calc_date    DATE NOT NULL,
+            factor_name  TEXT NOT NULL,
+            horizon_days INTEGER NOT NULL DEFAULT 5,
+            ic_value     REAL,
+            sample_size  INTEGER,
+            created_at   TIMESTAMP DEFAULT NOW(),
+            UNIQUE (calc_date, factor_name, horizon_days)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS market_regime (
+            id           SERIAL PRIMARY KEY,
+            regime_date  DATE NOT NULL UNIQUE,
+            regime       TEXT NOT NULL,
+            iwm_price    REAL,
+            iwm_ma20     REAL,
+            iwm_ma50     REAL,
+            adx_14       REAL,
+            volatility_20d REAL,
+            created_at   TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS stock_universe (
+            ticker        TEXT PRIMARY KEY,
+            name          TEXT,
+            exchange      TEXT,
+            market_cap    BIGINT,
+            avg_volume    INTEGER,
+            sector        TEXT,
+            min_price     REAL,
+            active        BOOLEAN DEFAULT TRUE,
+            last_updated  TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+    # Quant-upgrade migration columns
+    for ddl in [
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS factor_scores_json TEXT",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS ret_10d             REAL",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS outcome_10d         TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS factors_json        TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS regime              TEXT",
+        "ALTER TABLE scanner_control ADD COLUMN IF NOT EXISTS restart_requested   BOOLEAN DEFAULT FALSE",
+    ]:
+        try:
+            cur.execute(ddl)
+        except Exception:
+            pass
+
     cur.execute("UPDATE portfolio SET user_id = 1 WHERE user_id IS NULL")
 
     # Add composite unique constraint for per-user portfolio (idempotent via DO NOTHING)
@@ -700,6 +772,77 @@ def _init_sqlite():
             cur.execute(col_sql)
         except Exception:
             pass  # Column already exists
+
+    # ── Quant upgrade tables ─────────────────────────────────────────────────
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS factor_scores (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_date   TEXT NOT NULL,
+            ticker      TEXT NOT NULL,
+            factor_name TEXT NOT NULL,
+            raw_value   REAL,
+            z_score     REAL,
+            created_at  TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_factor_scores_date_ticker
+        ON factor_scores (scan_date, ticker)
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS factor_ic_history (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            calc_date    TEXT NOT NULL,
+            factor_name  TEXT NOT NULL,
+            horizon_days INTEGER NOT NULL DEFAULT 5,
+            ic_value     REAL,
+            sample_size  INTEGER,
+            created_at   TEXT DEFAULT (datetime('now')),
+            UNIQUE (calc_date, factor_name, horizon_days)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS market_regime (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            regime_date  TEXT NOT NULL UNIQUE,
+            regime       TEXT NOT NULL,
+            iwm_price    REAL,
+            iwm_ma20     REAL,
+            iwm_ma50     REAL,
+            adx_14       REAL,
+            volatility_20d REAL,
+            created_at   TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS stock_universe (
+            ticker        TEXT PRIMARY KEY,
+            name          TEXT,
+            exchange      TEXT,
+            market_cap    INTEGER,
+            avg_volume    INTEGER,
+            sector        TEXT,
+            min_price     REAL,
+            active        INTEGER DEFAULT 1,
+            last_updated  TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    for col_sql in [
+        "ALTER TABLE signal_log      ADD COLUMN factor_scores_json TEXT",
+        "ALTER TABLE signal_outcomes ADD COLUMN ret_10d             REAL",
+        "ALTER TABLE signal_outcomes ADD COLUMN outcome_10d         TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN factors_json        TEXT",
+        "ALTER TABLE conviction_buys ADD COLUMN regime              TEXT",
+        "ALTER TABLE scanner_control ADD COLUMN restart_requested   INTEGER DEFAULT 0",
+    ]:
+        try:
+            cur.execute(col_sql)
+        except Exception:
+            pass
 
     cur.execute("UPDATE portfolio SET user_id = 1 WHERE user_id IS NULL")
 
@@ -2470,6 +2613,261 @@ def get_overall_accuracy() -> dict:
     except Exception as e:
         print(f"  [db] get_overall_accuracy failed: {e}")
     return result
+
+
+# ─── Quant Upgrade Helpers ────────────────────────────────────────────────────
+
+def save_factor_scores(scan_date: str, ticker: str, factors: dict) -> None:
+    """Bulk-insert one row per factor for a given ticker+date."""
+    if not factors:
+        return
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM factor_scores WHERE scan_date = %s AND ticker = %s",
+                (scan_date, ticker)
+            )
+            for name, vals in factors.items():
+                cur.execute(
+                    "INSERT INTO factor_scores (scan_date, ticker, factor_name, raw_value, z_score) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (scan_date, ticker, name,
+                     vals.get("raw") if isinstance(vals, dict) else None,
+                     vals.get("z")   if isinstance(vals, dict) else float(vals) if vals is not None else None)
+                )
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute(
+                "DELETE FROM factor_scores WHERE scan_date = ? AND ticker = ?",
+                (scan_date, ticker)
+            )
+            for name, vals in factors.items():
+                conn.execute(
+                    "INSERT INTO factor_scores (scan_date, ticker, factor_name, raw_value, z_score) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (scan_date, ticker, name,
+                     vals.get("raw") if isinstance(vals, dict) else None,
+                     vals.get("z")   if isinstance(vals, dict) else float(vals) if vals is not None else None)
+                )
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] save_factor_scores failed for {ticker}: {e}")
+
+
+def save_ic_history(calc_date: str, factor_name: str, ic_value: float,
+                    sample_size: int, horizon_days: int = 5) -> None:
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO factor_ic_history (calc_date, factor_name, ic_value, sample_size, horizon_days)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (calc_date, factor_name, horizon_days) DO UPDATE SET
+                    ic_value    = EXCLUDED.ic_value,
+                    sample_size = EXCLUDED.sample_size
+            """, (calc_date, factor_name, ic_value, sample_size, horizon_days))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("""
+                INSERT OR REPLACE INTO factor_ic_history
+                    (calc_date, factor_name, ic_value, sample_size, horizon_days)
+                VALUES (?, ?, ?, ?, ?)
+            """, (calc_date, factor_name, ic_value, sample_size, horizon_days))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] save_ic_history failed: {e}")
+
+
+def get_rolling_ic(horizon_days: int = 5, lookback_days: int = 20) -> dict:
+    """Return {factor_name: mean_ic} over the last lookback_days days."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT factor_name, AVG(ic_value) AS mean_ic, COUNT(*) AS n
+                FROM factor_ic_history
+                WHERE horizon_days = %s
+                  AND calc_date >= CURRENT_DATE - INTERVAL '%s days'
+                GROUP BY factor_name
+                HAVING COUNT(*) >= 3
+            """, (horizon_days, lookback_days))
+            rows = cur.fetchall(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT factor_name, AVG(ic_value) AS mean_ic, COUNT(*) AS n
+                FROM factor_ic_history
+                WHERE horizon_days = ?
+                  AND calc_date >= date('now', ? || ' days')
+                GROUP BY factor_name
+                HAVING COUNT(*) >= 3
+            """, (horizon_days, f"-{lookback_days}"))
+            rows = cur.fetchall(); conn.close()
+        return {r[0]: float(r[1]) for r in rows}
+    except Exception as e:
+        print(f"  [db] get_rolling_ic failed: {e}")
+        return {}
+
+
+def save_market_regime(regime_date: str, regime: str, iwm_price: float,
+                       iwm_ma20: float, iwm_ma50: float,
+                       adx_14: float, volatility_20d: float) -> None:
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO market_regime
+                    (regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (regime_date) DO UPDATE SET
+                    regime        = EXCLUDED.regime,
+                    iwm_price     = EXCLUDED.iwm_price,
+                    iwm_ma20      = EXCLUDED.iwm_ma20,
+                    iwm_ma50      = EXCLUDED.iwm_ma50,
+                    adx_14        = EXCLUDED.adx_14,
+                    volatility_20d = EXCLUDED.volatility_20d,
+                    created_at    = NOW()
+            """, (regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("""
+                INSERT OR REPLACE INTO market_regime
+                    (regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d)
+                VALUES (?,?,?,?,?,?,?)
+            """, (regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] save_market_regime failed: {e}")
+
+
+def get_latest_regime() -> dict:
+    """Return the most recent market_regime row, or empty dict."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d
+                FROM market_regime ORDER BY regime_date DESC LIMIT 1
+            """)
+            row = cur.fetchone(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d
+                FROM market_regime ORDER BY regime_date DESC LIMIT 1
+            """)
+            row = cur.fetchone(); conn.close()
+        if not row:
+            return {}
+        return {
+            "date": str(row[0]), "regime": row[1], "iwm_price": row[2],
+            "iwm_ma20": row[3], "iwm_ma50": row[4], "adx_14": row[5], "volatility_20d": row[6],
+        }
+    except Exception as e:
+        print(f"  [db] get_latest_regime failed: {e}")
+        return {}
+
+
+def upsert_universe_stock(ticker: str, name: str = "", exchange: str = "",
+                           market_cap: int = 0, avg_volume: int = 0,
+                           sector: str = "", min_price: float = 0.0) -> None:
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO stock_universe (ticker, name, exchange, market_cap, avg_volume, sector, min_price)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (ticker) DO UPDATE SET
+                    name         = EXCLUDED.name,
+                    exchange     = EXCLUDED.exchange,
+                    market_cap   = EXCLUDED.market_cap,
+                    avg_volume   = EXCLUDED.avg_volume,
+                    sector       = EXCLUDED.sector,
+                    min_price    = EXCLUDED.min_price,
+                    last_updated = NOW(),
+                    active       = TRUE
+            """, (ticker, name, exchange, market_cap, avg_volume, sector, min_price))
+            conn.commit(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("""
+                INSERT OR REPLACE INTO stock_universe
+                    (ticker, name, exchange, market_cap, avg_volume, sector, min_price, last_updated)
+                VALUES (?,?,?,?,?,?,?, datetime('now'))
+            """, (ticker, name, exchange, market_cap, avg_volume, sector, min_price))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] upsert_universe_stock failed for {ticker}: {e}")
+
+
+def get_active_universe(min_market_cap: int = 20_000_000,
+                        max_market_cap: int = 2_000_000_000,
+                        min_avg_volume: int = 50_000) -> list:
+    """Return list of ticker strings from stock_universe that meet filters."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT ticker FROM stock_universe
+                WHERE active = TRUE
+                  AND market_cap BETWEEN %s AND %s
+                  AND avg_volume >= %s
+                ORDER BY market_cap DESC
+            """, (min_market_cap, max_market_cap, min_avg_volume))
+            rows = cur.fetchall(); cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT ticker FROM stock_universe
+                WHERE active = 1
+                  AND market_cap BETWEEN ? AND ?
+                  AND avg_volume >= ?
+                ORDER BY market_cap DESC
+            """, (min_market_cap, max_market_cap, min_avg_volume))
+            rows = cur.fetchall(); conn.close()
+        return [r[0] for r in rows]
+    except Exception as e:
+        print(f"  [db] get_active_universe failed: {e}")
+        return []
+
+
+def get_ic_table() -> list:
+    """Return factor IC history for dashboard display (last 30 days, by factor, last 3 horizons)."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT factor_name, horizon_days, AVG(ic_value) AS mean_ic,
+                       STDDEV(ic_value) AS std_ic, COUNT(*) AS n
+                FROM factor_ic_history
+                WHERE calc_date >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY factor_name, horizon_days
+                ORDER BY factor_name, horizon_days
+            """)
+            rows = cur.fetchall()
+            cols = ["factor_name","horizon_days","mean_ic","std_ic","n"]
+            cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT factor_name, horizon_days,
+                       AVG(ic_value) AS mean_ic, 0 AS std_ic, COUNT(*) AS n
+                FROM factor_ic_history
+                WHERE calc_date >= date('now','-30 days')
+                GROUP BY factor_name, horizon_days
+                ORDER BY factor_name, horizon_days
+            """)
+            rows = cur.fetchall()
+            cols = ["factor_name","horizon_days","mean_ic","std_ic","n"]
+            conn.close()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        print(f"  [db] get_ic_table failed: {e}")
+        return []
 
 
 def seed_mobile_admin() -> None:

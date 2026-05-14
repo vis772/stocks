@@ -67,7 +67,7 @@ def _fetch_closes_after(ticker: str, entry_date) -> dict:
     elif hasattr(entry_date, "date"):
         entry_date = entry_date.date()
 
-    end = entry_date + timedelta(days=22)  # enough for 5 trading days + holidays
+    end = entry_date + timedelta(days=30)  # enough for 10 trading days + holidays
 
     try:
         df = yf.download(ticker, start=str(entry_date), end=str(end),
@@ -86,7 +86,7 @@ def _fetch_closes_after(ticker: str, entry_date) -> dict:
     idx_dates = [d.date() if hasattr(d, "date") else d for d in closes.index]
     after = [float(c) for d, c in zip(idx_dates, closes) if d > entry_date]
 
-    return {n: after[n - 1] for n in [1, 3, 5] if len(after) >= n}
+    return {n: after[n - 1] for n in [1, 3, 5, 10] if len(after) >= n}
 
 
 def _safe(v, fallback=0.0):
@@ -152,12 +152,16 @@ class AccuracyValidator:
                 print(f"  [accuracy] query failed: {e}")
                 return []
 
-        def _process(rows, label):
+        def _process(rows, label, has_10d_col=False):
             nonlocal graded, failed, skipped
             total = len(rows)
             print(f"  [accuracy] {label}: {total} signals")
             for i, row in enumerate(rows, 1):
-                sig_id, ticker, entry_price, created_at, o1, o3, o5 = row
+                if has_10d_col:
+                    sig_id, ticker, entry_price, created_at, o1, o3, o5, o10 = row
+                else:
+                    sig_id, ticker, entry_price, created_at, o1, o3, o5 = row
+                    o10 = None
                 try:
                     closes = _fetch_closes_after(ticker, created_at)
                     if not closes:
@@ -169,19 +173,21 @@ class AccuracyValidator:
                             return None
                         return round((closes[n] - entry_price) / entry_price * 100, 3)
 
-                    ret_1d = _ret(1, o1)
-                    ret_3d = _ret(3, o3)
-                    ret_5d = _ret(5, o5)
+                    ret_1d  = _ret(1,  o1)
+                    ret_3d  = _ret(3,  o3)
+                    ret_5d  = _ret(5,  o5)
+                    ret_10d = _ret(10, o10)
 
-                    if ret_1d is None and ret_3d is None and ret_5d is None:
+                    if ret_1d is None and ret_3d is None and ret_5d is None and ret_10d is None:
                         skipped += 1
                         continue
 
                     _write_signal_log_outcomes(sig_id, ret_1d, ret_3d, ret_5d)
 
-                    # Keep signal_outcomes populated for compute_metrics()
+                    # Keep signal_outcomes populated (includes 10d)
                     so_upd = {}
-                    for col, ret in [("outcome_1d", ret_1d), ("outcome_3d", ret_3d), ("outcome_5d", ret_5d)]:
+                    for col, ret in [("outcome_1d", ret_1d), ("outcome_3d", ret_3d),
+                                     ("outcome_5d", ret_5d), ("outcome_10d", ret_10d)]:
                         if ret is not None:
                             so_upd[col] = ("win"  if ret >  WIN_THRESHOLD  * 100 else
                                            "loss" if ret <  LOSS_THRESHOLD * 100 else "neutral")
@@ -223,6 +229,42 @@ class AccuracyValidator:
             "Pass 2 (outcome_5d IS NULL, >=3d old)"
         )
 
+        # Pass 3: grade 10-day outcomes via signal_outcomes (outcome_5d set, >=8d old)
+        def _pass3_rows():
+            try:
+                if _is_postgres():
+                    conn = _get_pg_conn(); cur = conn.cursor()
+                    cur.execute(f"""
+                        SELECT sl.id, sl.ticker, sl.price_at_signal, sl.created_at,
+                               sl.outcome_1d, sl.outcome_3d, sl.outcome_5d, so.outcome_10d
+                        FROM signal_log sl
+                        LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
+                        WHERE sl.outcome_5d IS NOT NULL AND {_BASE}
+                          AND (so.outcome_10d IS NULL OR so.ret_10d IS NULL)
+                          AND sl.created_at <= NOW() - INTERVAL '8 days'
+                        ORDER BY sl.created_at ASC LIMIT 200
+                    """)
+                    rows = cur.fetchall(); cur.close(); conn.close()
+                else:
+                    conn = _get_sqlite_conn(); cur = conn.cursor()
+                    cur.execute(f"""
+                        SELECT sl.id, sl.ticker, sl.price_at_signal, sl.created_at,
+                               sl.outcome_1d, sl.outcome_3d, sl.outcome_5d, so.outcome_10d
+                        FROM signal_log sl
+                        LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
+                        WHERE sl.outcome_5d IS NOT NULL AND {_BASE}
+                          AND (so.outcome_10d IS NULL OR so.ret_10d IS NULL)
+                          AND sl.created_at <= datetime('now', '-8 days')
+                        ORDER BY sl.created_at ASC LIMIT 200
+                    """)
+                    rows = cur.fetchall(); conn.close()
+                return rows
+            except Exception as _p3e:
+                print(f"  [accuracy] Pass 3 query failed: {_p3e}")
+                return []
+
+        _process(_pass3_rows(), "Pass 3 (ret_10d, >=8d old)", has_10d_col=True)
+
         summary = f"[AccuracyValidator] Done. Graded: {graded}, Failed: {failed}, Skipped: {skipped}"
         print(summary)
 
@@ -245,7 +287,7 @@ class AccuracyValidator:
             if _is_postgres():
                 conn = _get_pg_conn(); cur = conn.cursor()
                 cur.execute("""
-                    SELECT sl.score, so.outcome_5d, so.ret_5d
+                    SELECT sl.score, so.outcome_5d, so.ret_5d, so.ret_10d, so.outcome_10d
                     FROM signal_log sl
                     JOIN signal_outcomes so ON so.signal_id = sl.id
                     WHERE so.outcome_5d IS NOT NULL AND so.ret_5d IS NOT NULL
@@ -255,7 +297,7 @@ class AccuracyValidator:
             else:
                 conn = _get_sqlite_conn(); cur = conn.cursor()
                 cur.execute("""
-                    SELECT sl.score, so.outcome_5d, so.ret_5d
+                    SELECT sl.score, so.outcome_5d, so.ret_5d, so.ret_10d, so.outcome_10d
                     FROM signal_log sl
                     JOIN signal_outcomes so ON so.signal_id = sl.id
                     WHERE so.outcome_5d IS NOT NULL AND so.ret_5d IS NOT NULL
@@ -266,28 +308,38 @@ class AccuracyValidator:
             if not rows:
                 return {"n": 0, "insufficient": True}
 
-            all_rets = []
-            bucket_data: dict = {label: {"rets": [], "outcomes": []} for _, _, label in SCORE_BUCKETS}
-            bucket_data["other"] = {"rets": [], "outcomes": []}
+            all_rets    = []
+            all_rets_10 = []
+            bucket_data: dict = {label: {"rets": [], "rets_10": [], "outcomes": []} for _, _, label in SCORE_BUCKETS}
+            bucket_data["other"] = {"rets": [], "rets_10": [], "outcomes": []}
 
-            for score, outcome, ret in rows:
-                ret_f  = _safe(ret)
+            for score, outcome, ret, ret10, outcome10 in rows:
+                ret_f   = _safe(ret)
                 score_f = _safe(score)
                 all_rets.append(ret_f)
                 b = _bucket(score_f)
                 bucket_data[b]["rets"].append(ret_f)
                 bucket_data[b]["outcomes"].append(outcome)
+                if ret10 is not None:
+                    r10 = _safe(ret10)
+                    all_rets_10.append(r10)
+                    bucket_data[b]["rets_10"].append(r10)
 
-            overall = _metrics_from_rets(all_rets)
+            overall    = _metrics_from_rets(all_rets)
+            overall_10 = _metrics_from_rets(all_rets_10) if all_rets_10 else {}
 
             by_bucket = {}
             for label, bd in bucket_data.items():
                 if bd["rets"]:
-                    by_bucket[label] = _metrics_from_rets(bd["rets"])
+                    m = _metrics_from_rets(bd["rets"])
+                    if bd["rets_10"]:
+                        m["metrics_10d"] = _metrics_from_rets(bd["rets_10"])
+                    by_bucket[label] = m
 
             result = {
                 "n":           len(all_rets),
                 "overall":     overall,
+                "overall_10d": overall_10,
                 "by_bucket":   by_bucket,
                 "insufficient": len(all_rets) < 30,
             }

@@ -32,6 +32,20 @@ except Exception as _qe:
     _QUANT_AVAILABLE = False
     print(f"  [quant] import failed: {_qe}")
 
+try:
+    from analysis.regime import update_daily_regime, get_current_regime
+    _REGIME_AVAILABLE = True
+except Exception as _re:
+    _REGIME_AVAILABLE = False
+    print(f"  [regime] import failed: {_re}")
+
+try:
+    from quant.factor_engine import compute_and_store_ic
+    _IC_AVAILABLE = True
+except Exception as _ice:
+    _IC_AVAILABLE = False
+    print(f"  [ic] import failed: {_ice}")
+
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 STATE_FILE   = "scanner_state.json"
 
@@ -168,6 +182,8 @@ class ScannerState:
         self.open_positions:         int = 0
         self.last_conviction_run_ts: Optional[str] = None
         self.last_accuracy_run_ts:   Optional[str] = None
+        self.current_regime:         str = "NEUTRAL"
+        self.regime_updated_date:    str = ""
         self._load()
 
     def _load(self):
@@ -208,6 +224,7 @@ class ScannerState:
                 "open_positions":           self.open_positions,
                 "last_conviction_run":      self.last_conviction_run_ts,
                 "last_accuracy_run":        self.last_accuracy_run_ts,
+                "current_regime":           self.current_regime,
             })
         except Exception as e:
             print(f"  [state] Save failed: {e}")
@@ -827,6 +844,29 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
 
     print(f"  [prediction] Scoring: {', '.join(top_tickers)}")
 
+    # Multi-factor scoring for top tickers when AXIOM_QUANT_MODE=1
+    if os.environ.get("AXIOM_QUANT_MODE", "1") == "1" and _IC_AVAILABLE:
+        try:
+            import yfinance as yf
+            from quant.factor_engine import MultiFactorScorer
+            _mfs = MultiFactorScorer()
+            _iwm_hist = yf.Ticker("IWM").history(period="3mo", auto_adjust=True)
+            _iwm_prices = _iwm_hist["Close"].dropna() if not _iwm_hist.empty else None
+            for _qt in top_tickers[:5]:
+                try:
+                    _snap = {"ticker": _qt, "price": state.last_prices.get(_qt, 0)}
+                    _hist = yf.Ticker(_qt).history(period="1y", auto_adjust=True)
+                    if not _hist.empty and _iwm_prices is not None:
+                        _mfs.score_ticker(
+                            _qt, _snap, _hist,
+                            regime=state.current_regime,
+                            log_factors=True,
+                        )
+                except Exception:
+                    pass
+        except Exception as _mfse:
+            print(f"  [quant_mode] MultiFactorScorer in prediction scan failed: {_mfse}")
+
     def _score(ticker):
         try:
             return ticker, scan_ticker(ticker, save=False)
@@ -975,6 +1015,9 @@ def run_scanner():
         print("  ✓ DB initialized")
     except Exception as _dbi_e:
         print(f"  [startup] DB init failed: {_dbi_e}")
+
+    _QUANT_MODE_ACTIVE = os.environ.get("AXIOM_QUANT_MODE", "1") == "1"
+    print(f"  [quant_mode] AXIOM_QUANT_MODE={'ON (MultiFactorScorer active)' if _QUANT_MODE_ACTIVE else 'OFF (legacy scorer only)'}")
 
     try:
         print("[AccuracyValidator] Running startup grade...")
@@ -1140,8 +1183,12 @@ def run_scanner():
                     _sat_key = f"universe_refresh_sat_{today_str}"
                     if not state.already_alerted(_sat_key):
                         try:
-                            from universe_manager import refresh_universe
-                            refresh_universe()
+                            from universe_manager import refresh_universe, needs_refresh
+                            if needs_refresh(max_age_days=6):
+                                print("  [universe] Stale — starting weekly refresh...")
+                                refresh_universe()
+                            else:
+                                print("  [universe] Universe is fresh — skipping refresh")
                             state.mark_alerted(_sat_key)
                         except Exception as _ure:
                             print(f"  [weekend] universe refresh failed: {_ure}")
@@ -1189,6 +1236,21 @@ def run_scanner():
                 morning_brief_sent = True
                 state.log_alert(f"Morning brief sent — {len(watchlist)} stocks")
 
+            if et.hour == 9 and 0 <= et.minute < 15 and state.regime_updated_date != today_str:
+                if _REGIME_AVAILABLE:
+                    try:
+                        _regime_data = update_daily_regime()
+                        state.current_regime      = _regime_data.get("regime", "NEUTRAL")
+                        state.regime_updated_date = today_str
+                        print(
+                            f"  [regime] {state.current_regime} | IWM ${_regime_data.get('iwm_price', 0):.2f} | "
+                            f"MA20/50 {_regime_data.get('iwm_ma20', 0):.2f}/{_regime_data.get('iwm_ma50', 0):.2f} | "
+                            f"ADX {_regime_data.get('adx_14', 0):.1f} | Vol {_regime_data.get('volatility_20d', 0):.1f}%"
+                        )
+                        _log("info", f"Regime detected: {state.current_regime} | IWM ${_regime_data.get('iwm_price', 0):.2f}")
+                    except Exception as _rde:
+                        print(f"  [regime] update failed: {_rde}")
+
             if et.hour == 9 and 29 <= et.minute < 35:
                 _open_key = f"broker_open_{today_str}"
                 if not state.already_alerted(_open_key):
@@ -1231,7 +1293,7 @@ def run_scanner():
                         print("\n[CONVICTION] Running pre-open conviction scan (8:55 AM ET)...")
                         try:
                             from conviction_engine import run_conviction_engine
-                            run_conviction_engine(session="preopen")
+                            run_conviction_engine(session="preopen", regime=state.current_regime)
                             state.last_conviction_run_ts = now_et().isoformat()
                             state.mark_alerted(_preopen_key)
                         except Exception as _cve_pre:
@@ -1313,7 +1375,7 @@ def run_scanner():
                         print("\n[CONVICTION] Running 4 PM close conviction scan...")
                         try:
                             from conviction_engine import run_conviction_engine
-                            run_conviction_engine(session="close")
+                            run_conviction_engine(session="close", regime=state.current_regime)
                             state.last_conviction_run_ts = now_et().isoformat()
                             state.mark_alerted(_close_key)
                             try:
@@ -1365,6 +1427,16 @@ def run_scanner():
                         state.log_alert("EOD report generated and sent")
                     except Exception as e:
                         print(f"  [EOD] Failed: {e}")
+                    if _IC_AVAILABLE:
+                        try:
+                            for _hz in (1, 3, 5, 10):
+                                _ic_result = compute_and_store_ic(horizon_days=_hz)
+                                _n = len(_ic_result.get("ics", {}))
+                                if _n:
+                                    print(f"  [IC] horizon={_hz}d — {_n} factor ICs computed")
+                            _log("info", "Factor IC computation complete (1d/3d/5d/10d)")
+                        except Exception as _ice2:
+                            print(f"  [IC] compute failed: {_ice2}")
                     try:
                         from reports.checkpoint_reports import check_and_run_checkpoints
                         check_and_run_checkpoints()
@@ -1427,7 +1499,7 @@ def run_scanner():
                         print("\n[CONVICTION] Running 8:30 PM after-hours conviction scan...")
                         try:
                             from conviction_engine import run_conviction_engine
-                            run_conviction_engine(session="afterhours")
+                            run_conviction_engine(session="afterhours", regime=state.current_regime)
                             state.last_conviction_run_ts = now_et().isoformat()
                             state.mark_alerted(_ah_key)
                         except Exception as _cve2:
