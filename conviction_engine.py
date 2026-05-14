@@ -45,28 +45,32 @@ class ConvictionEngine:
             return False
 
         quant_adj = _safe(data.get("quant_adjustment", 0))
-        if quant_adj < 0:
+        # Only hard-reject on significantly negative quant adj (< -5)
+        if quant_adj < -5:
             return False
 
         sq = data.get("source_quality", "live")
         if sq and "stale_" in str(sq):
             try:
                 mins = int(str(sq).split("stale_")[1].rstrip("m"))
-                if mins > 60:
+                if mins > 120:  # allow up to 2hr stale (generous for AH)
                     return False
             except Exception:
                 pass
 
+        # rvol: be permissive — default to 1.0 only if truly missing
         rvol = _safe(data.get("rvol", 0))
-        rvol_min = 0.5 if session == "preopen" else 1.3
+        if rvol <= 0:
+            rvol = 1.0  # assume neutral if data unavailable
+        rvol_min = 0.3 if session in ("preopen", "afterhours") else 0.8
         if rvol < rvol_min:
             return False
 
         price = _safe(data.get("price", 0))
-        if price < 1.00:
+        if price < 0.50:
             return False
 
-        # Check portfolio for >8% loss
+        # Check portfolio for >10% loss (loosened from 8%)
         try:
             from db.database import get_portfolio
             pf = get_portfolio()
@@ -75,7 +79,7 @@ class ConvictionEngine:
                 if not row.empty:
                     avg_cost = _safe(row.iloc[0]["avg_cost"])
                     if avg_cost > 0 and price > 0:
-                        if (price - avg_cost) / avg_cost < -0.08:
+                        if (price - avg_cost) / avg_cost < -0.10:
                             return False
         except Exception:
             pass
@@ -90,55 +94,82 @@ class ConvictionEngine:
 
     def conviction_score(self, ticker: str, data: dict) -> float:
         score = 0.0
-        composite = _safe(data.get("composite_score", 0))
-        quant_adj = _safe(data.get("quant_adjustment", 0))
-        price     = _safe(data.get("price", 0))
-        vwap      = _safe(data.get("vwap", 0))
-        rsi       = data.get("rsi")
-        sma20     = data.get("sma_20")
-        rvol      = _safe(data.get("rvol", 0))
-        sentiment = data.get("claude_sentiment", "")
-        sigma     = _safe(data.get("sigma_hist", 1.0), 1.0)
-        sec_cat   = data.get("has_sec_catalyst", False)
-        news_sent = _safe(data.get("news_sentiment_score", 0))
-        short_pct = _safe(data.get("short_percent_float", 0))
+        composite  = _safe(data.get("composite_score", 0))
+        quant_adj  = _safe(data.get("quant_adjustment", 0))
+        price      = _safe(data.get("price", 0))
+        vwap       = _safe(data.get("vwap", 0))
+        rsi        = data.get("rsi")
+        sma20      = data.get("sma_20")
+        rvol       = _safe(data.get("rvol", 0))
+        sentiment  = data.get("claude_sentiment", "")
+        sigma      = _safe(data.get("sigma_hist", 1.0), 1.0)
+        sec_cat    = data.get("has_sec_catalyst", False)
+        news_sent  = _safe(data.get("news_sentiment_score", 0))
+        short_pct  = _safe(data.get("short_percent_float", 0))
+        fz_scores  = data.get("factor_z_scores", {})  # from MultiFactorScorer
 
-        # Signal agreement (max 30)
-        if composite >= 75:
-            score += 10.0
+        # ── Multi-factor composite (max 35) ──────────────────────────────────
+        if composite >= 80:
+            score += 25.0   # high conviction: composite in top quintile
+        elif composite >= 75:
+            score += 15.0
+        elif composite >= 70:
+            score += 8.0
+
+        # Count factors in top quintile (z-score > 1.0 = top ~16%)
+        if fz_scores:
+            top_quintile = sum(1 for z in fz_scores.values() if _safe(z) > 1.0)
+            if top_quintile >= 5:
+                score += 10.0
+            elif top_quintile >= 3:
+                score += 6.0
+            elif top_quintile >= 2:
+                score += 3.0
+
         if quant_adj >= 10:
-            score += 10.0
-        if str(sentiment).lower() in ("bullish", "positive"):
-            score += 10.0
+            score += 5.0
+        elif quant_adj >= 5:
+            score += 2.0
 
-        # Technical confirmation (max 25)
+        if str(sentiment).lower() in ("bullish", "positive"):
+            score += 5.0
+
+        # ── Technical confirmation (max 20) ──────────────────────────────────
         if price > 0 and vwap > 0 and price > vwap:
-            score += 10.0
+            score += 8.0
         rsi_val = _safe(rsi, -1.0) if rsi is not None else -1.0
         if 45 <= rsi_val <= 65:
-            score += 8.0
+            score += 6.0
         if price > 0 and sma20 and price > _safe(sma20) > 0:
             prev_price = _safe(data.get("prev_close", price))
             if prev_price > 0 and prev_price <= _safe(sma20) and price > _safe(sma20):
-                score += 7.0
+                score += 6.0
 
-        # Volume conviction (max 20)
+        # ── Volume conviction (max 20) ────────────────────────────────────────
+        # Volume > 2x is the threshold for a meaningful volume signal
         if rvol >= 3.0:
             score += 20.0
         elif rvol >= 2.0:
-            score += 15.0
+            score += 15.0   # explicit 2x+ requirement met
         elif rvol >= 1.5:
-            score += 10.0
+            score += 8.0
+        # Below 1.5x: no volume points — not enough conviction
 
-        # Catalyst quality (max 15)
+        # ── Catalyst quality (max 15) ─────────────────────────────────────────
         if sec_cat:
             score += 15.0
         elif news_sent >= 0.7:
             score += 10.0
-        if short_pct > 0.15:
-            score += 5.0
 
-        # Risk-adjusted (max 10)
+        # Short interest: high short float = squeeze potential (bonus)
+        if short_pct >= 0.20:
+            score += 8.0
+        elif short_pct >= 0.15:
+            score += 5.0
+        elif short_pct >= 0.30:  # extreme short — mean-reversion setup
+            score += 3.0
+
+        # ── Risk-adjusted (max 10) ────────────────────────────────────────────
         if sigma < 0.60:
             score += 10.0
         elif sigma < 0.90:
@@ -354,6 +385,19 @@ class ConvictionEngine:
                 except Exception:
                     pass
 
+                # Fallback: estimate rvol from signal volume vs known avg_volume
+                if rvol <= 0 or rvol == 1.0:
+                    sig_vol = _safe(d.get("volume_at_signal", 0))
+                    if sig_vol > 0:
+                        try:
+                            import yfinance as yf
+                            fi = yf.Ticker(t).fast_info
+                            avg_vol = getattr(fi, "three_month_average_volume", 0) or 0
+                            if avg_vol > 0:
+                                rvol = max(0.1, sig_vol / avg_vol)
+                        except Exception:
+                            rvol = 1.0  # neutral default
+
                 # Check earnings
                 earnings_2d = False
                 try:
@@ -366,6 +410,33 @@ class ConvictionEngine:
                     })
                     if cal and cal.get("earningsCalendar"):
                         earnings_2d = True
+                except Exception:
+                    pass
+
+                # Pull latest factor z-scores for this ticker from factor_scores table
+                factor_z_scores = {}
+                try:
+                    from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+                    import datetime as _dt
+                    today_s = _dt.date.today().isoformat()
+                    if _is_postgres():
+                        _fc = _get_pg_conn(); _fcc = _fc.cursor()
+                        _fcc.execute(
+                            "SELECT factor_name, z_score FROM factor_scores "
+                            "WHERE ticker=%s AND scan_date=%s",
+                            (t, today_s)
+                        )
+                        factor_z_scores = {r[0]: r[1] for r in _fcc.fetchall()}
+                        _fcc.close(); _fc.close()
+                    else:
+                        _fc = _get_sqlite_conn()
+                        factor_z_scores = {
+                            r[0]: r[1] for r in _fc.execute(
+                                "SELECT factor_name, z_score FROM factor_scores "
+                                "WHERE ticker=? AND scan_date=?", (t, today_s)
+                            ).fetchall()
+                        }
+                        _fc.close()
                 except Exception:
                     pass
 
@@ -395,6 +466,7 @@ class ConvictionEngine:
                     "bucket_label":      b_label,
                     "rs_vs_iwm_5d":      1.0,
                     "prev_close":        0.0,
+                    "factor_z_scores":   factor_z_scores,
                 })
             return candidates
         except Exception as e:
@@ -1177,26 +1249,55 @@ def build_conviction_pdf(entries: list, generated_at=None, session: str = "marke
         return b""
 
 
-def run_conviction_engine(session: str = "afterhours") -> list:
+def run_conviction_engine(session: str = "afterhours", regime: str = "") -> list:
     """Entry point called by scanner_loop at 8:55 AM, 4 PM, and 8:30 PM ET."""
     print(f"\n[CONVICTION] Running conviction engine for session={session}...")
     try:
-        from accuracy_validator import AccuracyValidator
         engine = ConvictionEngine()
 
-        # Warn if any bucket has win_rate < 0.45
-        av = AccuracyValidator()
-        metrics = av.compute_metrics()
-        for label, bm in metrics.get("by_bucket", {}).items():
-            wr = bm.get("win_rate", 1.0)
-            if bm.get("n", 0) >= 30 and wr < 0.45:
-                print(f"  [conviction] WARNING: bucket {label} win_rate={wr:.2%} < 0.45 — buys disabled")
+        # Non-fatal accuracy check
+        try:
+            from accuracy_validator import AccuracyValidator
+            av = AccuracyValidator()
+            metrics = av.compute_metrics()
+            for label, bm in metrics.get("by_bucket", {}).items():
+                wr = bm.get("win_rate", 1.0)
+                if bm.get("n", 0) >= 30 and wr < 0.45:
+                    print(f"  [conviction] WARNING: bucket {label} win_rate={wr:.2%} < 0.45")
+        except Exception as _av_e:
+            print(f"  [conviction] accuracy_validator check skipped: {_av_e}")
+
+        # Use caller-supplied regime, or fetch if not provided
+        if not regime:
+            try:
+                from analysis.regime import get_current_regime
+                r = get_current_regime()
+                regime = r.get("regime", "NEUTRAL")
+            except Exception:
+                regime = "NEUTRAL"
 
         buy_list = engine.generate_buy_list(session=session)
+
+        # Attach regime to each buy
+        for b in buy_list:
+            b["regime"] = regime
+
         save_buy_list(buy_list, session)
         send_buy_list_alert(buy_list, session)
-        print(f"  [conviction] {len(buy_list)} conviction buy(s) generated")
+        print(f"  [conviction] {len(buy_list)} conviction buy(s) generated | regime={regime}")
         return buy_list
     except Exception as e:
+        import traceback
         print(f"  [conviction] run_conviction_engine failed: {e}")
+        traceback.print_exc()
+        # Attempt fallback alert so the user knows conviction ran but found nothing
+        try:
+            from alerts import send_alert, PRIORITY_NORMAL
+            send_alert(
+                title=f"Axiom — Conviction Engine Error ({session})",
+                message=f"Engine raised an exception: {str(e)[:200]}",
+                priority=PRIORITY_NORMAL,
+            )
+        except Exception:
+            pass
         return []
