@@ -77,6 +77,54 @@ def send_alert(
         return False
 
 
+def send_alert_with_pdf(
+    title: str,
+    message: str,
+    pdf_bytes: bytes,
+    filename: str = "conviction_list.pdf",
+    priority: int = PRIORITY_HIGH,
+) -> bool:
+    """
+    Send a Pushover notification with a PDF file attached.
+    Pushover accepts attachments up to 2.5 MB via multipart/form-data.
+    Falls back to text-only if the attachment POST fails.
+    """
+    user_key  = os.environ.get("PUSHOVER_USER_KEY", "")
+    api_token = os.environ.get("PUSHOVER_API_TOKEN", "")
+
+    if not user_key or not api_token:
+        print(f"  [alerts] No Pushover keys — skipping PDF alert: {title}")
+        return False
+
+    if not pdf_bytes:
+        return send_alert(title, message, priority)
+
+    payload = {
+        "token":    api_token,
+        "user":     user_key,
+        "title":    title[:250],
+        "message":  message[:1024],
+        "priority": priority,
+        "sound":    "cashregister" if priority >= PRIORITY_HIGH else "pushover",
+    }
+    if priority == PRIORITY_URGENT:
+        payload["retry"]  = 60
+        payload["expire"] = 300
+
+    try:
+        files = {"attachment": (filename, pdf_bytes, "application/pdf")}
+        resp = requests.post(PUSHOVER_API, data=payload, files=files, timeout=30)
+        if resp.status_code == 200:
+            print(f"  [alerts] ✓ Sent PDF ({len(pdf_bytes)//1024}KB): {title}")
+            return True
+        # Pushover rejects non-image attachments on some plan tiers — fall back gracefully
+        print(f"  [alerts] PDF attach failed ({resp.status_code}): {resp.text} — sending text-only")
+        return send_alert(title, message, priority)
+    except Exception as e:
+        print(f"  [alerts] PDF alert error: {e} — sending text-only")
+        return send_alert(title, message, priority)
+
+
 def alert_volume_spike(ticker: str, rvol: float, price: float, change_pct: float):
     """Alert for unusual volume spike."""
     arrow = "▲" if change_pct >= 0 else "▼"

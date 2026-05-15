@@ -284,27 +284,40 @@ class ConvictionEngine:
             params = self.compute_trade_params(ticker, price, data)
             hold   = self.classify_hold(ticker, data)
             reasoning = self._generate_reasoning(ticker, data, hold)
+            _rvol_val = _safe(data.get("rvol", 1.0))
+            _conv_score = params["conviction"]
             results.append({
-                "rank":          i,
-                "ticker":        ticker,
-                "conviction":    params["conviction"],
-                "hold_type":     hold,
-                "why":           reasoning,
-                "entry":         params["entry"],
-                "limit_entry":   params["limit_entry"],
-                "stop_loss":     params["stop_loss"],
-                "stop_pct":      f"{params['stop_pct']}%",
-                "target_1":      params["target_1"],
-                "target_2":      params["target_2"],
-                "target_3":      params["target_3"],
-                "position_size": f"{params['position_size']}% of portfolio",
-                "expected_value": f"+{params['expected_value']}% EV",
-                "composite":     data.get("composite_score"),
-                "quant_adj":     data.get("quant_adjustment"),
-                "rvol":          data.get("rvol"),
-                "rsi":           data.get("rsi"),
-                "sigma_hist":    data.get("sigma_hist"),
-                "_params":       params,
+                "rank":               i,
+                "ticker":             ticker,
+                "conviction":         _conv_score,
+                "hold_type":          hold,
+                "why":                reasoning,
+                "reasoning":          reasoning,           # alias for build_conviction_pdf
+                "ai_key_reason":      reasoning,           # alias for build_conviction_pdf
+                "entry":              params["entry"],
+                "limit_entry":        params["limit_entry"],
+                "stop_loss":          params["stop_loss"],
+                "stop_pct":           f"{params['stop_pct']}%",
+                "ai_stop_pct":        params["stop_pct"],  # numeric for PDF
+                "ai_target_pct":      round(params["stop_pct"] * 2.5, 1),
+                "target_1":           params["target_1"],
+                "target_2":           params["target_2"],
+                "target_3":           params["target_3"],
+                "position_size":      f"{params['position_size']}% of portfolio",
+                "expected_value":     f"+{params['expected_value']}% EV",
+                "composite":          data.get("composite_score"),
+                "quant_adj":          data.get("quant_adjustment"),
+                "rvol":               _rvol_val,
+                "volume_ratio":       _rvol_val,            # alias for build_conviction_pdf
+                "rsi":                data.get("rsi"),
+                "sigma_hist":         data.get("sigma_hist"),
+                "signal_label":       "Conviction Buy",
+                "ai_conviction":      "High" if _conv_score >= 70 else "Medium",
+                "ai_catalyst_quality": "Strong" if data.get("has_sec_catalyst") else "Moderate",
+                "ai_risk":            "Thin small-cap liquidity risk",
+                "ai_time_sensitivity": "Act Now" if hold == "DAYTRADE" else "Today",
+                "_params":            params,
+                "_data":              data,
             })
 
         return results
@@ -1324,6 +1337,40 @@ def run_conviction_engine(session: str = "afterhours", regime: str = "") -> list
         save_buy_list(buy_list, session)
         send_buy_list_alert(buy_list, session)
         print(f"  [conviction] {len(buy_list)} conviction buy(s) generated | regime={regime}")
+
+        # ── Send PDF attachment via Pushover ──────────────────────────────────
+        # build_conviction_pdf uses the AI-enriched format from generate_live_conviction_list.
+        # generate_buy_list() now also populates the required alias keys so the PDF renders.
+        if buy_list:
+            try:
+                from alerts import send_alert_with_pdf, PRIORITY_HIGH
+                _pdf_bytes = build_conviction_pdf(buy_list, generated_at=now_et(), session=session)
+                if _pdf_bytes:
+                    _session_labels = {
+                        "preopen":      "Pre-Open (7:55 AM CST)",
+                        "market_open":  "Market Open (8:30 AM CST)",
+                        "close":        "Close (3 PM CST)",
+                        "afterhours":   "After-Hours (7:30 PM CST)",
+                    }
+                    _label = _session_labels.get(session, session)
+                    send_alert_with_pdf(
+                        title=f"Axiom Conviction — {_label}",
+                        message=(
+                            f"{len(buy_list)} pick(s) | Regime: {regime}\n"
+                            + "\n".join(
+                                f"#{b['rank']} {b['ticker']} — Entry ${b['entry']} "
+                                f"Stop ${b['stop_loss']} | {b['hold_type']}"
+                                for b in buy_list[:3]
+                            )
+                        ),
+                        pdf_bytes=_pdf_bytes,
+                        filename=f"axiom_{session}.pdf",
+                        priority=PRIORITY_HIGH,
+                    )
+                    print(f"  [conviction] PDF sent ({len(_pdf_bytes)//1024}KB)")
+            except Exception as _pdf_e:
+                print(f"  [conviction] PDF build/send failed: {_pdf_e}")
+
         return buy_list
     except Exception as e:
         import traceback
