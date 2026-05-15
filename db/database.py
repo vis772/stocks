@@ -27,6 +27,12 @@ _pg_pool_lock = threading.Lock()
 _PG_POOL_MIN = 2
 _PG_POOL_MAX = 10  # well under Railway's limit
 
+# Track which live connections came from the pool so _put_pg_conn can return
+# them correctly.  We use id(conn) because psycopg2 connection objects are C
+# extensions with no __dict__ and don't support arbitrary attribute assignment.
+_pooled_conn_ids: set = set()
+_pooled_conn_ids_lock = threading.Lock()
+
 
 def _is_postgres() -> bool:
     return bool(DATABASE_URL and DATABASE_URL.startswith("postgres"))
@@ -57,20 +63,25 @@ def _get_pg_conn():
     if pool is not None:
         try:
             conn = pool.getconn()
-            conn._from_pool = True  # tag so _put_pg_conn knows to return it
+            with _pooled_conn_ids_lock:
+                _pooled_conn_ids.add(id(conn))
             return conn
         except Exception as e:
             print(f"  [db] Pool.getconn failed: {e} — opening direct connection")
     url = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     conn = psycopg2.connect(url, sslmode="require")
-    conn._from_pool = False
     return conn
 
 
 def _put_pg_conn(conn):
     """Return a connection to the pool (or close it if not pooled)."""
     try:
-        if getattr(conn, "_from_pool", False):
+        conn_id = id(conn)
+        with _pooled_conn_ids_lock:
+            from_pool = conn_id in _pooled_conn_ids
+            if from_pool:
+                _pooled_conn_ids.discard(conn_id)
+        if from_pool:
             pool = _get_pg_pool()
             if pool:
                 pool.putconn(conn)
