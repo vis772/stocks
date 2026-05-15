@@ -726,8 +726,8 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                     fired.append(f"{ticker} news ({sentiment})")
                     break
 
-    except Exception:
-        pass
+    except Exception as _scan_err:
+        print(f"  [scan] {ticker} error: {_scan_err}")
     return fired
 
 
@@ -1260,6 +1260,41 @@ def run_scanner():
                         state.mark_alerted(_open_key)
                     except Exception as _pbo:
                         print(f"  [broker] open-bell update failed: {_pbo}")
+
+                # ── Market-open conviction push (9:30 AM ET = 8:30 AM CST) ─────
+                # Re-sends the pre-open conviction list right as the bell rings
+                # so the user has their buy list in hand the moment they can trade.
+                _moc_key = f"conviction_market_open_{today_str}"
+                if not state.already_alerted(_moc_key):
+                    print("\n[CONVICTION] Market-open push (9:30 AM ET / 8:30 AM CST)...")
+                    try:
+                        from conviction_engine import get_latest_conviction_list, send_buy_list_alert
+                        _latest = get_latest_conviction_list(max_age_minutes=120)
+                        _entries = _latest.get("entries", [])
+                        if _entries:
+                            # Re-format DB rows into the shape send_buy_list_alert expects
+                            _buy_list_fmt = []
+                            for _e in _entries[:3]:
+                                _buy_list_fmt.append({
+                                    "rank":       _e.get("rank", 1),
+                                    "ticker":     _e.get("ticker", ""),
+                                    "conviction": float(_e.get("conviction") or 0),
+                                    "hold_type":  _e.get("hold_type", "DAYTRADE"),
+                                    "_params": {
+                                        "entry":     _e.get("entry", 0),
+                                        "stop_loss": _e.get("stop_loss", 0),
+                                    },
+                                })
+                            send_buy_list_alert(_buy_list_fmt, session="market_open")
+                            print(f"  [conviction] Market-open push sent — {len(_buy_list_fmt)} ticker(s)")
+                        else:
+                            # Nothing saved from preopen — run a fresh scan
+                            from conviction_engine import run_conviction_engine
+                            run_conviction_engine(session="market_open", regime=state.current_regime)
+                        state.last_conviction_run_ts = now_et().isoformat()
+                        state.mark_alerted(_moc_key)
+                    except Exception as _moc_e:
+                        print(f"  [conviction] market-open push failed: {_moc_e}")
 
             if et.hour == 0 and et.minute < 5:
                 eod_report_sent = False

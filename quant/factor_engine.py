@@ -546,25 +546,39 @@ def batch_pre_screen(tickers: list, max_workers: int = 20,
     Computes a quick activity score (gap + rvol) to select top N for full scoring.
 
     Returns list of (ticker, activity_score, price, change_pct, rvol) sorted desc.
+    Uses utils.fh_get so 429 rate-limit responses are automatically retried once.
     """
-    import os, requests
+    import os
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    fh_key = os.environ.get("FINNHUB_API_KEY", "")
-    if not fh_key:
+    try:
+        from utils import fh_get as _fhg
+    except Exception:
+        # Fallback if utils not available: plain requests with no retry
+        import requests as _requests
+        def _fhg(endpoint, params, timeout=8):
+            key = os.environ.get("FINNHUB_API_KEY", "")
+            if not key:
+                return None
+            try:
+                r = _requests.get(
+                    f"https://finnhub.io/api/v1/{endpoint}",
+                    params={**params, "token": key},
+                    timeout=timeout,
+                )
+                return r.json() if r.status_code == 200 else None
+            except Exception:
+                return None
+
+    if not os.environ.get("FINNHUB_API_KEY", ""):
         print("  [batch_screen] No FINNHUB_API_KEY — skipping pre-screen")
         return [(t, 0.0, 0.0, 0.0, 1.0) for t in tickers[:200]]
 
     def _fetch_one(ticker: str):
         try:
-            r = requests.get(
-                f"https://finnhub.io/api/v1/quote",
-                params={"symbol": ticker, "token": fh_key},
-                timeout=timeout_per_ticker,
-            )
-            if r.status_code != 200:
+            d = _fhg("quote", {"symbol": ticker}, timeout=timeout_per_ticker)
+            if not d:
                 return None
-            d = r.json()
             price = float(d.get("c") or 0)
             prev  = float(d.get("pc") or 0)
             vol   = float(d.get("v") or 0)

@@ -12,23 +12,72 @@
 import os
 import json
 import sqlite3
+import threading
 import pandas as pd
 from datetime import datetime
 from typing import Optional, List
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
+# ── Connection pool (PostgreSQL only) ────────────────────────────────────────
+# Uses a ThreadedConnectionPool so the scanner's ThreadPoolExecutor workers
+# never exhaust Railway's PostgreSQL connection limit.
+_pg_pool = None
+_pg_pool_lock = threading.Lock()
+_PG_POOL_MIN = 2
+_PG_POOL_MAX = 10  # well under Railway's limit
+
 
 def _is_postgres() -> bool:
     return bool(DATABASE_URL and DATABASE_URL.startswith("postgres"))
 
 
+def _get_pg_pool():
+    global _pg_pool
+    if _pg_pool is not None:
+        return _pg_pool
+    with _pg_pool_lock:
+        if _pg_pool is None:
+            try:
+                import psycopg2.pool
+                url = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+                _pg_pool = psycopg2.pool.ThreadedConnectionPool(
+                    _PG_POOL_MIN, _PG_POOL_MAX, url, sslmode="require"
+                )
+                print(f"  [db] Connection pool created (min={_PG_POOL_MIN} max={_PG_POOL_MAX})")
+            except Exception as e:
+                print(f"  [db] Pool creation failed, falling back to direct connect: {e}")
+    return _pg_pool
+
+
 def _get_pg_conn():
-    """Get a PostgreSQL connection."""
+    """Get a PostgreSQL connection from the pool (or direct if pool unavailable)."""
     import psycopg2
-    # Railway sometimes uses postgres:// instead of postgresql://
+    pool = _get_pg_pool()
+    if pool is not None:
+        try:
+            conn = pool.getconn()
+            conn._from_pool = True  # tag so _put_pg_conn knows to return it
+            return conn
+        except Exception as e:
+            print(f"  [db] Pool.getconn failed: {e} — opening direct connection")
     url = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    return psycopg2.connect(url, sslmode="require")
+    conn = psycopg2.connect(url, sslmode="require")
+    conn._from_pool = False
+    return conn
+
+
+def _put_pg_conn(conn):
+    """Return a connection to the pool (or close it if not pooled)."""
+    try:
+        if getattr(conn, "_from_pool", False):
+            pool = _get_pg_pool()
+            if pool:
+                pool.putconn(conn)
+                return
+        conn.close()
+    except Exception:
+        pass
 
 
 def _get_sqlite_conn() -> sqlite3.Connection:
@@ -36,6 +85,30 @@ def _get_sqlite_conn() -> sqlite3.Connection:
     conn = sqlite3.connect("scanner.db")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# ── ET date/time helpers for timezone-aware queries ──────────────────────────
+def _et_date() -> str:
+    """Return today's date in ET — use in all date-range queries."""
+    try:
+        from utils import et_date_str
+        return et_date_str()
+    except Exception:
+        from datetime import timezone, timedelta
+        utc = datetime.now(timezone.utc)
+        et_offset = -4 if 3 <= utc.month <= 11 else -5
+        return (utc + timedelta(hours=et_offset)).strftime("%Y-%m-%d")
+
+def _et_date_time_str() -> str:
+    """Return current ET time as display string for alert_log."""
+    try:
+        from utils import now_et
+        return now_et().strftime("%H:%M ET")
+    except Exception:
+        from datetime import timezone, timedelta
+        utc = datetime.now(timezone.utc)
+        et_offset = -4 if 3 <= utc.month <= 11 else -5
+        return (utc + timedelta(hours=et_offset)).strftime("%H:%M ET")
 
 
 def initialize_db():
@@ -935,7 +1008,7 @@ def get_connection():
 # ─── Scan Results ──────────────────────────────────────────────────────────────
 
 def save_scan_result(result: dict):
-    scan_date = result.get("scan_date", datetime.now().strftime("%Y-%m-%d"))
+    scan_date = result.get("scan_date", _et_date())
     ticker    = result.get("ticker", "")
 
     if _is_postgres():
@@ -1021,7 +1094,7 @@ def get_latest_scan() -> pd.DataFrame:
 
 def save_watchlist(tickers: List[str], stats: dict = {}):
     """Called by scanner to save today's watchlist to shared DB."""
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = _et_date()
     tickers_json = json.dumps(tickers)
     stats_json   = json.dumps(stats)
 
@@ -1057,7 +1130,7 @@ def save_watchlist(tickers: List[str], stats: dict = {}):
 
 def load_watchlist() -> dict:
     """Called by dashboard to load today's watchlist from shared DB."""
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = _et_date()
 
     if _is_postgres():
         try:
@@ -1092,8 +1165,7 @@ def load_watchlist() -> dict:
 def save_alert(message: str, ticker: str = "", alert_type: str = ""):
     """Called by scanner to save an alert to shared DB."""
     try:
-        from datetime import datetime as dt
-        alert_time = dt.now().strftime("%H:%M ET")
+        alert_time = _et_date_time_str()
 
         if _is_postgres():
             conn = _get_pg_conn()
@@ -1119,7 +1191,7 @@ def save_alert(message: str, ticker: str = "", alert_type: str = ""):
 
 def load_alerts(limit: int = 100) -> List[str]:
     """Called by dashboard to load today's alerts from shared DB."""
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = _et_date()
 
     if _is_postgres():
         try:
@@ -1127,7 +1199,7 @@ def load_alerts(limit: int = 100) -> List[str]:
             cur  = conn.cursor()
             cur.execute("""
                 SELECT alert_time, message FROM alert_log
-                WHERE DATE(created_at) = %s
+                WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s
                 ORDER BY created_at DESC
                 LIMIT %s
             """, (date_str, limit))
@@ -1149,7 +1221,7 @@ def load_alerts(limit: int = 100) -> List[str]:
 # ─── Scanner State (used by scanner service only) ─────────────────────────────
 
 def load_scanner_state() -> dict:
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = _et_date()
     if _is_postgres():
         try:
             conn = _get_pg_conn()
@@ -1190,7 +1262,7 @@ def load_scanner_state() -> dict:
 
 
 def save_scanner_state(state_dict: dict):
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = _et_date()
     if _is_postgres():
         try:
             conn = _get_pg_conn()
@@ -1317,18 +1389,18 @@ def get_control_stats() -> dict:
     """Return summary stats for the Control tab: signals today, alerts today, top signal, scan count."""
     stats = {"signals_today": 0, "alerts_today": 0, "top_signal": None,
              "scan_count": 0, "last_updated": None}
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = _et_date()
     try:
         if _is_postgres():
             conn = _get_pg_conn()
             cur  = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM signal_log WHERE DATE(created_at) = %s", (date_str,))
+            cur.execute("SELECT COUNT(*) FROM signal_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,))
             stats["signals_today"] = cur.fetchone()[0] or 0
-            cur.execute("SELECT COUNT(*) FROM alert_log WHERE DATE(created_at) = %s", (date_str,))
+            cur.execute("SELECT COUNT(*) FROM alert_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,))
             stats["alerts_today"] = cur.fetchone()[0] or 0
             cur.execute("""
                 SELECT ticker, signal_label, score FROM signal_log
-                WHERE DATE(created_at) = %s ORDER BY score DESC LIMIT 1
+                WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s ORDER BY score DESC LIMIT 1
             """, (date_str,))
             row = cur.fetchone()
             if row:
@@ -1379,8 +1451,8 @@ def log_paper_trade(ticker: str, signal_type: str, entry_price: float,
                     stop_price: float, target1: float, target2: float,
                     source_type: str = "signal", score_at_entry: float = None) -> Optional[int]:
     """Log a new paper trade entry. Returns the row id or None on failure."""
-    trade_date = datetime.now().strftime("%Y-%m-%d")
-    entry_time = datetime.now().strftime("%H:%M ET")
+    trade_date = _et_date()
+    entry_time = _et_date_time_str()
     try:
         if _is_postgres():
             conn = _get_pg_conn()
@@ -1418,8 +1490,8 @@ def close_paper_trades_eod(exit_prices: dict):
     Called at EOD with {ticker: exit_price}. Closes all open trades from today.
     Marks win/loss based on whether exit >= target1 or exit <= stop.
     """
-    trade_date = datetime.now().strftime("%Y-%m-%d")
-    exit_time  = datetime.now().strftime("%H:%M ET")
+    trade_date = _et_date()
+    exit_time  = _et_date_time_str()
     try:
         if _is_postgres():
             conn = _get_pg_conn()
@@ -2232,7 +2304,7 @@ def _compute_scanner_status(mode: str, last_heartbeat, paused: bool) -> str:
 
 def get_scanner_state() -> dict:
     """Return combined scanner_state + scanner_control dict for status display."""
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = _et_date()
     result = {
         "current_mode": "UNKNOWN", "paused": False,
         "last_heartbeat": None, "scan_count": 0,
@@ -2275,11 +2347,11 @@ def get_scanner_state() -> dict:
                 result["last_conviction_run"]      = row[8]
                 result["last_accuracy_run"]        = row[9]
             cur.execute(
-                "SELECT COUNT(*) FROM signal_log WHERE DATE(created_at) = %s", (date_str,)
+                "SELECT COUNT(*) FROM signal_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,)
             )
             result["signals_today"] = cur.fetchone()[0] or 0
             cur.execute(
-                "SELECT COUNT(*) FROM alert_log WHERE DATE(created_at) = %s", (date_str,)
+                "SELECT COUNT(*) FROM alert_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,)
             )
             result["alerts_today"] = cur.fetchone()[0] or 0
             cur.close(); conn.close()
