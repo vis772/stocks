@@ -20,9 +20,9 @@ from typing import List, Dict, Optional
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 
 CRITERIA = {
-    "min_market_cap": 20_000_000,     # $20M floor
-    "max_market_cap": 2_000_000_000,  # $2B ceiling
-    "min_adv":        50_000,         # 50K shares/day
+    "min_market_cap": 20_000_000,      # $20M floor
+    "max_market_cap": 20_000_000_000,  # $20B ceiling (small + mid-cap universe)
+    "min_adv":        50_000,          # 50K shares/day
     "min_price":      0.50,
     "max_price":      500.0,
 }
@@ -282,12 +282,12 @@ def refresh_universe() -> Dict[str, int]:
 
 
 def get_universe_tickers(min_market_cap: int = 20_000_000,
-                          max_market_cap: int = 2_000_000_000,
+                          max_market_cap: int = 20_000_000_000,
                           min_adv: int = 50_000,
                           limit: int = 3000) -> List[str]:
     """
     Fast path: return tickers from stock_universe (cached in DB).
-    Falls back to DEFAULT_UNIVERSE if the table is empty.
+    Falls back to a dynamic Finnhub fetch when DB is empty, then DEFAULT_UNIVERSE.
     """
     try:
         from db.database import get_active_universe
@@ -319,8 +319,17 @@ def get_universe_tickers(min_market_cap: int = 20_000_000,
     except Exception as e:
         _log(f"Legacy universe table fallback failed: {e}")
 
+    # Dynamic fallback: pull common-stock symbols from Finnhub (no yfinance enrichment needed
+    # for a candidate list — market-cap filtering happens in passes_universe_filter at scan time)
+    _log("DB universe empty — fetching candidate list from Finnhub as temporary universe")
+    raw = _fetch_finnhub_symbols()
+    if raw:
+        tickers = [s["ticker"] for s in raw]
+        _log(f"Dynamic Finnhub fallback: {len(tickers)} symbol candidates")
+        return tickers[:limit]
+
     from config import DEFAULT_UNIVERSE
-    _log(f"Falling back to DEFAULT_UNIVERSE ({len(DEFAULT_UNIVERSE)} stocks)")
+    _log(f"All universe sources failed — using DEFAULT_UNIVERSE ({len(DEFAULT_UNIVERSE)} tickers)")
     return DEFAULT_UNIVERSE
 
 

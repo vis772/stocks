@@ -13,6 +13,50 @@ from analysis.fundamentals import score_fundamentals, score_risk, score_catalyst
 from db.database import save_scan_result
 
 
+def _check_fcf_gate(snapshot: Dict) -> Dict:
+    """
+    Hard pre-filter that runs before scoring.
+
+    A stock passes unless it demonstrates catastrophic cash-burn dynamics:
+      PASS — FCF unavailable (benefit of the doubt on missing data)
+      PASS — FCF >= 0 (profitable / breakeven)
+      PASS — FCF < 0 but cash runway >= 12 months
+      FAIL — FCF < 0 and runway < 6 months (imminent cash crisis)
+      FAIL — FCF burn > $100M/yr on market cap < $500M (burn dwarfs company size)
+    """
+    fcf        = snapshot.get("free_cashflow")
+    cash       = snapshot.get("total_cash")
+    market_cap = snapshot.get("market_cap") or 0
+
+    if fcf is None:
+        return {"passes": True, "reason": "no FCF data"}
+    if fcf >= 0:
+        return {"passes": True, "reason": "FCF positive"}
+
+    monthly_burn = abs(fcf) / 12
+
+    if cash is not None and monthly_burn > 0:
+        runway_months = cash / monthly_burn
+        if runway_months < 6:
+            return {
+                "passes": False,
+                "reason": (
+                    f"runway {runway_months:.1f}mo < 6mo minimum "
+                    f"(burn ${abs(fcf)/1e6:.1f}M/yr, cash ${cash/1e6:.1f}M)"
+                ),
+            }
+
+    if market_cap > 0 and abs(fcf) > 100_000_000 and market_cap < 500_000_000:
+        return {
+            "passes": False,
+            "reason": (
+                f"FCF burn ${abs(fcf)/1e6:.0f}M/yr vs ${market_cap/1e6:.0f}M market cap"
+            ),
+        }
+
+    return {"passes": True, "reason": "FCF within acceptable range"}
+
+
 def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) -> Optional[Dict]:
     ticker = ticker.upper().strip()
     print(f"  → Scanning {ticker}...")
@@ -46,6 +90,19 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
             "market_cap":    snapshot.get("market_cap"),
             "filtered_out":  True,
             "filter_reason": reason,
+        }
+
+    # Step 2b: FCF Hard Pre-filter Gate
+    fcf_gate = _check_fcf_gate(snapshot)
+    if not fcf_gate["passes"]:
+        print(f"  ✗ {ticker} — FCF gate: {fcf_gate['reason']}")
+        return {
+            **result,
+            "company_name":  snapshot.get("company_name", ticker),
+            "price":         snapshot.get("price"),
+            "market_cap":    snapshot.get("market_cap"),
+            "filtered_out":  True,
+            "filter_reason": f"FCF gate: {fcf_gate['reason']}",
         }
 
     # Step 3: Technicals

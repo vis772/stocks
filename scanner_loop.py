@@ -1016,6 +1016,18 @@ def run_scanner():
     except Exception as _dbi_e:
         print(f"  [startup] DB init failed: {_dbi_e}")
 
+    # Bootstrap universe in background if DB is empty or stale
+    try:
+        from universe_manager import get_universe_size, refresh_universe
+        _usize = get_universe_size()
+        print(f"  [universe] {_usize} tickers in DB")
+        if _usize < 100:
+            print("  [universe] Universe empty/thin — starting background refresh (15–30 min)...")
+            import threading as _threading
+            _threading.Thread(target=refresh_universe, daemon=True, name="universe-refresh").start()
+    except Exception as _ue:
+        print(f"  [startup] Universe bootstrap failed: {_ue}")
+
     _QUANT_MODE_ACTIVE = os.environ.get("AXIOM_QUANT_MODE", "1") == "1"
     print(f"  [quant_mode] AXIOM_QUANT_MODE={'ON (MultiFactorScorer active)' if _QUANT_MODE_ACTIVE else 'OFF (legacy scorer only)'}")
 
@@ -1064,11 +1076,15 @@ def run_scanner():
         try:
             _test_wl = load_todays_watchlist()
         except Exception as _wl_e:
-            print(f"  [TEST MODE] load_todays_watchlist failed ({_wl_e}), falling back to DEFAULT_UNIVERSE")
+            print(f"  [TEST MODE] load_todays_watchlist failed ({_wl_e}), using dynamic universe")
             _test_wl = []
         if not _test_wl:
-            from config import DEFAULT_UNIVERSE
-            _test_wl = DEFAULT_UNIVERSE
+            try:
+                from universe_manager import get_universe_tickers
+                _test_wl = get_universe_tickers(limit=500)
+            except Exception:
+                from config import DEFAULT_UNIVERSE
+                _test_wl = DEFAULT_UNIVERSE
         print(f"  Watchlist: {len(_test_wl)} stocks")
 
         print("  Running scan_one_ticker on all watchlist stocks...")
@@ -1151,8 +1167,12 @@ def run_scanner():
                     if not watchlist:
                         watchlist = load_todays_watchlist() or []
                         if not watchlist:
-                            from config import DEFAULT_UNIVERSE
-                            watchlist = DEFAULT_UNIVERSE
+                            try:
+                                from universe_manager import get_universe_tickers
+                                watchlist = get_universe_tickers(limit=500)
+                            except Exception:
+                                from config import DEFAULT_UNIVERSE
+                                watchlist = DEFAULT_UNIVERSE
                     _fs_alerts: List[str] = []
                     with ThreadPoolExecutor(max_workers=15) as _fex:
                         _ffs = {_fex.submit(scan_one_ticker, t, state): t for t in watchlist}
@@ -1207,7 +1227,7 @@ def run_scanner():
             # ── Morning screen at 6 AM ET ─────────────────────────────────────
             if is_morning_screen_time() and last_screen_date != today_str:
                 print("\n[MORNING SCREEN] Building today's watchlist...")
-                watchlist          = build_todays_watchlist(max_stocks=50)
+                watchlist          = build_todays_watchlist(max_stocks=200)
                 last_screen_date   = today_str
                 morning_brief_sent = False
                 eod_report_sent    = False
@@ -1217,9 +1237,15 @@ def run_scanner():
             if not watchlist:
                 watchlist = load_todays_watchlist()
                 if not watchlist:
-                    from config import DEFAULT_UNIVERSE
-                    watchlist = DEFAULT_UNIVERSE
-                    print(f"  Using default universe: {len(watchlist)} stocks")
+                    # Prefer dynamic universe over hardcoded DEFAULT_UNIVERSE
+                    try:
+                        from universe_manager import get_universe_tickers
+                        watchlist = get_universe_tickers(limit=500)
+                        print(f"  Using dynamic universe: {len(watchlist)} stocks")
+                    except Exception:
+                        from config import DEFAULT_UNIVERSE
+                        watchlist = DEFAULT_UNIVERSE
+                        print(f"  Using default universe: {len(watchlist)} stocks")
                 _ensure_stream(watchlist)
             state.universe_size = len(watchlist)
 
