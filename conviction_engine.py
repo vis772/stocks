@@ -519,7 +519,7 @@ def save_buy_list(buy_list: list, session: str) -> None:
     if not buy_list:
         return
     try:
-        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn, _put_pg_conn
         today = date.today().isoformat()
         if _is_postgres():
             conn = _get_pg_conn(); cur = conn.cursor()
@@ -530,14 +530,16 @@ def save_buy_list(buy_list: list, session: str) -> None:
                     INSERT INTO conviction_buys
                         (date, session, rank, ticker, conviction, hold_type,
                          entry, stop_loss, target_1, target_2, target_3,
-                         position_pct, expected_value, reasoning, composite, quant_adj)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         position_pct, expected_value, reasoning, composite, quant_adj,
+                         signal_label)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (today, session, b["rank"], b["ticker"], b["conviction"], b["hold_type"],
                       p.get("entry"), p.get("stop_loss"), p.get("target_1"),
                       p.get("target_2"), p.get("target_3"), p.get("position_size"),
                       p.get("expected_value"), b.get("why"),
-                      b.get("composite"), b.get("quant_adj")))
-            conn.commit(); cur.close(); conn.close()
+                      b.get("composite"), b.get("quant_adj"),
+                      b.get("signal_label", "Conviction Buy")))
+            conn.commit(); cur.close(); _put_pg_conn(conn)
         else:
             conn = _get_sqlite_conn()
             conn.execute("DELETE FROM conviction_buys WHERE date=? AND session=?", (today, session))
@@ -547,13 +549,15 @@ def save_buy_list(buy_list: list, session: str) -> None:
                     INSERT INTO conviction_buys
                         (date, session, rank, ticker, conviction, hold_type,
                          entry, stop_loss, target_1, target_2, target_3,
-                         position_pct, expected_value, reasoning, composite, quant_adj)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         position_pct, expected_value, reasoning, composite, quant_adj,
+                         signal_label)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (today, session, b["rank"], b["ticker"], b["conviction"], b["hold_type"],
                       p.get("entry"), p.get("stop_loss"), p.get("target_1"),
                       p.get("target_2"), p.get("target_3"), p.get("position_size"),
                       p.get("expected_value"), b.get("why"),
-                      b.get("composite"), b.get("quant_adj")))
+                      b.get("composite"), b.get("quant_adj"),
+                      b.get("signal_label", "Conviction Buy")))
             conn.commit(); conn.close()
         print(f"  [conviction] Saved {len(buy_list)} buys for session={session}")
     except Exception as e:
@@ -1247,6 +1251,91 @@ def build_conviction_pdf(entries: list, generated_at=None, session: str = "marke
     except Exception as e:
         print(f"  [conviction] build_conviction_pdf failed: {e}")
         return b""
+
+
+def resolve_conviction_outcomes() -> int:
+    """
+    Find pending conviction_buys from prior dates, pull 1-day return from
+    signal_outcomes, and update outcome_label to 'win', 'loss', or 'neutral'.
+    Returns count of rows resolved.
+    """
+    try:
+        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn, _put_pg_conn
+        today = date.today().isoformat()
+
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT cb.id, cb.ticker, cb.date
+                FROM conviction_buys cb
+                WHERE cb.outcome_label = 'pending'
+                  AND cb.date < %s
+            """, (today,))
+            pending = cur.fetchall()
+
+            resolved = 0
+            for row_id, ticker, cb_date in pending:
+                cur.execute("""
+                    SELECT so.ret_1d
+                    FROM signal_log sl
+                    JOIN signal_outcomes so ON so.signal_id = sl.id
+                    WHERE sl.ticker = %s
+                      AND DATE(sl.created_at AT TIME ZONE 'America/New_York') = %s
+                      AND so.ret_1d IS NOT NULL
+                    ORDER BY sl.created_at DESC
+                    LIMIT 1
+                """, (ticker, cb_date))
+                result = cur.fetchone()
+                if result is None:
+                    continue
+                ret_1d = float(result[0])
+                label = "win" if ret_1d > 0 else ("neutral" if ret_1d == 0 else "loss")
+                cur.execute(
+                    "UPDATE conviction_buys SET outcome_label = %s WHERE id = %s",
+                    (label, row_id)
+                )
+                resolved += 1
+
+            conn.commit(); cur.close(); _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            pending = conn.execute("""
+                SELECT id, ticker, date
+                FROM conviction_buys
+                WHERE outcome_label = 'pending'
+                  AND date < ?
+            """, (today,)).fetchall()
+
+            resolved = 0
+            for row_id, ticker, cb_date in pending:
+                result = conn.execute("""
+                    SELECT so.ret_1d
+                    FROM signal_log sl
+                    JOIN signal_outcomes so ON so.signal_id = sl.id
+                    WHERE sl.ticker = ?
+                      AND DATE(sl.created_at) = ?
+                      AND so.ret_1d IS NOT NULL
+                    ORDER BY sl.created_at DESC
+                    LIMIT 1
+                """, (ticker, cb_date)).fetchone()
+                if result is None:
+                    continue
+                ret_1d = float(result[0])
+                label = "win" if ret_1d > 0 else ("neutral" if ret_1d == 0 else "loss")
+                conn.execute(
+                    "UPDATE conviction_buys SET outcome_label = ? WHERE id = ?",
+                    (label, row_id)
+                )
+                resolved += 1
+
+            conn.commit(); conn.close()
+
+        if resolved:
+            print(f"  [conviction] Resolved {resolved} pending outcome(s)")
+        return resolved
+    except Exception as e:
+        print(f"  [conviction] resolve_conviction_outcomes failed: {e}")
+        return 0
 
 
 def run_conviction_engine(session: str = "afterhours", regime: str = "") -> list:
