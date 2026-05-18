@@ -1917,7 +1917,7 @@ def save_accuracy_report(report_type: str, checkpoint: int, filename: str,
                 INSERT INTO accuracy_reports (report_type, checkpoint, filename, download_url, status_label)
                 VALUES (%s, %s, %s, %s, %s)
             """, (report_type, checkpoint, filename, download_url, status_label))
-            conn.commit(); cur.close(); conn.close()
+            conn.commit(); cur.close(); _put_pg_conn(conn)
         else:
             conn = _get_sqlite_conn()
             conn.execute("""

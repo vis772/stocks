@@ -257,19 +257,20 @@ def _send_pushover(title: str, message: str, url: str = "") -> None:
     user_key  = os.environ.get("PUSHOVER_USER_KEY", "")
     api_token = os.environ.get("PUSHOVER_API_TOKEN", "")
     if not user_key or not api_token:
+        print("  [report] Pushover env vars not set — skipping notification")
         return
-    try:
-        requests.post(
-            "https://api.pushover.net/1/messages.json",
-            data={"token": api_token, "user": user_key, "title": title,
-                  "message": message, "url": url,
-                  "url_title": "Download PDF Report",
-                  "priority": 0, "sound": "cashregister"},
-            timeout=10,
-        )
+    resp = requests.post(
+        "https://api.pushover.net/1/messages.json",
+        data={"token": api_token, "user": user_key, "title": title,
+              "message": message, "url": url,
+              "url_title": "Download PDF Report",
+              "priority": 0, "sound": "cashregister"},
+        timeout=10,
+    )
+    if resp.status_code == 200:
         print(f"  [report] Pushover sent: {title}")
-    except Exception as e:
-        print(f"  [report] Pushover failed: {e}")
+    else:
+        raise RuntimeError(f"Pushover HTTP {resp.status_code}: {resp.text[:200]}")
 
 
 def _upload_and_notify(filename: str, title: str, message: str) -> Optional[str]:
@@ -539,7 +540,7 @@ def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
 
 # ─── Checkpoint 3: Day 60 — Final Verdict ────────────────────────────────────
 
-def generate_checkpoint_60(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
+def generate_checkpoint_60(df: pd.DataFrame, total_logged: int = 0) -> Optional[Tuple[str, str]]:
     print("\n[CHECKPOINT 600] Generating 600-Signal Final Verdict...")
     os.makedirs(REPORTS_DIR, exist_ok=True)
     filename = f"{REPORTS_DIR}/Axiom_Checkpoint600_{datetime.now().strftime('%Y-%m-%d')}.pdf"
@@ -555,8 +556,11 @@ def generate_checkpoint_60(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
     max_diff      = max((abs(d.get("diff") or 0) for d in comp_c.values()), default=0)
     gain_over_loss = (avg_w is not None and avg_l is not None and avg_w > abs(avg_l))
 
+    # total_logged is the all-time signal count passed in from the orchestrator.
+    # We already know total_logged >= 600 to reach this function, so the approved
+    # gate only needs meaningful win-rate data (resolved >= 30).
     approved = (
-        s.get("total", 0) >= 600 and
+        s.get("resolved", 0) >= 30 and
         wr is not None and wr >= 55 and
         (sb_wr is None or sb_wr >= 60) and
         gain_over_loss and
@@ -590,7 +594,8 @@ def generate_checkpoint_60(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
     # Full summary table
     story.append(Paragraph("FULL ACCURACY SUMMARY", ST["section"]))
     metrics_rows = [
-        ["Total signals logged",        str(s.get("total", 0))],
+        ["Total signals logged (all-time)", str(total_logged or s.get("total", 0))],
+        ["Signals in 120-day window",   str(s.get("total", 0))],
         ["Resolved signals",            str(s.get("resolved", 0))],
         ["Overall win rate (5-day)",    f"{wr:.1f}%"        if wr     is not None else "—"],
         ["Average win (5-day)",         f"+{avg_w:.2f}%"    if avg_w  is not None else "—"],
@@ -769,7 +774,7 @@ def check_and_run_checkpoints() -> None:
          "Axiom Terminal — Sanity Check (150 Signals)"),
         (350, "checkpoint_350", generate_checkpoint_30,
          "Axiom Terminal — Preliminary Assessment (350 Signals)"),
-        (600, "checkpoint_600", generate_checkpoint_60,
+        (600, "checkpoint_600", None,
          "Axiom Terminal — Final Verdict (600 Signals)"),
     ]
 
@@ -780,7 +785,11 @@ def check_and_run_checkpoints() -> None:
                 if df.empty:
                     print(f"  [checkpoint] {rtype} skipped — no signals in 120-day window for report")
                     continue
-                result = gen_fn(df)
+                # generate_checkpoint_60 needs total_logged for accurate display/approval
+                if rtype == "checkpoint_600":
+                    result = generate_checkpoint_60(df, total_logged=total_logged)
+                else:
+                    result = gen_fn(df)
                 if result is None:
                     print(f"  [checkpoint] {rtype} generation returned None")
                     continue
