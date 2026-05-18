@@ -676,6 +676,8 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                         price_at_signal  = price,
                         volume_at_signal = volume,
                         alert_type       = "gap_up",
+                        scoring_path     = "static",
+                        catalyst_mult    = 1.0,
                     )
                     if sig_id:
                         print(f"  [signal_log] ✓ {ticker} Gap-Up {change_pct:+.1f}% | id={sig_id}")
@@ -951,6 +953,8 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                     source_quality   = source_qual,
                     session_mode     = session_mode,
                     quality_tag      = quality_tag,
+                    scoring_path     = result.get("scoring_path", "static"),
+                    catalyst_mult    = result.get("catalyst_mult", 1.0),
                 )
                 if sig_id:
                     print(f"  [signal_log] ✓ {ticker} | {signal_label} | score={score:.0f} | quant={quant_adj:+.1f} | id={sig_id}")

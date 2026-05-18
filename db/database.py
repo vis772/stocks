@@ -517,6 +517,8 @@ def _init_postgres():
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS factors_json        TEXT",
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS regime              TEXT",
         "ALTER TABLE scanner_control ADD COLUMN IF NOT EXISTS restart_requested   BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS scoring_path        VARCHAR(10) DEFAULT 'static'",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS catalyst_mult       FLOAT DEFAULT 1.0",
     ]:
         try:
             cur.execute(ddl)
@@ -922,6 +924,8 @@ def _init_sqlite():
         "ALTER TABLE conviction_buys ADD COLUMN factors_json        TEXT",
         "ALTER TABLE conviction_buys ADD COLUMN regime              TEXT",
         "ALTER TABLE scanner_control ADD COLUMN restart_requested   INTEGER DEFAULT 0",
+        "ALTER TABLE signal_log      ADD COLUMN scoring_path        TEXT DEFAULT 'static'",
+        "ALTER TABLE signal_log      ADD COLUMN catalyst_mult       REAL DEFAULT 1.0",
     ]:
         try:
             cur.execute(col_sql)
@@ -1625,7 +1629,8 @@ def log_signal(ticker: str, signal_label: str, score: float,
                score_breakdown: dict, price_at_signal: float,
                volume_at_signal: float, alert_type: str,
                quant_adj: float = None, source_quality: str = None,
-               session_mode: str = None, quality_tag: str = None) -> Optional[int]:
+               session_mode: str = None, quality_tag: str = None,
+               scoring_path: str = "static", catalyst_mult: float = 1.0) -> Optional[int]:
     """Log a scanner signal. Returns the signal_log row id or None on failure."""
     breakdown_json = json.dumps(score_breakdown)
     try:
@@ -1636,12 +1641,14 @@ def log_signal(ticker: str, signal_label: str, score: float,
                 INSERT INTO signal_log
                     (ticker, signal_label, score, score_breakdown,
                      price_at_signal, volume_at_signal, alert_type,
-                     quant_adj, source_quality, session_mode, quality_tag)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                     quant_adj, source_quality, session_mode, quality_tag,
+                     scoring_path, catalyst_mult)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
             """, (ticker, signal_label, _f(score), breakdown_json,
                   _f(price_at_signal), _f(volume_at_signal), alert_type,
                   _f(quant_adj) if quant_adj is not None else None,
-                  source_quality, session_mode or "MARKET", quality_tag))
+                  source_quality, session_mode or "MARKET", quality_tag,
+                  scoring_path, _f(catalyst_mult)))
             sig_id = cur.fetchone()[0]
             cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (%s)", (sig_id,))
             conn.commit(); cur.close(); conn.close()
@@ -1653,12 +1660,14 @@ def log_signal(ticker: str, signal_label: str, score: float,
                 INSERT INTO signal_log
                     (ticker, signal_label, score, score_breakdown,
                      price_at_signal, volume_at_signal, alert_type,
-                     quant_adj, source_quality, session_mode, quality_tag)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                     quant_adj, source_quality, session_mode, quality_tag,
+                     scoring_path, catalyst_mult)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (ticker, signal_label, _f(score), breakdown_json,
                   _f(price_at_signal), _f(volume_at_signal), alert_type,
                   _f(quant_adj) if quant_adj is not None else None,
-                  source_quality, session_mode or "MARKET", quality_tag))
+                  source_quality, session_mode or "MARKET", quality_tag,
+                  scoring_path, _f(catalyst_mult)))
             sig_id = cur.lastrowid
             cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (?)", (sig_id,))
             conn.commit(); conn.close()

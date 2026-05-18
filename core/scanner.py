@@ -325,6 +325,8 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
         "sector_return_20d":      snapshot.get("sector_return_20d"),
         "stock_vs_sector":        snapshot.get("stock_vs_sector"),
         "sector_rs_label":        snapshot.get("sector_rs_label"),
+        "scoring_path":  _scoring_mode,
+        "catalyst_mult": catalyst_mult if _has_factor_data else 1.0,
         "score_breakdown": _build_score_breakdown(
             _scoring_mode, _has_factor_data,
             tech_score, cat_score, fund_score, risk_contribution, raw_risk, sent_score,
