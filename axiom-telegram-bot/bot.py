@@ -4,6 +4,7 @@ Two-way agentic control via Claude tool use.
 """
 
 import os
+import re
 import asyncio
 import logging
 from telegram import Update
@@ -16,6 +17,70 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ── HTML helpers ─────────────────────────────────────────────────────────────
+
+# Tags Telegram HTML mode actually supports
+_TG_SUPPORTED = frozenset({
+    "b", "strong", "i", "em", "u", "ins",
+    "s", "strike", "del",
+    "code", "pre",
+    "a",           # <a href="..."> preserved verbatim
+    "blockquote",
+})
+
+# Unsupported block-level tags → newline so the text still reads naturally
+_TG_BLOCK = frozenset({
+    "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+    "hr", "ul", "ol", "table", "thead", "tbody", "tfoot",
+})
+
+
+def _sanitize_html(text: str) -> str:
+    """
+    Prepare Claude's output for Telegram HTML mode.
+
+    Keeps the tags Telegram supports, converts block-level tags to newlines
+    so text still reads naturally, and strips everything else (span, font,
+    div, etc.) while preserving their inner content.
+    """
+    # <br> / <br/> → newline before the tag-replacement pass
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+
+    def _replace(m: re.Match) -> str:
+        slash = m.group(1)          # "/" for closing tags, "" for opening
+        name  = m.group(2).lower()
+        if name in _TG_SUPPORTED:
+            return m.group(0)       # keep verbatim
+        if name in _TG_BLOCK:
+            return "\n" if slash else ""   # closing → newline, opening → nothing
+        return ""                   # strip the tag, keep surrounding text
+
+    text = re.sub(r"<(/?)(\w+)\b[^>]*>", _replace, text)
+    text = re.sub(r"\n{3,}", "\n\n", text)  # collapse excessive blank lines
+    return text.strip()
+
+
+def _strip_all_html(text: str) -> str:
+    """Remove every HTML tag and decode basic entities — plain-text fallback."""
+    plain = re.sub(r"<[^>]+>", "", text)
+    return (plain
+            .replace("&lt;", "<").replace("&gt;", ">")
+            .replace("&amp;", "&").replace("&quot;", '"').replace("&apos;", "'")
+            .strip())
+
+
+async def _reply_html(message, text: str) -> None:
+    """
+    Send text with HTML formatting.  If Telegram rejects the markup
+    (malformed tags, unsupported entities, …) retry immediately as plain text.
+    """
+    try:
+        await message.reply_text(text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.warning("HTML send failed (%s) — retrying as plain text", e)
+        await message.reply_text(_strip_all_html(text))
+
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 ALLOWED_USER_ID = int(os.environ["TELEGRAM_ALLOWED_USER_ID"])
@@ -157,10 +222,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not response:
         response = "Done."
 
-    chunks = [response[i:i + 4000] for i in range(0, len(response), 4000)]
+    # Sanitize the full response before chunking so tag removal doesn't
+    # shift the boundary into the middle of a supported tag.
+    response = _sanitize_html(response)
 
+    chunks = [response[i:i + 4000] for i in range(0, len(response), 4000)]
     for chunk in chunks:
-        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        await _reply_html(update.message, chunk)
 
 
 def main():
