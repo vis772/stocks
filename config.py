@@ -7,10 +7,9 @@ from dataclasses import dataclass, field
 from typing import List
 
 # ─── Market Cap Filters ────────────────────────────────────────────────────────
-# We focus on small-cap and mid-cap only.
-# Small-cap: $50M - $2B | Mid-cap: $2B - $10B
-MIN_MARKET_CAP = 50_000_000       # $50M floor — below this is micro-cap/too risky
-MAX_MARKET_CAP = 25_000_000_000   # $10B ceiling — above this is large-cap territory
+# Small-cap: $20M–$2B | Mid-cap: $2B–$20B
+MIN_MARKET_CAP = 20_000_000       # $20M floor
+MAX_MARKET_CAP = 20_000_000_000   # $20B ceiling — matches universe_manager.CRITERIA
 
 # ─── Volume Filters ────────────────────────────────────────────────────────────
 MIN_AVG_VOLUME = 500_000           # Minimum average daily volume (liquidity floor)
@@ -90,13 +89,34 @@ NEWS_RSS_FEEDS = [
 DB_PATH = "scanner.db"   # SQLite database, stored locally
 
 # ─── Scan Universe ─────────────────────────────────────────────────────────────
-# Default watchlist universe — these are loaded at startup.
-# The scanner will also accept any tickers you type in the UI.
+# Emergency fallback only — used when both the DB universe and Finnhub are unavailable.
+# Under normal operation the scanner pulls 500–2000 tickers from the stock_universe
+# table (populated by universe_manager.refresh_universe()).
 DEFAULT_UNIVERSE = [
-    "LAES", "WULF", "IREN", "CIFR", "RKLB", "SOUN", "BBAI",
-    "NKLA", "IONQ", "ARQQ", "GFAI", "CLSK", "MARA", "RIOT",
-    "BTBT", "HIMS", "ACHR", "JOBY", "LUNR", "RDDT", "RGTI",
-    "QBTS", "QUBT", "PRCT", "TPVG", "CELH", "BLNK", "CHPT",
+    # Crypto/mining/energy
+    "WULF", "IREN", "CIFR", "CLSK", "MARA", "RIOT", "BTBT", "BITF", "HUT",
+    # Space / aviation / mobility
+    "RKLB", "ACHR", "JOBY", "LUNR", "ASTS",
+    # AI / quantum / tech
+    "SOUN", "BBAI", "IONQ", "ARQQ", "GFAI", "RGTI", "QBTS", "QUBT", "PRCT",
+    # Fintech / consumer
+    "HIMS", "RDDT", "SOFI", "AFRM", "UPST", "HOOD", "DKNG",
+    # EV / clean energy
+    "NKLA", "BLNK", "CHPT", "PLUG", "FCEL", "BE", "NOVA", "RUN",
+    # Biotech / healthcare
+    "NVAX", "MRNA", "BNTX", "BLUE", "BEAM", "CRSP", "EDIT", "NTLA", "FATE",
+    "ALNY", "BMRN", "NVCR", "AXNX", "VERV",
+    # Small/mid-cap growth
+    "CELH", "TPVG", "OPEN", "PENN", "BYND",
+    # Semiconductors / hardware
+    "WOLF", "ALGM", "CRUS", "DIOD", "FORM", "AMBA", "PLAB",
+    # Software / SaaS
+    "ALKT", "APPN", "BAND", "DDOG", "FRSH", "GTLB", "HUBS", "MNDY",
+    "PCVX", "TOST", "TASK", "WEAV",
+    # Industrials / specialty
+    "ACMR", "AZTA", "CEVA", "COHU", "KLIC", "MKSI", "ONTO", "UCTT",
+    # Consumer / retail
+    "LOVE", "PRPL", "PUBM", "SMAR", "SPSC", "STAA", "TRMK", "VCEL",
 ]
 
 # ─── Anthropic Claude API ──────────────────────────────────────────────────────

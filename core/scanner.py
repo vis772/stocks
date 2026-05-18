@@ -1,4 +1,5 @@
 # core/scanner.py
+import os
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -11,6 +12,96 @@ from data.news_data import fetch_ticker_news, analyze_news_sentiment
 from analysis.technicals import compute_technicals, suggest_entry_and_stops
 from analysis.fundamentals import score_fundamentals, score_risk, score_catalyst
 from db.database import save_scan_result
+
+
+def _check_fcf_gate(snapshot: Dict) -> Dict:
+    """
+    Hard pre-filter that runs before scoring.
+
+    A stock passes unless it demonstrates catastrophic cash-burn dynamics:
+      PASS — FCF unavailable (benefit of the doubt on missing data)
+      PASS — FCF >= 0 (profitable / breakeven)
+      PASS — FCF < 0 but cash runway >= 12 months
+      FAIL — FCF < 0 and runway < 6 months (imminent cash crisis)
+      FAIL — FCF burn > $100M/yr on market cap < $500M (burn dwarfs company size)
+    """
+    fcf        = snapshot.get("free_cashflow")
+    cash       = snapshot.get("total_cash")
+    market_cap = snapshot.get("market_cap") or 0
+
+    if fcf is None:
+        return {"passes": True, "reason": "no FCF data"}
+    if fcf >= 0:
+        return {"passes": True, "reason": "FCF positive"}
+
+    monthly_burn = abs(fcf) / 12
+
+    if cash is not None and monthly_burn > 0:
+        runway_months = cash / monthly_burn
+        if runway_months < 6:
+            return {
+                "passes": False,
+                "reason": (
+                    f"runway {runway_months:.1f}mo < 6mo minimum "
+                    f"(burn ${abs(fcf)/1e6:.1f}M/yr, cash ${cash/1e6:.1f}M)"
+                ),
+            }
+
+    if market_cap > 0 and abs(fcf) > 100_000_000 and market_cap < 500_000_000:
+        return {
+            "passes": False,
+            "reason": (
+                f"FCF burn ${abs(fcf)/1e6:.0f}M/yr vs ${market_cap/1e6:.0f}M market cap"
+            ),
+        }
+
+    return {"passes": True, "reason": "FCF within acceptable range"}
+
+
+def _fundamental_tier(fund_score: float) -> float:
+    """Map fundamental score to a simple quality tier (0-100) for the static-path fallback."""
+    if fund_score >= 70:
+        return 80.0
+    elif fund_score >= 50:
+        return 60.0
+    elif fund_score >= 35:
+        return 40.0
+    else:
+        return 20.0
+
+
+def _build_score_breakdown(
+    mode: str, has_factor_data: bool,
+    tech: float, cat: float, fund: float, risk_inv: float, raw_risk: float, sent: float,
+    factor_z_scores: Dict, quant_result: Dict, w: Dict,
+) -> Dict:
+    if has_factor_data:
+        cat_mult_str = "0.70×" if cat < 30 else "1.0×"
+        bd = {
+            "Scoring Mode":    "dynamic (quant factors available)",
+            "Technical":       f"{round(tech, 1)}/100  (weight: 40%)",
+            "Catalyst":        f"{round(cat, 1)}/100  (multiplier: {cat_mult_str})",
+            "Fundamental":     f"{round(fund, 1)}/100  (weight: 20%)",
+            "Risk (inverted)": f"{round(risk_inv, 1)}/100  (raw risk: {round(raw_risk, 1)}, weight: 30%)",
+            "Sentiment":       f"{round(sent, 1)}/100  (weight: 10%)",
+        }
+        if quant_result:
+            bd["Quant Composite"] = f"{quant_result.get('composite_score', 0):.1f}/100"
+        if factor_z_scores:
+            top_keys = list(factor_z_scores.keys())[:3]
+            bd["Quant Factors"] = f"{len(factor_z_scores)} factors — top: {', '.join(top_keys)}"
+    else:
+        tier_score = _fundamental_tier(fund)
+        bd = {
+            "Scoring Mode":    "static (no quant factor data)",
+            "Technical":       f"{round(tech, 1)}/100  (weight: {w['technical']:.0%})",
+            "Catalyst":        f"{round(cat, 1)}/100  (weight: {w['catalyst']:.0%})",
+            "Fundamental":     f"{round(fund, 1)}/100  (weight: {w['fundamental']:.0%})",
+            "Risk (inverted)": f"{round(risk_inv, 1)}/100  (raw risk: {round(raw_risk, 1)}, weight: {w['risk']:.0%})",
+            "Sentiment":       f"{round(sent, 1)}/100  (weight: {w['sentiment']:.0%})",
+            "Fund Tier (10%)": f"{tier_score:.0f}/100",
+        }
+    return bd
 
 
 def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) -> Optional[Dict]:
@@ -46,6 +137,19 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
             "market_cap":    snapshot.get("market_cap"),
             "filtered_out":  True,
             "filter_reason": reason,
+        }
+
+    # Step 2b: FCF Hard Pre-filter Gate
+    fcf_gate = _check_fcf_gate(snapshot)
+    if not fcf_gate["passes"]:
+        print(f"  ✗ {ticker} — FCF gate: {fcf_gate['reason']}")
+        return {
+            **result,
+            "company_name":  snapshot.get("company_name", ticker),
+            "price":         snapshot.get("price"),
+            "market_cap":    snapshot.get("market_cap"),
+            "filtered_out":  True,
+            "filter_reason": f"FCF gate: {fcf_gate['reason']}",
         }
 
     # Step 3: Technicals
@@ -99,16 +203,53 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
     risk_contribution = 100 - raw_risk
     sent_score       = news_sentiment.get("sentiment_score", 50)
 
-    # Step 7: Final Score
-    w = weights if weights is not None else SCORING_WEIGHTS
-    final_score = round(
-        tech_score        * w["technical"]   +
-        cat_score         * w["catalyst"]    +
-        fund_score        * w["fundamental"] +
-        risk_contribution * w["risk"]        +
-        sent_score        * w["sentiment"],
-        1
-    )
+    # Step 6b: Multi-factor scoring via quant engine (best-effort)
+    quant_result: Dict = {}
+    try:
+        if os.environ.get("AXIOM_QUANT_MODE", "1") == "1":
+            from quant.factor_engine import MultiFactorScorer
+            _hist = snapshot.get("_history")
+            if _hist is not None and not _hist.empty:
+                quant_result = MultiFactorScorer().score_ticker(
+                    ticker, snapshot, _hist, regime="NEUTRAL", log_factors=True
+                )
+    except Exception:
+        pass
+
+    # Step 7: Hybrid Final Score
+    #
+    # PATH A — complete factor data (>= 3 factors from MultiFactorScorer):
+    #   Tech 40%, Risk 30%, Fund 20%, Sentiment 10%
+    #   Catalyst is a quality multiplier: score × 0.70 if catalyst_score < 30
+    #
+    # PATH B — insufficient factor data (new ticker or quant engine skipped):
+    #   Existing static weights blended with a fundamental quality tier at 10%
+    #   final = static_score × 0.90 + fund_tier × 0.10
+    factor_z_scores = quant_result.get("factor_z_scores", {})
+    _has_factor_data = len(factor_z_scores) >= 3
+
+    if _has_factor_data:
+        base_score = (
+            tech_score        * 0.40 +
+            risk_contribution * 0.30 +
+            fund_score        * 0.20 +
+            sent_score        * 0.10
+        )
+        catalyst_mult = 0.70 if cat_score < 30 else 1.0
+        final_score   = round(base_score * catalyst_mult, 1)
+        _scoring_mode = "dynamic"
+    else:
+        w = weights if weights is not None else SCORING_WEIGHTS
+        static_score = (
+            tech_score        * w["technical"]   +
+            cat_score         * w["catalyst"]    +
+            fund_score        * w["fundamental"] +
+            risk_contribution * w["risk"]        +
+            sent_score        * w["sentiment"]
+        )
+        fund_tier   = _fundamental_tier(fund_score)
+        final_score = round(static_score * 0.90 + fund_tier * 0.10, 1)
+        _scoring_mode = "static"
 
     # Step 8: Signal
     signal = _score_to_signal(final_score)
@@ -184,13 +325,14 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
         "sector_return_20d":      snapshot.get("sector_return_20d"),
         "stock_vs_sector":        snapshot.get("stock_vs_sector"),
         "sector_rs_label":        snapshot.get("sector_rs_label"),
-        "score_breakdown": {
-            "Technical":       f"{round(tech_score, 1)}/100  (weight: {w['technical']:.0%})",
-            "Catalyst":        f"{round(cat_score, 1)}/100  (weight: {w['catalyst']:.0%})",
-            "Fundamental":     f"{round(fund_score, 1)}/100  (weight: {w['fundamental']:.0%})",
-            "Risk (inverted)": f"{round(risk_contribution, 1)}/100  (raw risk: {round(raw_risk,1)}, weight: {w['risk']:.0%})",
-            "Sentiment":       f"{round(sent_score, 1)}/100  (weight: {w['sentiment']:.0%})",
-        },
+        "scoring_path":  _scoring_mode,
+        "catalyst_mult": catalyst_mult if _has_factor_data else 1.0,
+        "score_breakdown": _build_score_breakdown(
+            _scoring_mode, _has_factor_data,
+            tech_score, cat_score, fund_score, risk_contribution, raw_risk, sent_score,
+            factor_z_scores, quant_result,
+            weights if weights is not None else SCORING_WEIGHTS,
+        ),
         "summary": _generate_summary(ticker, snapshot, final_score, signal, all_flags,
                                      catalyst_result, news_sentiment, technicals, fund_result),
     }

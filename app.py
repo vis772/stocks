@@ -23,6 +23,34 @@ from analysis.portfolio import analyze_holding, compute_portfolio_summary
 from data.market_data import fetch_ticker_snapshot, get_price_history, get_chart_data
 from analysis.technicals import compute_technicals
 
+# ── Cached DB helpers (ttl=60s keeps the dashboard snappy without hammering PG) ─
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_load_scanner_state() -> dict:
+    try:
+        from db.database import load_scanner_state
+        return load_scanner_state()
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_load_alerts(n: int = 100) -> list:
+    try:
+        from db.database import load_alerts
+        return load_alerts(n)
+    except Exception:
+        return []
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_conviction_list(max_age_minutes: int = 90) -> dict:
+    try:
+        from conviction_engine import get_latest_conviction_list
+        return get_latest_conviction_list(max_age_minutes=max_age_minutes)
+    except Exception:
+        return {"entries": [], "is_stale": True, "is_yesterday": False, "generated_at": None, "session": ""}
+
+# ──────────────────────────────────────────────────────────────────────────────
+
 _CONFIG_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_overrides.json")
 
 def _load_config_overrides():
@@ -1212,13 +1240,10 @@ with st.sidebar:
 
     st.markdown('<div style="padding:0 4px;"><div class="sh" style="margin-top:12px;">Conviction List</div></div>', unsafe_allow_html=True)
 
-    _cv_ts = None
-    try:
-        from conviction_engine import get_latest_conviction_list as _gcl
-        _cv_latest = _gcl(max_age_minutes=90)
-        _cv_ts = _cv_latest.get("generated_at")
-    except Exception:
-        _cv_latest = {"entries": [], "is_stale": True, "is_yesterday": False}
+    _cv_sidebar_data = _cached_conviction_list(max_age_minutes=90)
+    _cv_ts = _cv_sidebar_data.get("generated_at")
+    _cv_sidebar_stale = _cv_sidebar_data.get("is_stale", True)
+    _cv_sidebar_n = len(_cv_sidebar_data.get("entries", []))
 
     _cv_ts_str = "—"
     if _cv_ts:
@@ -1228,14 +1253,27 @@ with st.sidebar:
         except Exception:
             _cv_ts_str = str(_cv_ts)[:16]
 
+    _cv_btn_label = (
+        f"CONVICTION ({_cv_sidebar_n} picks)" if _cv_sidebar_n
+        else ("GENERATE CONVICTION LIST" if _cv_sidebar_stale else "CONVICTION LIST — Live")
+    )
     st.markdown(
         f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.62em;'
         f'color:var(--t3);padding:2px 4px 6px;">Last updated: {_cv_ts_str}</div>',
         unsafe_allow_html=True
     )
-    if st.button("CONVICTION LIST — Updated Live", key="conv_sidebar_btn",
+    if st.button(_cv_btn_label, key="conv_sidebar_btn",
                  use_container_width=True, type="primary"):
-        st.session_state.show_conviction = not st.session_state.get("show_conviction", False)
+        # If stale / empty, generate fresh; otherwise toggle visibility
+        if _cv_sidebar_stale or _cv_sidebar_n == 0:
+            with st.spinner("Generating conviction list..."):
+                try:
+                    from conviction_engine import generate_live_conviction_list
+                    generate_live_conviction_list(session="market")
+                    _cached_conviction_list.clear()  # bust cache so panel loads fresh data
+                except Exception as _sbcv_e:
+                    st.error(f"Generation failed: {_sbcv_e}")
+        st.session_state.show_conviction = True
         st.rerun()
 
 
@@ -1565,32 +1603,38 @@ def _live_control():
     st.markdown('<div class="ctrl-section">Conviction List</div>', unsafe_allow_html=True)
 
     _cv_col1, _cv_col2 = st.columns([3, 1])
-    with _cv_col1:
-        _cv_stale_info = ""
+    _cv_data = _cached_conviction_list(max_age_minutes=90)
+    _cv_is_stale = _cv_data.get("is_stale", True)
+    _cv_n        = len(_cv_data.get("entries", []))
+    _cv_gen      = _cv_data.get("generated_at")
+    _cv_stale_info = ""
+    if _cv_gen:
         try:
-            from conviction_engine import get_latest_conviction_list as _gcl2
-            _cv_data = _gcl2(max_age_minutes=90)
-            _cv_gen = _cv_data.get("generated_at")
-            if _cv_gen:
-                try:
-                    _cv_gdt = _cv_gen if isinstance(_cv_gen, datetime) else datetime.fromisoformat(str(_cv_gen).replace("Z",""))
-                    _cv_stale_info = _cv_gdt.strftime("%-I:%M %p")
-                except Exception:
-                    _cv_stale_info = str(_cv_gen)[:16]
+            _cv_gdt = _cv_gen if isinstance(_cv_gen, datetime) else datetime.fromisoformat(str(_cv_gen).replace("Z",""))
+            _cv_stale_info = _cv_gdt.strftime("%-I:%M %p")
         except Exception:
-            _cv_data = {"entries": [], "is_stale": True, "is_yesterday": False}
-        _cv_is_stale = _cv_data.get("is_stale", True)
-        _cv_is_yest = _cv_data.get("is_yesterday", False)
-        _cv_label = "CONVICTION LIST — Updated Live" if not _cv_is_stale else "CONVICTION LIST — Refresh Now"
+            _cv_stale_info = str(_cv_gen)[:16]
+
+    with _cv_col1:
+        _cv_label = (
+            f"CONVICTION ({_cv_n} picks) — Live" if _cv_n and not _cv_is_stale
+            else ("GENERATE CONVICTION LIST" if not _cv_n else "CONVICTION — Refresh Now")
+        )
         if st.button(_cv_label, use_container_width=True, key="conv_ctrl_btn", type="primary"):
-            st.session_state.show_conviction = not st.session_state.get("show_conviction", False)
-            if st.session_state.get("show_conviction") and _cv_is_stale:
-                with st.spinner("Generating conviction list..."):
+            # Always generate fresh when empty or stale
+            if _cv_is_stale or _cv_n == 0:
+                with st.spinner("Running conviction engine..."):
                     try:
                         from conviction_engine import generate_live_conviction_list
-                        _cv_data["entries"] = generate_live_conviction_list(session="market")
+                        _new_entries = generate_live_conviction_list(session="market")
+                        _cv_data = {"entries": _new_entries, "is_stale": False,
+                                    "is_yesterday": False, "generated_at": datetime.utcnow()}
+                        _cached_conviction_list.clear()  # invalidate so next load sees fresh DB rows
+                        st.session_state.show_conviction = True
                     except Exception as _cve:
                         st.error(f"Generation failed: {_cve}")
+            else:
+                st.session_state.show_conviction = not st.session_state.get("show_conviction", False)
             st.rerun()
     with _cv_col2:
         if _cv_stale_info:
@@ -1602,11 +1646,9 @@ def _live_control():
 
 @st.fragment(run_every=10)
 def _live_alerts_feed():
-    alert_log = []
-    try:
-        from db.database import load_alerts
-        alert_log = list(reversed(load_alerts(100)))
-    except Exception:
+    # Use cached wrappers to avoid a DB round-trip on every 10-second fragment refresh
+    alert_log = list(reversed(_cached_load_alerts(100)))
+    if not alert_log:
         try:
             import json as _json
             with open("alert_log.json") as f:
@@ -1614,11 +1656,8 @@ def _live_alerts_feed():
         except Exception:
             pass
 
-    scanner_state = {}
-    try:
-        from db.database import load_scanner_state
-        scanner_state = load_scanner_state()
-    except Exception:
+    scanner_state = _cached_load_scanner_state()
+    if not scanner_state:
         try:
             import json as _json
             with open("scanner_state.json") as f:
