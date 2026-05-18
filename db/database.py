@@ -21,11 +21,11 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 # ── Connection pool (PostgreSQL only) ────────────────────────────────────────
 # Uses a ThreadedConnectionPool so the scanner's ThreadPoolExecutor workers
-# don't exhaust the Supabase PostgreSQL connection limit.
+# never exhaust Railway's PostgreSQL connection limit.
 _pg_pool = None
 _pg_pool_lock = threading.Lock()
 _PG_POOL_MIN = 2
-_PG_POOL_MAX = 10  # safe for Supabase free tier (60 direct connections total)
+_PG_POOL_MAX = 10  # well under Railway's limit
 
 # Track which live connections came from the pool so _put_pg_conn can return
 # them correctly.  We use id(conn) because psycopg2 connection objects are C

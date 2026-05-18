@@ -1,9 +1,0 @@
-[server]
-headless = true
-address = "0.0.0.0"
-enableCORS = false
-enableXsrfProtection = false
-
-[browser]
-# Prevents Streamlit from trying to open a browser tab on the server
-gatherUsageStats = false
