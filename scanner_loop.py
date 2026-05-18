@@ -676,6 +676,8 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                         price_at_signal  = price,
                         volume_at_signal = volume,
                         alert_type       = "gap_up",
+                        scoring_path     = "static",
+                        catalyst_mult    = 1.0,
                     )
                     if sig_id:
                         print(f"  [signal_log] ✓ {ticker} Gap-Up {change_pct:+.1f}% | id={sig_id}")
@@ -726,8 +728,8 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                     fired.append(f"{ticker} news ({sentiment})")
                     break
 
-    except Exception:
-        pass
+    except Exception as _scan_err:
+        print(f"  [scan] {ticker} error: {_scan_err}")
     return fired
 
 
@@ -951,6 +953,8 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                     source_quality   = source_qual,
                     session_mode     = session_mode,
                     quality_tag      = quality_tag,
+                    scoring_path     = result.get("scoring_path", "static"),
+                    catalyst_mult    = result.get("catalyst_mult", 1.0),
                 )
                 if sig_id:
                     print(f"  [signal_log] ✓ {ticker} | {signal_label} | score={score:.0f} | quant={quant_adj:+.1f} | id={sig_id}")
@@ -1016,6 +1020,18 @@ def run_scanner():
     except Exception as _dbi_e:
         print(f"  [startup] DB init failed: {_dbi_e}")
 
+    # Bootstrap universe in background if DB is empty or stale
+    try:
+        from universe_manager import get_universe_size, refresh_universe
+        _usize = get_universe_size()
+        print(f"  [universe] {_usize} tickers in DB")
+        if _usize < 100:
+            print("  [universe] Universe empty/thin — starting background refresh (15–30 min)...")
+            import threading as _threading
+            _threading.Thread(target=refresh_universe, daemon=True, name="universe-refresh").start()
+    except Exception as _ue:
+        print(f"  [startup] Universe bootstrap failed: {_ue}")
+
     _QUANT_MODE_ACTIVE = os.environ.get("AXIOM_QUANT_MODE", "1") == "1"
     print(f"  [quant_mode] AXIOM_QUANT_MODE={'ON (MultiFactorScorer active)' if _QUANT_MODE_ACTIVE else 'OFF (legacy scorer only)'}")
 
@@ -1064,11 +1080,15 @@ def run_scanner():
         try:
             _test_wl = load_todays_watchlist()
         except Exception as _wl_e:
-            print(f"  [TEST MODE] load_todays_watchlist failed ({_wl_e}), falling back to DEFAULT_UNIVERSE")
+            print(f"  [TEST MODE] load_todays_watchlist failed ({_wl_e}), using dynamic universe")
             _test_wl = []
         if not _test_wl:
-            from config import DEFAULT_UNIVERSE
-            _test_wl = DEFAULT_UNIVERSE
+            try:
+                from universe_manager import get_universe_tickers
+                _test_wl = get_universe_tickers(limit=500)
+            except Exception:
+                from config import DEFAULT_UNIVERSE
+                _test_wl = DEFAULT_UNIVERSE
         print(f"  Watchlist: {len(_test_wl)} stocks")
 
         print("  Running scan_one_ticker on all watchlist stocks...")
@@ -1151,8 +1171,12 @@ def run_scanner():
                     if not watchlist:
                         watchlist = load_todays_watchlist() or []
                         if not watchlist:
-                            from config import DEFAULT_UNIVERSE
-                            watchlist = DEFAULT_UNIVERSE
+                            try:
+                                from universe_manager import get_universe_tickers
+                                watchlist = get_universe_tickers(limit=500)
+                            except Exception:
+                                from config import DEFAULT_UNIVERSE
+                                watchlist = DEFAULT_UNIVERSE
                     _fs_alerts: List[str] = []
                     with ThreadPoolExecutor(max_workers=15) as _fex:
                         _ffs = {_fex.submit(scan_one_ticker, t, state): t for t in watchlist}
@@ -1207,7 +1231,7 @@ def run_scanner():
             # ── Morning screen at 6 AM ET ─────────────────────────────────────
             if is_morning_screen_time() and last_screen_date != today_str:
                 print("\n[MORNING SCREEN] Building today's watchlist...")
-                watchlist          = build_todays_watchlist(max_stocks=50)
+                watchlist          = build_todays_watchlist(max_stocks=200)
                 last_screen_date   = today_str
                 morning_brief_sent = False
                 eod_report_sent    = False
@@ -1217,9 +1241,15 @@ def run_scanner():
             if not watchlist:
                 watchlist = load_todays_watchlist()
                 if not watchlist:
-                    from config import DEFAULT_UNIVERSE
-                    watchlist = DEFAULT_UNIVERSE
-                    print(f"  Using default universe: {len(watchlist)} stocks")
+                    # Prefer dynamic universe over hardcoded DEFAULT_UNIVERSE
+                    try:
+                        from universe_manager import get_universe_tickers
+                        watchlist = get_universe_tickers(limit=500)
+                        print(f"  Using dynamic universe: {len(watchlist)} stocks")
+                    except Exception:
+                        from config import DEFAULT_UNIVERSE
+                        watchlist = DEFAULT_UNIVERSE
+                        print(f"  Using default universe: {len(watchlist)} stocks")
                 _ensure_stream(watchlist)
             state.universe_size = len(watchlist)
 
@@ -1260,6 +1290,41 @@ def run_scanner():
                         state.mark_alerted(_open_key)
                     except Exception as _pbo:
                         print(f"  [broker] open-bell update failed: {_pbo}")
+
+                # ── Market-open conviction push (9:30 AM ET = 8:30 AM CST) ─────
+                # Re-sends the pre-open conviction list right as the bell rings
+                # so the user has their buy list in hand the moment they can trade.
+                _moc_key = f"conviction_market_open_{today_str}"
+                if not state.already_alerted(_moc_key):
+                    print("\n[CONVICTION] Market-open push (9:30 AM ET / 8:30 AM CST)...")
+                    try:
+                        from conviction_engine import get_latest_conviction_list, send_buy_list_alert
+                        _latest = get_latest_conviction_list(max_age_minutes=120)
+                        _entries = _latest.get("entries", [])
+                        if _entries:
+                            # Re-format DB rows into the shape send_buy_list_alert expects
+                            _buy_list_fmt = []
+                            for _e in _entries[:3]:
+                                _buy_list_fmt.append({
+                                    "rank":       _e.get("rank", 1),
+                                    "ticker":     _e.get("ticker", ""),
+                                    "conviction": float(_e.get("conviction") or 0),
+                                    "hold_type":  _e.get("hold_type", "DAYTRADE"),
+                                    "_params": {
+                                        "entry":     _e.get("entry", 0),
+                                        "stop_loss": _e.get("stop_loss", 0),
+                                    },
+                                })
+                            send_buy_list_alert(_buy_list_fmt, session="market_open")
+                            print(f"  [conviction] Market-open push sent — {len(_buy_list_fmt)} ticker(s)")
+                        else:
+                            # Nothing saved from preopen — run a fresh scan
+                            from conviction_engine import run_conviction_engine
+                            run_conviction_engine(session="market_open", regime=state.current_regime)
+                        state.last_conviction_run_ts = now_et().isoformat()
+                        state.mark_alerted(_moc_key)
+                    except Exception as _moc_e:
+                        print(f"  [conviction] market-open push failed: {_moc_e}")
 
             if et.hour == 0 and et.minute < 5:
                 eod_report_sent = False

@@ -9,6 +9,11 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 import numpy as np
 
+try:
+    from utils import anthropic_haiku as _anthropic_haiku
+except Exception:
+    def _anthropic_haiku(): return os.environ.get("ANTHROPIC_HAIKU_MODEL", "claude-haiku-4-5-20251001")
+
 _AI_CACHE: dict = {}
 _CACHE_TTL_SECS = 1800
 
@@ -162,12 +167,12 @@ class ConvictionEngine:
             score += 10.0
 
         # Short interest: high short float = squeeze potential (bonus)
-        if short_pct >= 0.20:
+        if short_pct >= 0.30:      # extreme squeeze setup
+            score += 10.0
+        elif short_pct >= 0.20:
             score += 8.0
         elif short_pct >= 0.15:
             score += 5.0
-        elif short_pct >= 0.30:  # extreme short — mean-reversion setup
-            score += 3.0
 
         # ── Risk-adjusted (max 10) ────────────────────────────────────────────
         if sigma < 0.60:
@@ -279,27 +284,40 @@ class ConvictionEngine:
             params = self.compute_trade_params(ticker, price, data)
             hold   = self.classify_hold(ticker, data)
             reasoning = self._generate_reasoning(ticker, data, hold)
+            _rvol_val = _safe(data.get("rvol", 1.0))
+            _conv_score = params["conviction"]
             results.append({
-                "rank":          i,
-                "ticker":        ticker,
-                "conviction":    params["conviction"],
-                "hold_type":     hold,
-                "why":           reasoning,
-                "entry":         params["entry"],
-                "limit_entry":   params["limit_entry"],
-                "stop_loss":     params["stop_loss"],
-                "stop_pct":      f"{params['stop_pct']}%",
-                "target_1":      params["target_1"],
-                "target_2":      params["target_2"],
-                "target_3":      params["target_3"],
-                "position_size": f"{params['position_size']}% of portfolio",
-                "expected_value": f"+{params['expected_value']}% EV",
-                "composite":     data.get("composite_score"),
-                "quant_adj":     data.get("quant_adjustment"),
-                "rvol":          data.get("rvol"),
-                "rsi":           data.get("rsi"),
-                "sigma_hist":    data.get("sigma_hist"),
-                "_params":       params,
+                "rank":               i,
+                "ticker":             ticker,
+                "conviction":         _conv_score,
+                "hold_type":          hold,
+                "why":                reasoning,
+                "reasoning":          reasoning,           # alias for build_conviction_pdf
+                "ai_key_reason":      reasoning,           # alias for build_conviction_pdf
+                "entry":              params["entry"],
+                "limit_entry":        params["limit_entry"],
+                "stop_loss":          params["stop_loss"],
+                "stop_pct":           f"{params['stop_pct']}%",
+                "ai_stop_pct":        params["stop_pct"],  # numeric for PDF
+                "ai_target_pct":      round(params["stop_pct"] * 2.5, 1),
+                "target_1":           params["target_1"],
+                "target_2":           params["target_2"],
+                "target_3":           params["target_3"],
+                "position_size":      f"{params['position_size']}% of portfolio",
+                "expected_value":     f"+{params['expected_value']}% EV",
+                "composite":          data.get("composite_score"),
+                "quant_adj":          data.get("quant_adjustment"),
+                "rvol":               _rvol_val,
+                "volume_ratio":       _rvol_val,            # alias for build_conviction_pdf
+                "rsi":                data.get("rsi"),
+                "sigma_hist":         data.get("sigma_hist"),
+                "signal_label":       "Conviction Buy",
+                "ai_conviction":      "High" if _conv_score >= 70 else "Medium",
+                "ai_catalyst_quality": "Strong" if data.get("has_sec_catalyst") else "Moderate",
+                "ai_risk":            "Thin small-cap liquidity risk",
+                "ai_time_sensitivity": "Act Now" if hold == "DAYTRADE" else "Today",
+                "_params":            params,
+                "_data":              data,
             })
 
         return results
@@ -307,7 +325,7 @@ class ConvictionEngine:
     def _load_todays_candidates(self) -> list:
         """Load today's high-scoring signals from signal_log with quant data."""
         try:
-            from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+            from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn, _put_pg_conn
             from accuracy_validator import AccuracyValidator
             from quant_engine import QuantEngine
 
@@ -321,14 +339,14 @@ class ConvictionEngine:
                            sl.quant_adj, sl.source_quality, sl.volume_at_signal,
                            sl.score_breakdown
                     FROM signal_log sl
-                    WHERE DATE(sl.created_at) = CURRENT_DATE
+                    WHERE DATE(sl.created_at AT TIME ZONE 'America/New_York') = CURRENT_DATE AT TIME ZONE 'America/New_York'
                       AND sl.score >= 65
                     ORDER BY sl.score DESC
                     LIMIT 50
                 """)
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
-                cur.close(); conn.close()
+                cur.close(); _put_pg_conn(conn)
             else:
                 conn = _get_sqlite_conn(); cur = conn.cursor()
                 cur.execute("""
@@ -413,10 +431,42 @@ class ConvictionEngine:
                 except Exception:
                     pass
 
+                # ── Extract has_sec_catalyst, news_sentiment, short_pct from score_breakdown ──
+                # Primary: read directly from stored breakdown fields.
+                # Fallback: derive proxies from sub-scores.
+                _has_sec = bool(bd.get("has_sec_catalyst", False)) or bool(bd.get("sec_catalyst", False))
+                if not _has_sec:
+                    # Catalyst sub-score >= 70 is a reliable proxy for a real catalyst
+                    _has_sec = _safe(bd.get("catalyst", 0)) >= 70
+
+                _raw_sent = _safe(bd.get("news_sentiment_score", bd.get("news_sentiment", 0)))
+                if _raw_sent == 0.0 and "sentiment" in bd:
+                    # Sentiment sub-score stored 0-100; normalise to 0-1
+                    _raw_sent = _safe(bd.get("sentiment", 0))
+                    if _raw_sent > 1.0:
+                        _raw_sent = _raw_sent / 100.0
+
+                _short_pct = _safe(bd.get("short_percent_float", bd.get("short_interest", 0)))
+                if _short_pct > 1.0:
+                    # Stored as a percentage (e.g. 25.0) — normalise to decimal
+                    _short_pct = _short_pct / 100.0
+                if _short_pct == 0.0:
+                    # Last resort: try Finnhub metric endpoint (free tier has shortInterest)
+                    try:
+                        from utils import fh_get as _fhg
+                        _m = _fhg("stock/metric", {"symbol": t, "metric": "all"})
+                        if _m and isinstance(_m.get("metric"), dict):
+                            _sp = _m["metric"].get("shortPercentOutstanding") or 0
+                            _short_pct = _safe(_sp)
+                            if _short_pct > 1.0:
+                                _short_pct = _short_pct / 100.0
+                    except Exception:
+                        pass
+
                 # Pull latest factor z-scores for this ticker from factor_scores table
                 factor_z_scores = {}
                 try:
-                    from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+                    from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn, _put_pg_conn as _ppc2
                     import datetime as _dt
                     today_s = _dt.date.today().isoformat()
                     if _is_postgres():
@@ -427,7 +477,7 @@ class ConvictionEngine:
                             (t, today_s)
                         )
                         factor_z_scores = {r[0]: r[1] for r in _fcc.fetchall()}
-                        _fcc.close(); _fc.close()
+                        _fcc.close(); _ppc2(_fc)
                     else:
                         _fc = _get_sqlite_conn()
                         factor_z_scores = {
@@ -452,9 +502,9 @@ class ConvictionEngine:
                     "sma_20":           sma20,
                     "sigma_hist":       bd.get("sigma_hist"),
                     "atr_14":           bd.get("atr_14"),
-                    "has_sec_catalyst": False,
-                    "news_sentiment_score": 0.0,
-                    "short_percent_float":  0.0,
+                    "has_sec_catalyst":     _has_sec,
+                    "news_sentiment_score": _raw_sent,
+                    "short_percent_float":  _short_pct,
                     "earnings_within_2d":   earnings_2d,
                     "earnings_within_3d":   earnings_2d,
                     "afterhours_trending_up": False,
@@ -482,7 +532,7 @@ class ConvictionEngine:
             import anthropic
             client = anthropic.Anthropic(api_key=api_key)
             msg = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model=_anthropic_haiku(),
                 max_tokens=100,
                 messages=[{
                     "role": "user",
@@ -590,9 +640,10 @@ def send_buy_list_alert(buy_list: list, session: str) -> None:
                 f"Entry ${p.get('entry','?')} stop ${p.get('stop_loss','?')}"
             )
         title_map = {
-            "preopen":   "Axiom — Pre-Open Conviction (8:55 AM)",
-            "close":     "Axiom — Close Conviction (4 PM)",
-            "afterhours": "Axiom — Tonight's Buys",
+            "preopen":      "Axiom — Pre-Open Buys (8:55 AM ET / 7:55 AM CST)",
+            "market_open":  "Axiom — Market Open: Today's Buys (9:30 AM ET / 8:30 AM CST)",
+            "close":        "Axiom — Close Conviction (4 PM ET / 3 PM CST)",
+            "afterhours":   "Axiom — Tonight's Buys (8:30 PM ET / 7:30 PM CST)",
         }
         alert_title = title_map.get(session, f"Axiom — Conviction ({session})")
         send_alert(
@@ -601,7 +652,8 @@ def send_buy_list_alert(buy_list: list, session: str) -> None:
             priority=PRIORITY_HIGH,
         )
     except Exception as e:
-        print(f"  [conviction] alert failed: {e}")
+        print(f"  [conviction] send_buy_list_alert failed: {e}")
+        import traceback; traceback.print_exc()
 
 
 def _now_et():
@@ -678,7 +730,7 @@ def _run_ai_analysis(ticker: str, data: dict) -> dict:
             "}"
         )
         msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=_anthropic_haiku(),
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -844,7 +896,7 @@ def save_live_conviction_list(buy_list: list, session: str) -> None:
     if not buy_list:
         return
     try:
-        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn, _put_pg_conn
         today = date.today().isoformat()
 
         if _is_postgres():
@@ -881,7 +933,7 @@ def save_live_conviction_list(buy_list: list, session: str) -> None:
                 ))
             conn.commit()
             cur.close()
-            conn.close()
+            _put_pg_conn(conn)
         else:
             conn = _get_sqlite_conn()
             conn.execute(
@@ -927,7 +979,7 @@ def get_latest_conviction_list(max_age_minutes: int = 60) -> dict:
     Returns dict with entries, generated_at, session, is_stale, is_yesterday.
     """
     try:
-        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn, _put_pg_conn
         today = date.today().isoformat()
         yesterday = (date.today() - timedelta(days=1)).isoformat()
 
@@ -971,7 +1023,7 @@ def get_latest_conviction_list(max_age_minutes: int = 60) -> dict:
                         ).fetchall()
                         is_yest = True
             finally:
-                conn.close()
+                _put_pg_conn(conn)
             return rows, cols if rows else [], is_yest
 
         if _is_postgres():
@@ -1047,7 +1099,7 @@ def get_conviction_win_rate() -> dict:
     Returns dict with win_rate, n, avg_gain.
     """
     try:
-        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn, _put_pg_conn
 
         if _is_postgres():
             conn = _get_pg_conn()
@@ -1066,7 +1118,7 @@ def get_conviction_win_rate() -> dict:
             """)
             row = cur.fetchone()
             cur.close()
-            conn.close()
+            _put_pg_conn(conn)
         else:
             conn = _get_sqlite_conn()
             row = conn.execute("""
@@ -1374,6 +1426,40 @@ def run_conviction_engine(session: str = "afterhours", regime: str = "") -> list
         save_buy_list(buy_list, session)
         send_buy_list_alert(buy_list, session)
         print(f"  [conviction] {len(buy_list)} conviction buy(s) generated | regime={regime}")
+
+        # ── Send PDF attachment via Pushover ──────────────────────────────────
+        # build_conviction_pdf uses the AI-enriched format from generate_live_conviction_list.
+        # generate_buy_list() now also populates the required alias keys so the PDF renders.
+        if buy_list:
+            try:
+                from alerts import send_alert_with_pdf, PRIORITY_HIGH
+                _pdf_bytes = build_conviction_pdf(buy_list, generated_at=now_et(), session=session)
+                if _pdf_bytes:
+                    _session_labels = {
+                        "preopen":      "Pre-Open (7:55 AM CST)",
+                        "market_open":  "Market Open (8:30 AM CST)",
+                        "close":        "Close (3 PM CST)",
+                        "afterhours":   "After-Hours (7:30 PM CST)",
+                    }
+                    _label = _session_labels.get(session, session)
+                    send_alert_with_pdf(
+                        title=f"Axiom Conviction — {_label}",
+                        message=(
+                            f"{len(buy_list)} pick(s) | Regime: {regime}\n"
+                            + "\n".join(
+                                f"#{b['rank']} {b['ticker']} — Entry ${b['entry']} "
+                                f"Stop ${b['stop_loss']} | {b['hold_type']}"
+                                for b in buy_list[:3]
+                            )
+                        ),
+                        pdf_bytes=_pdf_bytes,
+                        filename=f"axiom_{session}.pdf",
+                        priority=PRIORITY_HIGH,
+                    )
+                    print(f"  [conviction] PDF sent ({len(_pdf_bytes)//1024}KB)")
+            except Exception as _pdf_e:
+                print(f"  [conviction] PDF build/send failed: {_pdf_e}")
+
         return buy_list
     except Exception as e:
         import traceback
