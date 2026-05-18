@@ -392,8 +392,8 @@ def get_portfolio() -> dict:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
                     SELECT ticker, shares, avg_cost, current_price,
-                           ROUND((current_price - avg_cost) / avg_cost * 100, 2) AS pnl_pct,
-                           ROUND((current_price - avg_cost) * shares, 2) AS pnl_dollars,
+                           ROUND(((current_price - avg_cost) / avg_cost * 100)::numeric, 2) AS pnl_pct,
+                           ROUND(((current_price - avg_cost) * shares)::numeric, 2) AS pnl_dollars,
                            notes, updated_at
                     FROM portfolio
                     ORDER BY pnl_pct DESC NULLS LAST
@@ -426,7 +426,7 @@ def get_paper_trades(limit: int = 20, status: str = "all") -> dict:
 
                 cur.execute(f"""
                     SELECT ticker, signal_type, entry_price, exit_price,
-                           ROUND((exit_price - entry_price) / entry_price * 100, 2) AS return_pct,
+                           ROUND(((exit_price - entry_price) / entry_price * 100)::numeric, 2) AS return_pct,
                            stop_loss, target_1, target_2,
                            score_at_entry, created_at, closed_at
                     FROM paper_trades
@@ -492,7 +492,7 @@ def get_todays_graded_signals() -> dict:
                         COUNT(*) FILTER (WHERE so.ret_5d > 0)          AS wins_5d,
                         COUNT(*) FILTER (WHERE so.ret_1d IS NOT NULL)  AS graded_1d,
                         COUNT(*) FILTER (WHERE so.ret_1d > 0)          AS wins_1d,
-                        ROUND(AVG(so.ret_5d) * 100, 2)                 AS avg_ret_5d_pct,
+                        ROUND(AVG(so.ret_5d)::numeric * 100, 2)        AS avg_ret_5d_pct,
                         COUNT(sl.id)                                   AS total_signals
                     FROM signal_log sl
                     LEFT JOIN signal_outcomes so ON so.signal_id = sl.id

@@ -297,6 +297,28 @@ CONFIRMATION_REQUIRED = {
 }
 
 
+def _content_to_history(content: list) -> list:
+    """
+    Serialise API response content blocks to plain dicts for the message history.
+    Trailing whitespace is stripped from every text block — the Anthropic API
+    returns a 400 if the final assistant turn ends with whitespace.
+    """
+    result = []
+    for block in content:
+        if block.type == "text":
+            result.append({"type": "text", "text": block.text.rstrip()})
+        elif block.type == "tool_use":
+            result.append({
+                "type":  "tool_use",
+                "id":    block.id,
+                "name":  block.name,
+                "input": block.input,
+            })
+        else:
+            result.append(block)
+    return result
+
+
 async def run_agent(history: list, user_id: int) -> tuple[str, list, dict | None]:
     """
     Run one turn of the Claude agent.
@@ -313,7 +335,7 @@ async def run_agent(history: list, user_id: int) -> tuple[str, list, dict | None
             messages=messages,
         )
 
-        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "assistant", "content": _content_to_history(response.content)})
 
         if response.stop_reason == "end_turn":
             return _extract_text(response.content), messages, None
