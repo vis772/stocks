@@ -1027,13 +1027,12 @@ def run_scanner():
 
     # Bootstrap universe in background if DB is empty or stale
     try:
-        from universe_manager import get_universe_size, refresh_universe
+        from universe_manager import get_universe_size, refresh_universe_async
         _usize = get_universe_size()
         print(f"  [universe] {_usize} tickers in DB")
-        if _usize < 100:
-            print("  [universe] Universe empty/thin — starting background refresh (15–30 min)...")
-            import threading as _threading
-            _threading.Thread(target=refresh_universe, daemon=True, name="universe-refresh").start()
+        if _usize < 500:
+            print("  [universe] Universe empty/thin — starting background refresh (10–20 min)...")
+            refresh_universe_async()
     except Exception as _ue:
         print(f"  [startup] Universe bootstrap failed: {_ue}")
 
@@ -1212,10 +1211,10 @@ def run_scanner():
                     _sat_key = f"universe_refresh_sat_{today_str}"
                     if not state.already_alerted(_sat_key):
                         try:
-                            from universe_manager import refresh_universe, needs_refresh
+                            from universe_manager import refresh_universe_async, needs_refresh
                             if needs_refresh(max_age_days=6):
-                                print("  [universe] Stale — starting weekly refresh...")
-                                refresh_universe()
+                                print("  [universe] Stale — starting async weekly refresh (non-blocking)...")
+                                refresh_universe_async()
                             else:
                                 print("  [universe] Universe is fresh — skipping refresh")
                             state.mark_alerted(_sat_key)
@@ -1238,13 +1237,11 @@ def run_scanner():
                 print("\n[MORNING SCREEN] Building today's watchlist...")
                 # Trigger a universe refresh if the DB is thin (< 200 tickers) or stale
                 try:
-                    from universe_manager import get_universe_size, needs_refresh, refresh_universe
+                    from universe_manager import get_universe_size, needs_refresh, refresh_universe_async
                     _daily_usize = get_universe_size()
-                    if _daily_usize < 200 or needs_refresh(max_age_days=1):
+                    if _daily_usize < 500 or needs_refresh(max_age_days=1):
                         print(f"  [universe] DB has {_daily_usize} tickers / stale — refreshing in background...")
-                        import threading as _threading
-                        _threading.Thread(target=refresh_universe, daemon=True,
-                                          name="universe-daily-refresh").start()
+                        refresh_universe_async()
                 except Exception as _dur_e:
                     print(f"  [universe] Daily refresh check failed: {_dur_e}")
                 watchlist          = build_todays_watchlist(max_stocks=200)

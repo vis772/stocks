@@ -2896,6 +2896,54 @@ def upsert_universe_stock(ticker: str, name: str = "", exchange: str = "",
         print(f"  [db] upsert_universe_stock failed for {ticker}: {e}")
 
 
+def bulk_upsert_universe_stocks(stocks: list) -> int:
+    """
+    Bulk upsert stock_universe rows using a single executemany call.
+    Much faster than calling upsert_universe_stock() per row.
+    Returns count of rows processed.
+    """
+    if not stocks:
+        return 0
+    rows = [
+        (
+            s["ticker"], s.get("name", ""), s.get("exchange", ""),
+            s.get("market_cap", 0), s.get("avg_volume", 0),
+            s.get("sector", ""), s.get("price", 0.0),
+        )
+        for s in stocks
+    ]
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.executemany("""
+                INSERT INTO stock_universe
+                    (ticker, name, exchange, market_cap, avg_volume, sector, min_price)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (ticker) DO UPDATE SET
+                    name         = EXCLUDED.name,
+                    exchange     = EXCLUDED.exchange,
+                    market_cap   = EXCLUDED.market_cap,
+                    avg_volume   = EXCLUDED.avg_volume,
+                    sector       = EXCLUDED.sector,
+                    min_price    = EXCLUDED.min_price,
+                    last_updated = NOW(),
+                    active       = TRUE
+            """, rows)
+            conn.commit(); cur.close(); _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            conn.executemany("""
+                INSERT OR REPLACE INTO stock_universe
+                    (ticker, name, exchange, market_cap, avg_volume, sector, min_price, last_updated)
+                VALUES (?,?,?,?,?,?,?,datetime('now'))
+            """, rows)
+            conn.commit(); conn.close()
+        return len(rows)
+    except Exception as e:
+        print(f"  [db] bulk_upsert_universe_stocks failed: {e}")
+        return 0
+
+
 def get_active_universe(min_market_cap: int = 20_000_000,
                         max_market_cap: int = 20_000_000_000,
                         min_avg_volume: int = 50_000) -> list:
