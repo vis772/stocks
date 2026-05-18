@@ -18,19 +18,32 @@ def _check_fcf_gate(snapshot: Dict) -> Dict:
     """
     Hard pre-filter that runs before scoring.
 
-    A stock passes unless it demonstrates catastrophic cash-burn dynamics:
-      PASS — FCF unavailable (benefit of the doubt on missing data)
-      PASS — FCF >= 0 (profitable / breakeven)
-      PASS — FCF < 0 but cash runway >= 12 months
-      FAIL — FCF < 0 and runway < 6 months (imminent cash crisis)
-      FAIL — FCF burn > $100M/yr on market cap < $500M (burn dwarfs company size)
+    Primary gate — Operating Cash Flow:
+      PASS — OCF data unavailable (benefit of the doubt)
+      FAIL — OCF < 0 (cash-burning operation — skip entirely)
+
+    Secondary gate — FCF runway (catches edge cases with missing OCF):
+      PASS — FCF unavailable or >= 0
+      FAIL — FCF < 0 and cash runway < 6 months
+      FAIL — FCF burn > $100M/yr on market cap < $500M
     """
+    ocf        = snapshot.get("operating_cashflow")
     fcf        = snapshot.get("free_cashflow")
     cash       = snapshot.get("total_cash")
     market_cap = snapshot.get("market_cap") or 0
 
+    # Primary: OCF gate — skip any company burning operating cash
+    if ocf is not None:
+        if ocf >= 0:
+            return {"passes": True, "reason": "OCF positive"}
+        return {
+            "passes": False,
+            "reason": f"OCF negative ${ocf/1e6:.0f}M/yr — cash-burning operation",
+        }
+
+    # Secondary: FCF runway gate (OCF data missing — use FCF as proxy)
     if fcf is None:
-        return {"passes": True, "reason": "no FCF data"}
+        return {"passes": True, "reason": "no cash flow data"}
     if fcf >= 0:
         return {"passes": True, "reason": "FCF positive"}
 
@@ -50,9 +63,7 @@ def _check_fcf_gate(snapshot: Dict) -> Dict:
     if market_cap > 0 and abs(fcf) > 100_000_000 and market_cap < 500_000_000:
         return {
             "passes": False,
-            "reason": (
-                f"FCF burn ${abs(fcf)/1e6:.0f}M/yr vs ${market_cap/1e6:.0f}M market cap"
-            ),
+            "reason": f"FCF burn ${abs(fcf)/1e6:.0f}M/yr vs ${market_cap/1e6:.0f}M market cap",
         }
 
     return {"passes": True, "reason": "FCF within acceptable range"}

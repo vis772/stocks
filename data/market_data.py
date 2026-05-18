@@ -120,7 +120,8 @@ def fetch_ticker_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
     gross_margins  = yf_info.get("grossMargins")
     total_cash     = yf_info.get("totalCash")
     total_debt     = yf_info.get("totalDebt")
-    free_cashflow  = yf_info.get("freeCashflow")
+    free_cashflow        = yf_info.get("freeCashflow")
+    operating_cashflow   = yf_info.get("operatingCashflow")
     ebitda         = yf_info.get("ebitda")
     shares_out     = yf_info.get("sharesOutstanding")
     float_shares   = yf_info.get("floatShares")
@@ -190,6 +191,7 @@ def fetch_ticker_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
         "total_cash":          total_cash,
         "total_debt":          total_debt,
         "free_cashflow":       free_cashflow,
+        "operating_cashflow":  operating_cashflow,
         "short_percent_float": short_pct,
         "short_ratio":         short_ratio,
         "analyst_recommendation": analyst_rec,

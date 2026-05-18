@@ -2897,7 +2897,7 @@ def upsert_universe_stock(ticker: str, name: str = "", exchange: str = "",
 
 
 def get_active_universe(min_market_cap: int = 20_000_000,
-                        max_market_cap: int = 2_000_000_000,
+                        max_market_cap: int = 20_000_000_000,
                         min_avg_volume: int = 50_000) -> list:
     """Return list of ticker strings from stock_universe that meet filters."""
     try:

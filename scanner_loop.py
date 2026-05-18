@@ -75,7 +75,7 @@ VWAP_EXTENDED_PCT          = 5.0
 PREDICTION_SCAN_INTERVAL   = 1800
 PREDICTION_BUY_THRESHOLD   = 65
 PREDICTION_SELL_THRESHOLD  = 30
-PREDICTION_TOP_N           = 10
+PREDICTION_TOP_N           = 50
 
 # ─── Market hours in ET ───────────────────────────────────────────────────────
 MARKET_OPEN_HOUR    = 9
@@ -836,6 +836,11 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
 # ─── Prediction scan ──────────────────────────────────────────────────────────
 
 def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode: str = "MARKET") -> None:
+    # RTH signals have ~35% win rate vs 57-66% for premarket/overnight — suppress entirely
+    if session_mode == "MARKET":
+        print("  [prediction] RTH session — signals suppressed (low win-rate window)")
+        return
+
     from core.scanner import scan_ticker
     from db.database import log_paper_trade
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1231,6 +1236,17 @@ def run_scanner():
             # ── Morning screen at 6 AM ET ─────────────────────────────────────
             if is_morning_screen_time() and last_screen_date != today_str:
                 print("\n[MORNING SCREEN] Building today's watchlist...")
+                # Trigger a universe refresh if the DB is thin (< 200 tickers) or stale
+                try:
+                    from universe_manager import get_universe_size, needs_refresh, refresh_universe
+                    _daily_usize = get_universe_size()
+                    if _daily_usize < 200 or needs_refresh(max_age_days=1):
+                        print(f"  [universe] DB has {_daily_usize} tickers / stale — refreshing in background...")
+                        import threading as _threading
+                        _threading.Thread(target=refresh_universe, daemon=True,
+                                          name="universe-daily-refresh").start()
+                except Exception as _dur_e:
+                    print(f"  [universe] Daily refresh check failed: {_dur_e}")
                 watchlist          = build_todays_watchlist(max_stocks=200)
                 last_screen_date   = today_str
                 morning_brief_sent = False
