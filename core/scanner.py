@@ -115,6 +115,12 @@ def _build_score_breakdown(
     return bd
 
 
+def _add_gap_continuation_to_breakdown(bd: Dict, gap_continuation: bool, prev_gap_pct: float) -> Dict:
+    if gap_continuation:
+        bd["Gap Continuation"] = f"+15 bonus applied (prev-session gap: {prev_gap_pct:+.1f}%)"
+    return bd
+
+
 def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) -> Optional[Dict]:
     ticker = ticker.upper().strip()
     print(f"  → Scanning {ticker}...")
@@ -262,8 +268,33 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
         final_score = round(static_score * 0.90 + fund_tier * 0.10, 1)
         _scoring_mode = "static"
 
+    # Step 7.5: Gap-Continuation Bonus
+    #
+    # Catches day-2 runners like FCEL: previous session gapped up >5% and the
+    # stock is still technically sound — high probability of continuation.
+    # Conditions: prev-session gap > 5% AND tech_score > 60 AND fund_score > 65
+    # Effect: +15 to final_score (capped at 100), signal overridden to "GAP_CONTINUATION"
+    _gap_continuation     = False
+    _prev_gap_pct         = 0.0
+    _gc_hist = snapshot.get("_history")
+    if _gc_hist is not None and len(_gc_hist) >= 3:
+        try:
+            _prev_open  = float(_gc_hist["Open"].iloc[-2])
+            _prior_close = float(_gc_hist["Close"].iloc[-3])
+            if _prior_close > 0:
+                _prev_gap_pct = (_prev_open - _prior_close) / _prior_close * 100
+                if _prev_gap_pct > 5.0 and tech_score > 60 and fund_score > 65:
+                    final_score = min(100.0, round(final_score + 15.0, 1))
+                    _gap_continuation = True
+        except Exception:
+            pass
+
+    if _gap_continuation:
+        technicals["gap_continuation"]     = True
+        technicals["prev_gap_pct"]         = round(_prev_gap_pct, 2)
+
     # Step 8: Signal
-    signal = _score_to_signal(final_score)
+    signal = "GAP_CONTINUATION" if _gap_continuation else _score_to_signal(final_score)
 
     # Step 9: Risk Flags
     all_flags = list(set(
@@ -336,13 +367,18 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
         "sector_return_20d":      snapshot.get("sector_return_20d"),
         "stock_vs_sector":        snapshot.get("stock_vs_sector"),
         "sector_rs_label":        snapshot.get("sector_rs_label"),
-        "scoring_path":  _scoring_mode,
-        "catalyst_mult": catalyst_mult if _has_factor_data else 1.0,
-        "score_breakdown": _build_score_breakdown(
-            _scoring_mode, _has_factor_data,
-            tech_score, cat_score, fund_score, risk_contribution, raw_risk, sent_score,
-            factor_z_scores, quant_result,
-            weights if weights is not None else SCORING_WEIGHTS,
+        "scoring_path":           _scoring_mode,
+        "catalyst_mult":          catalyst_mult if _has_factor_data else 1.0,
+        "gap_continuation":       _gap_continuation,
+        "gap_continuation_pct":   round(_prev_gap_pct, 2) if _gap_continuation else 0.0,
+        "score_breakdown": _add_gap_continuation_to_breakdown(
+            _build_score_breakdown(
+                _scoring_mode, _has_factor_data,
+                tech_score, cat_score, fund_score, risk_contribution, raw_risk, sent_score,
+                factor_z_scores, quant_result,
+                weights if weights is not None else SCORING_WEIGHTS,
+            ),
+            _gap_continuation, _prev_gap_pct,
         ),
         "summary": _generate_summary(ticker, snapshot, final_score, signal, all_flags,
                                      catalyst_result, news_sentiment, technicals, fund_result),
@@ -461,6 +497,12 @@ def _generate_summary(
         parts.append(
             f"GAP: {'Gap-UP' if gap > 0 else 'Gap-DOWN'} of {abs(gap):.1f}% today — "
             f"{'strong buying pressure at open' if gap > 0 else 'selling pressure at open'}."
+        )
+    prev_gap = technicals.get("prev_gap_pct", 0)
+    if technicals.get("gap_continuation") and prev_gap:
+        parts.append(
+            f"GAP CONTINUATION: Previous session gapped up {prev_gap:.1f}% and technical + "
+            f"fundamental scores remain strong — day-2 continuation setup. +15 score bonus applied."
         )
 
     if vol:
