@@ -1349,6 +1349,12 @@ def run_scanner():
                     state.signals_suppressed = 0
                     state.mark_alerted(_midnight_key)
                     _log("info", "Daily reset complete — signal counters reset")
+                    try:
+                        from conviction_engine import resolve_conviction_outcomes
+                        _resolved = resolve_conviction_outcomes()
+                        _log("info", f"Outcome resolution: {_resolved} conviction_buys updated")
+                    except Exception as _rco_e:
+                        print(f"  [conviction] outcome resolution failed: {_rco_e}")
 
             # ── PREMARKET ─────────────────────────────────────────────────────
             if mode == "PREMARKET":
@@ -1368,6 +1374,12 @@ def run_scanner():
                             _pre_alerts.extend(future.result())
                         except Exception:
                             pass
+                if (et - state.last_prediction_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
+                    print("\n[PREDICTION SCAN] Pre-market full-score scan...")
+                    _log("info", f"Pre-market prediction scan started — top {PREDICTION_TOP_N} stocks")
+                    run_prediction_scan(watchlist, state, session_mode="PREMARKET")
+                    state.last_prediction_run = et
+                    _log("info", "Pre-market prediction scan complete")
                 if et.hour == 8 and 55 <= et.minute <= 59:
                     _preopen_key = f"conviction_preopen_{today_str}"
                     if not state.already_alerted(_preopen_key):
@@ -1574,6 +1586,12 @@ def run_scanner():
                     _pb3.update_all_positions()
                 except Exception as _pbah:
                     print(f"  [broker] AH update failed: {_pbah}")
+                if (et - state.last_prediction_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
+                    print("\n[PREDICTION SCAN] After-hours full-score scan...")
+                    _log("info", f"After-hours prediction scan started — top {PREDICTION_TOP_N} stocks")
+                    run_prediction_scan(watchlist, state, session_mode="AFTERHOURS")
+                    state.last_prediction_run = et
+                    _log("info", "After-hours prediction scan complete")
                 if et.hour == 20 and 30 <= et.minute < 35:
                     _ah_key = f"conviction_ah_{today_str}"
                     if not state.already_alerted(_ah_key):
