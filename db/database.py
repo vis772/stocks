@@ -1785,6 +1785,23 @@ def update_signal_outcome(signal_id: int, price_1hr: Optional[float] = None,
         print(f"  [db] update_signal_outcome failed: {e}")
 
 
+def count_total_signals() -> int:
+    """Return all-time count of signal_log rows (no date filter). Used for checkpoint thresholds."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM signal_log")
+            n = cur.fetchone()[0]; cur.close(); _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            n = conn.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
+            conn.close()
+        return int(n or 0)
+    except Exception as e:
+        print(f"  [db] count_total_signals failed: {e}")
+        return 0
+
+
 def get_signal_log(days: int = 30) -> pd.DataFrame:
     """Return recent signal_log rows joined with outcomes for the dashboard."""
     try:

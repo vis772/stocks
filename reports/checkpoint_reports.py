@@ -736,18 +736,25 @@ def check_and_run_checkpoints() -> None:
     they never re-trigger across scanner restarts.
     """
     try:
-        from db.database import get_signal_log, get_accuracy_reports, save_accuracy_report
+        from db.database import (
+            get_signal_log, get_accuracy_reports, save_accuracy_report,
+            count_total_signals,
+        )
     except Exception as e:
         print(f"  [checkpoint] DB import failed: {e}")
         return
 
-    df = get_signal_log(days=120)
-    if df.empty:
+    # All-time count drives the threshold — checkpoints fire at 150/350/600
+    # total signals ever logged, regardless of how old they are.
+    total_logged = count_total_signals()
+    print(f"  [checkpoint] {total_logged} total signals logged (all-time)")
+
+    if total_logged == 0:
         print("  [checkpoint] No signals yet — skipping checkpoint check")
         return
 
-    total_signals = len(df)
-    print(f"  [checkpoint] {total_signals} total signals logged")
+    # 120-day window for report content (sufficient for win-rate analysis)
+    df = get_signal_log(days=120)
 
     # Read which checkpoints have already fired from DB.
     # If the read fails we bail out rather than risk re-firing all checkpoints.
@@ -767,9 +774,12 @@ def check_and_run_checkpoints() -> None:
     ]
 
     for threshold, rtype, gen_fn, title in CHECKPOINTS:
-        if total_signals >= threshold and rtype not in existing:
+        if total_logged >= threshold and rtype not in existing:
             print(f"  [checkpoint] {threshold} signal threshold reached — generating {rtype}...")
             try:
+                if df.empty:
+                    print(f"  [checkpoint] {rtype} skipped — no signals in 120-day window for report")
+                    continue
                 result = gen_fn(df)
                 if result is None:
                     print(f"  [checkpoint] {rtype} generation returned None")
@@ -777,7 +787,7 @@ def check_and_run_checkpoints() -> None:
                 filename, verdict = result
                 url = _upload_and_notify(
                     filename, title,
-                    f"Verdict: {verdict}\n{total_signals} signals in dataset. Tap to download PDF.",
+                    f"Verdict: {verdict}\n{total_logged} signals total ({len(df)} in last 120 days). Tap to download PDF.",
                 )
                 save_accuracy_report(rtype, threshold, filename, url or "", verdict)
                 print(f"  [checkpoint] {rtype} complete — verdict={verdict}")
