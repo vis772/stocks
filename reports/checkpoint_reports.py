@@ -767,7 +767,9 @@ def check_and_run_checkpoints() -> None:
     if existing_rows is None:
         print("  [checkpoint] Could not read accuracy_reports — skipping to avoid re-trigger")
         return
-    existing = {r["report_type"] for r in existing_rows}
+    # Only treat a checkpoint as "done" if a download_url was recorded.
+    # An empty URL means the upload/notify chain failed before fully completing.
+    existing = {r["report_type"] for r in existing_rows if r.get("download_url")}
 
     CHECKPOINTS = [
         (150, "checkpoint_150", generate_checkpoint_15,
