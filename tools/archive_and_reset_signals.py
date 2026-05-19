@@ -57,15 +57,12 @@ def run() -> None:
     conn.commit()
     print("Archives committed.\n")
 
-    # ── 4. Truncate (signal_outcomes first — FK to signal_log) ──────────────
-    print("Truncating signal_outcomes ...")
-    cur.execute("TRUNCATE TABLE signal_outcomes RESTART IDENTITY")
-
-    print("Truncating conviction_buys ...")
-    cur.execute("TRUNCATE TABLE conviction_buys RESTART IDENTITY")
-
-    print("Truncating signal_log ...")
-    cur.execute("TRUNCATE TABLE signal_log RESTART IDENTITY")
+    # ── 4. Truncate all three in one statement (Postgres requires this when
+    #        FKs exist between tables, even if child is listed first) ─────────
+    print("Truncating signal_outcomes, conviction_buys, signal_log ...")
+    cur.execute(
+        "TRUNCATE TABLE signal_outcomes, conviction_buys, signal_log RESTART IDENTITY"
+    )
 
     conn.commit()
 
