@@ -26,11 +26,11 @@ PRICE_MAX = 50.00                  # Maximum price — keep focus on speculative
 # Adjust them based on what you find actually correlates with your results.
 # They must sum to 1.0
 SCORING_WEIGHTS = {
-    "technical":    0.30,   # Price action, volume, momentum signals
-    "catalyst":     0.25,   # News, SEC filings, events
-    "fundamental":  0.20,   # Balance sheet, growth, burn rate
-    "risk":         0.15,   # Dilution, liquidity, short interest (inverted)
-    "sentiment":    0.10,   # News tone, analyst coverage
+    "fundamental":  0.50,   # Balance sheet, growth, burn rate — primary win predictor
+    "risk":         0.30,   # Dilution, liquidity, short interest (inverted)
+    "technical":    0.10,   # Price action, volume, momentum signals
+    "sentiment":    0.05,   # News tone, analyst coverage — negatively correlated with wins
+    "catalyst":     0.05,   # News, SEC filings, events — negatively correlated with wins
 }
 
 # Validate weights sum to 1.0

@@ -287,20 +287,20 @@ class AccuracyValidator:
             if _is_postgres():
                 conn = _get_pg_conn(); cur = conn.cursor()
                 cur.execute("""
-                    SELECT sl.score, so.outcome_5d, so.ret_5d, so.ret_10d, so.outcome_10d
+                    SELECT sl.score, so.outcome_1d, so.ret_1d
                     FROM signal_log sl
                     JOIN signal_outcomes so ON so.signal_id = sl.id
-                    WHERE so.outcome_5d IS NOT NULL AND so.ret_5d IS NOT NULL
+                    WHERE so.outcome_1d IS NOT NULL AND so.ret_1d IS NOT NULL
                       AND sl.created_at >= NOW() - INTERVAL '90 days'
                 """)
                 rows = cur.fetchall(); cur.close(); conn.close()
             else:
                 conn = _get_sqlite_conn(); cur = conn.cursor()
                 cur.execute("""
-                    SELECT sl.score, so.outcome_5d, so.ret_5d, so.ret_10d, so.outcome_10d
+                    SELECT sl.score, so.outcome_1d, so.ret_1d
                     FROM signal_log sl
                     JOIN signal_outcomes so ON so.signal_id = sl.id
-                    WHERE so.outcome_5d IS NOT NULL AND so.ret_5d IS NOT NULL
+                    WHERE so.outcome_1d IS NOT NULL AND so.ret_1d IS NOT NULL
                       AND sl.created_at >= datetime('now', '-90 days')
                 """)
                 rows = cur.fetchall(); conn.close()
@@ -308,38 +308,28 @@ class AccuracyValidator:
             if not rows:
                 return {"n": 0, "insufficient": True}
 
-            all_rets    = []
-            all_rets_10 = []
-            bucket_data: dict = {label: {"rets": [], "rets_10": [], "outcomes": []} for _, _, label in SCORE_BUCKETS}
-            bucket_data["other"] = {"rets": [], "rets_10": [], "outcomes": []}
+            all_rets = []
+            bucket_data: dict = {label: {"rets": [], "outcomes": []} for _, _, label in SCORE_BUCKETS}
+            bucket_data["other"] = {"rets": [], "outcomes": []}
 
-            for score, outcome, ret, ret10, outcome10 in rows:
+            for score, outcome, ret in rows:
                 ret_f   = _safe(ret)
                 score_f = _safe(score)
                 all_rets.append(ret_f)
                 b = _bucket(score_f)
                 bucket_data[b]["rets"].append(ret_f)
                 bucket_data[b]["outcomes"].append(outcome)
-                if ret10 is not None:
-                    r10 = _safe(ret10)
-                    all_rets_10.append(r10)
-                    bucket_data[b]["rets_10"].append(r10)
 
-            overall    = _metrics_from_rets(all_rets)
-            overall_10 = _metrics_from_rets(all_rets_10) if all_rets_10 else {}
+            overall = _metrics_from_rets(all_rets)
 
             by_bucket = {}
             for label, bd in bucket_data.items():
                 if bd["rets"]:
-                    m = _metrics_from_rets(bd["rets"])
-                    if bd["rets_10"]:
-                        m["metrics_10d"] = _metrics_from_rets(bd["rets_10"])
-                    by_bucket[label] = m
+                    by_bucket[label] = _metrics_from_rets(bd["rets"])
 
             result = {
                 "n":           len(all_rets),
                 "overall":     overall,
-                "overall_10d": overall_10,
                 "by_bucket":   by_bucket,
                 "insufficient": len(all_rets) < 30,
             }
@@ -455,14 +445,14 @@ class AccuracyValidator:
             from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
             if _is_postgres():
                 conn = _get_pg_conn(); cur = conn.cursor()
-                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_5d IS NOT NULL")
+                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_1d IS NOT NULL")
                 result["signals_graded"] = cur.fetchone()[0] or 0
-                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_5d IS NULL")
+                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_1d IS NULL")
                 result["signals_pending"] = cur.fetchone()[0] or 0
                 cur.execute("""
                     SELECT sl.created_at FROM signal_log sl
                     JOIN signal_outcomes so ON so.signal_id = sl.id
-                    WHERE so.outcome_5d IS NULL
+                    WHERE so.outcome_1d IS NULL
                     ORDER BY sl.created_at ASC LIMIT 1
                 """)
                 row = cur.fetchone()
@@ -470,14 +460,14 @@ class AccuracyValidator:
                 cur.close(); conn.close()
             else:
                 conn = _get_sqlite_conn(); cur = conn.cursor()
-                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_5d IS NOT NULL")
+                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_1d IS NOT NULL")
                 result["signals_graded"] = cur.fetchone()[0] or 0
-                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_5d IS NULL")
+                cur.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome_1d IS NULL")
                 result["signals_pending"] = cur.fetchone()[0] or 0
                 cur.execute("""
                     SELECT sl.created_at FROM signal_log sl
                     JOIN signal_outcomes so ON so.signal_id = sl.id
-                    WHERE so.outcome_5d IS NULL
+                    WHERE so.outcome_1d IS NULL
                     ORDER BY sl.created_at ASC LIMIT 1
                 """)
                 row = cur.fetchone()
