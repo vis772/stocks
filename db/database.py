@@ -124,8 +124,19 @@ def _et_date_time_str() -> str:
 
 def initialize_db():
     """Create all tables if they don't exist. Safe to call on every startup."""
+    import time as _t
     if _is_postgres():
-        _init_postgres()
+        for _attempt in range(5):
+            try:
+                _init_postgres()
+                return
+            except Exception as _e:
+                if any(k in str(_e).lower() for k in ("deadlock", "lock timeout")) and _attempt < 4:
+                    _delay = 0.25 * (2 ** _attempt)   # 0.25 / 0.5 / 1 / 2 s
+                    print(f"  [db] init deadlock attempt {_attempt + 1}, retry in {_delay:.2f}s")
+                    _t.sleep(_delay)
+                    continue
+                raise
     else:
         _init_sqlite()
     try:
@@ -138,6 +149,11 @@ def initialize_db():
 def _init_postgres():
     conn = _get_pg_conn()
     cur  = conn.cursor()
+
+    # Serialise concurrent schema migrations with a blocking transaction-level advisory
+    # lock. The loser process waits here until the winner commits and releases, then
+    # runs the same idempotent IF NOT EXISTS DDL as a no-op.
+    cur.execute("SELECT pg_advisory_xact_lock(20260520)")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS portfolio (
@@ -448,7 +464,12 @@ def _init_postgres():
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_time_sensitivity TEXT",
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS outcome_label       TEXT DEFAULT 'pending'",
     ]:
-        cur.execute(ddl)
+        try:
+            cur.execute("SAVEPOINT _mig")
+            cur.execute(ddl)
+            cur.execute("RELEASE SAVEPOINT _mig")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT _mig")
 
     # Migrate existing portfolio rows to admin (user_id=1)
     # ── Quant upgrade tables ─────────────────────────────────────────────────
@@ -519,11 +540,21 @@ def _init_postgres():
         "ALTER TABLE scanner_control ADD COLUMN IF NOT EXISTS restart_requested   BOOLEAN DEFAULT FALSE",
         "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS scoring_path        VARCHAR(10) DEFAULT 'static'",
         "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS catalyst_mult       FLOAT DEFAULT 1.0",
+        # Entry/stop/target columns
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS entry_price         REAL",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS stop_loss           REAL",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS target_1            REAL",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS target_2            REAL",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS risk_reward         REAL",
+        # Direction column — UP / DOWN / FLAT after 1-day outcome
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS direction           TEXT",
     ]:
         try:
+            cur.execute("SAVEPOINT _mig")
             cur.execute(ddl)
+            cur.execute("RELEASE SAVEPOINT _mig")
         except Exception:
-            pass
+            cur.execute("ROLLBACK TO SAVEPOINT _mig")
 
     cur.execute("UPDATE portfolio SET user_id = 1 WHERE user_id IS NULL")
 
@@ -537,7 +568,7 @@ def _init_postgres():
 
     conn.commit()
     cur.close()
-    conn.close()
+    _put_pg_conn(conn)
     print("  ✓ PostgreSQL tables initialized")
     _seed_admin_user_pg()
 
