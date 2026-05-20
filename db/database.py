@@ -124,8 +124,19 @@ def _et_date_time_str() -> str:
 
 def initialize_db():
     """Create all tables if they don't exist. Safe to call on every startup."""
+    import time as _t
     if _is_postgres():
-        _init_postgres()
+        for _attempt in range(5):
+            try:
+                _init_postgres()
+                return
+            except Exception as _e:
+                if any(k in str(_e).lower() for k in ("deadlock", "lock timeout")) and _attempt < 4:
+                    _delay = 0.25 * (2 ** _attempt)   # 0.25 / 0.5 / 1 / 2 s
+                    print(f"  [db] init deadlock attempt {_attempt + 1}, retry in {_delay:.2f}s")
+                    _t.sleep(_delay)
+                    continue
+                raise
     else:
         _init_sqlite()
 
@@ -134,14 +145,10 @@ def _init_postgres():
     conn = _get_pg_conn()
     cur  = conn.cursor()
 
-    # Serialise concurrent schema migrations with a transaction-level advisory lock.
-    # If another process (scanner / Streamlit worker) already holds it, skip — the
-    # tables will exist by the time this process needs them.
-    cur.execute("SELECT pg_try_advisory_xact_lock(20260520)")
-    if not cur.fetchone()[0]:
-        cur.close()
-        _put_pg_conn(conn)
-        return
+    # Serialise concurrent schema migrations with a blocking transaction-level advisory
+    # lock. The loser process waits here until the winner commits and releases, then
+    # runs the same idempotent IF NOT EXISTS DDL as a no-op.
+    cur.execute("SELECT pg_advisory_xact_lock(20260520)")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS portfolio (
@@ -431,7 +438,12 @@ def _init_postgres():
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_time_sensitivity TEXT",
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS outcome_label       TEXT DEFAULT 'pending'",
     ]:
-        cur.execute(ddl)
+        try:
+            cur.execute("SAVEPOINT _mig")
+            cur.execute(ddl)
+            cur.execute("RELEASE SAVEPOINT _mig")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT _mig")
 
     # Migrate existing portfolio rows to admin (user_id=1)
     # ── Quant upgrade tables ─────────────────────────────────────────────────
@@ -530,7 +542,7 @@ def _init_postgres():
 
     conn.commit()
     cur.close()
-    conn.close()
+    _put_pg_conn(conn)
     print("  ✓ PostgreSQL tables initialized")
     _seed_admin_user_pg()
 
