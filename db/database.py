@@ -1813,7 +1813,8 @@ def get_signal_log(days: int = 30) -> pd.DataFrame:
                        sl.score_breakdown, sl.price_at_signal, sl.alert_type,
                        sl.created_at,
                        so.pct_change_1hr, so.pct_change_1day, so.pct_change_5day,
-                       so.pct_change_15day, so.outcome_label
+                       so.pct_change_15day, so.outcome_label,
+                       so.outcome_1d, so.ret_1d
                 FROM signal_log sl
                 LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
                 WHERE sl.created_at >= NOW() - INTERVAL '%s days'
@@ -1830,7 +1831,8 @@ def get_signal_log(days: int = 30) -> pd.DataFrame:
                        sl.score_breakdown, sl.price_at_signal, sl.alert_type,
                        sl.created_at,
                        so.pct_change_1hr, so.pct_change_1day, so.pct_change_5day,
-                       so.pct_change_15day, so.outcome_label
+                       so.pct_change_15day, so.outcome_label,
+                       so.outcome_1d, so.ret_1d
                 FROM signal_log sl
                 LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
                 WHERE sl.created_at >= datetime('now', '-{days} days')

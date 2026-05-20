@@ -130,7 +130,7 @@ def _clean_table(headers: list, rows: list, col_widths: list,
 # ─── Stats computation ────────────────────────────────────────────────────────
 
 def _compute_stats(df: pd.DataFrame) -> dict:
-    """Derive all accuracy metrics from a signal_log DataFrame."""
+    """Derive all accuracy metrics from a signal_log DataFrame. Primary window: 1-day."""
     s: dict = {"total": 0}
     if df.empty:
         return s
@@ -147,11 +147,16 @@ def _compute_stats(df: pd.DataFrame) -> dict:
 
     s["pct_1hr_filled"]  = round(df["pct_change_1hr"].notna().mean()  * 100, 1)
     s["pct_1day_filled"] = round(df["pct_change_1day"].notna().mean() * 100, 1)
-    s["pct_5day_filled"] = round(df["pct_change_5day"].notna().mean() * 100, 1)
+    s["pct_5day_filled"] = round(df["pct_change_5day"].notna().mean() * 100, 1) if "pct_change_5day" in df.columns else 0.0
     p15 = df.get("pct_change_15day")
     s["pct_15day_filled"] = round(p15.notna().mean() * 100, 1) if p15 is not None else 0.0
 
-    resolved = df[df["outcome_label"].isin(["win", "loss", "neutral"])].copy()
+    # Use outcome_1d (1-day win/loss label) as the primary resolved column.
+    # Falls back to legacy outcome_label if outcome_1d is unavailable.
+    outcome_col = "outcome_1d" if "outcome_1d" in df.columns and df["outcome_1d"].notna().any() else "outcome_label"
+    ret_col     = "ret_1d"     if "ret_1d"     in df.columns else "pct_change_1day"
+
+    resolved = df[df[outcome_col].isin(["win", "loss", "neutral"])].copy()
     s["resolved"] = len(resolved)
 
     if resolved.empty:
@@ -160,36 +165,26 @@ def _compute_stats(df: pd.DataFrame) -> dict:
                    "degenerate_labels": [], "missing_days": []})
         return s
 
-    n_wins = (resolved["outcome_label"] == "win").sum()
+    n_wins = (resolved[outcome_col] == "win").sum()
     s["overall_win_rate"] = round(n_wins / len(resolved) * 100, 1)
 
-    wins_5   = resolved.loc[resolved["outcome_label"] == "win",  "pct_change_5day"].dropna()
-    losses_5 = resolved.loc[resolved["outcome_label"] == "loss", "pct_change_5day"].dropna()
-    s["avg_win"]  = round(float(wins_5.mean()),   2) if not wins_5.empty  else None
-    s["avg_loss"] = round(float(losses_5.mean()), 2) if not losses_5.empty else None
+    wins_1d   = resolved.loc[resolved[outcome_col] == "win",  ret_col].dropna()
+    losses_1d = resolved.loc[resolved[outcome_col] == "loss", ret_col].dropna()
+    s["avg_win"]  = round(float(wins_1d.mean()),   2) if not wins_1d.empty  else None
+    s["avg_loss"] = round(float(losses_1d.mean()), 2) if not losses_1d.empty else None
 
     by_signal: dict = {}
     for label in df["signal_label"].unique():
         sub = resolved[resolved["signal_label"] == label]
         if len(sub) < 3:
             continue
-        wr  = round((sub["outcome_label"] == "win").sum() / len(sub) * 100, 1)
-        wg  = sub.loc[sub["outcome_label"] == "win",  "pct_change_5day"].dropna()
-        lg  = sub.loc[sub["outcome_label"] == "loss", "pct_change_5day"].dropna()
-
-        sub_1d = df[df["signal_label"] == label].dropna(subset=["pct_change_1day"])
-        wr_1d  = round((sub_1d["pct_change_1day"] > 0).sum() / len(sub_1d) * 100, 1) if not sub_1d.empty else None
-
-        wr_15 = None
-        if "pct_change_15day" in df.columns:
-            sub_15 = df[df["signal_label"] == label].dropna(subset=["pct_change_15day"])
-            wr_15  = round((sub_15["pct_change_15day"] > 0).sum() / len(sub_15) * 100, 1) if not sub_15.empty else None
+        wr = round((sub[outcome_col] == "win").sum() / len(sub) * 100, 1)
+        wg = sub.loc[sub[outcome_col] == "win",  ret_col].dropna()
+        lg = sub.loc[sub[outcome_col] == "loss", ret_col].dropna()
 
         by_signal[label] = {
             "count":    len(sub),
             "win_rate": wr,
-            "wr_1day":  wr_1d,
-            "wr_15day": wr_15,
             "avg_gain": round(float(wg.mean()), 2) if not wg.empty else None,
             "avg_loss": round(float(lg.mean()), 2) if not lg.empty else None,
         }
@@ -198,8 +193,8 @@ def _compute_stats(df: pd.DataFrame) -> dict:
     comp_names = ["technical", "catalyst", "fundamental", "risk", "sentiment"]
     comp_corr: dict = {}
     if "score_breakdown" in df.columns:
-        w_rows = resolved[resolved["outcome_label"] == "win"]["score_breakdown"]
-        l_rows = resolved[resolved["outcome_label"] == "loss"]["score_breakdown"]
+        w_rows = resolved[resolved[outcome_col] == "win"]["score_breakdown"]
+        l_rows = resolved[resolved[outcome_col] == "loss"]["score_breakdown"]
         for c in comp_names:
             w_vals = w_rows.apply(lambda bd: bd.get(c) if isinstance(bd, dict) else None).dropna()
             l_vals = l_rows.apply(lambda bd: bd.get(c) if isinstance(bd, dict) else None).dropna()
@@ -221,12 +216,12 @@ def _compute_stats(df: pd.DataFrame) -> dict:
     except Exception:
         s["missing_days"] = []
 
-    with_ret = resolved.dropna(subset=["pct_change_5day"])
+    with_ret = resolved.dropna(subset=[ret_col])
     if not with_ret.empty:
-        bi = with_ret["pct_change_5day"].idxmax()
-        wi = with_ret["pct_change_5day"].idxmin()
-        s["best_ticker"]  = (with_ret.loc[bi, "ticker"], with_ret.loc[bi, "pct_change_5day"])
-        s["worst_ticker"] = (with_ret.loc[wi, "ticker"], with_ret.loc[wi, "pct_change_5day"])
+        bi = with_ret[ret_col].idxmax()
+        wi = with_ret[ret_col].idxmin()
+        s["best_ticker"]  = (with_ret.loc[bi, "ticker"], with_ret.loc[bi, ret_col])
+        s["worst_ticker"] = (with_ret.loc[wi, "ticker"], with_ret.loc[wi, ret_col])
 
     return s
 
@@ -424,8 +419,8 @@ def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
         ["Metric", "Value"],
         [
             ["Total signals logged",        str(s.get("total", 0))],
-            ["Resolved signals (5-day)",    str(s.get("resolved", 0))],
-            ["Overall win rate (5-day)",    f"{wr:.1f}%" if wr is not None else "—"],
+            ["Resolved signals (1-day)",    str(s.get("resolved", 0))],
+            ["Overall win rate (1-day)",    f"{wr:.1f}%" if wr is not None else "—"],
             ["Average signals per day",     str(s.get("avg_per_day", 0))],
             ["1day price completeness",     f"{s.get('pct_1day_filled', 0):.1f}%"],
             ["5day price completeness",     f"{s.get('pct_5day_filled', 0):.1f}%"],
@@ -434,7 +429,7 @@ def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
     ))
     story.append(Spacer(1, 10))
 
-    story.append(Paragraph("WIN RATE BY SIGNAL TYPE (5-DAY)", ST["section"]))
+    story.append(Paragraph("WIN RATE BY SIGNAL TYPE (1-DAY)", ST["section"]))
     order = ["Strong Buy Candidate", "Speculative Buy", "Gap-Up", "Watchlist", "Hold", "Trim", "Sell", "Avoid"]
     sig_rows = []
     for lbl in order + [l for l in by_sig if l not in order]:
@@ -459,7 +454,7 @@ def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
         story.append(Paragraph("Insufficient resolved signals to compute win rates.", ST["body"]))
     story.append(Spacer(1, 10))
 
-    story.append(Paragraph("COMPONENT SCORE — WINS VS LOSSES (5-DAY AVERAGES)", ST["section"]))
+    story.append(Paragraph("COMPONENT SCORE — WINS VS LOSSES (1-DAY AVERAGES)", ST["section"]))
     if comp_c:
         corr_rows = []
         for c in ["technical", "catalyst", "fundamental", "risk", "sentiment"]:
@@ -513,7 +508,7 @@ def generate_checkpoint_30(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
     story.append(Paragraph("CONCLUSION", ST["section"]))
     if verdict == "PROMISING":
         concl = (
-            f"Early results are positive. {s.get('total', 0)} signals logged with a 5-day win rate of "
+            f"Early results are positive. {s.get('total', 0)} signals logged with a 1-day win rate of "
             f"{wr:.1f}%. At least one component shows early predictive correlation. "
             f"Continue to Checkpoint 3 at 600 signals without changing weights."
         )
@@ -597,9 +592,9 @@ def generate_checkpoint_60(df: pd.DataFrame, total_logged: int = 0) -> Optional[
         ["Total signals logged (all-time)", str(total_logged or s.get("total", 0))],
         ["Signals in 120-day window",   str(s.get("total", 0))],
         ["Resolved signals",            str(s.get("resolved", 0))],
-        ["Overall win rate (5-day)",    f"{wr:.1f}%"        if wr     is not None else "—"],
-        ["Average win (5-day)",         f"+{avg_w:.2f}%"    if avg_w  is not None else "—"],
-        ["Average loss (5-day)",        f"{avg_l:.2f}%"     if avg_l  is not None else "—"],
+        ["Overall win rate (1-day)",    f"{wr:.1f}%"        if wr     is not None else "—"],
+        ["Average win (1-day)",         f"+{avg_w:.2f}%"    if avg_w  is not None else "—"],
+        ["Average loss (1-day)",        f"{avg_l:.2f}%"     if avg_l  is not None else "—"],
         ["Gain exceeds loss",           "Yes" if gain_over_loss else "No"],
     ]
     if by_sig:
@@ -620,7 +615,7 @@ def generate_checkpoint_60(df: pd.DataFrame, total_logged: int = 0) -> Optional[
     story.append(Spacer(1, 10))
 
     # Win rate table with all three windows
-    story.append(Paragraph("WIN RATE BY SIGNAL TYPE — 1-DAY / 5-DAY / 15-DAY", ST["section"]))
+    story.append(Paragraph("WIN RATE BY SIGNAL TYPE (1-DAY)", ST["section"]))
     order = ["Strong Buy Candidate", "Speculative Buy", "Gap-Up", "Watchlist", "Hold", "Trim", "Sell", "Avoid"]
     sig_rows = []
     for lbl in order + [l for l in by_sig if l not in order]:
@@ -630,18 +625,16 @@ def generate_checkpoint_60(df: pd.DataFrame, total_logged: int = 0) -> Optional[
         sig_rows.append([
             lbl,
             str(d["count"]),
-            f"{d.get('wr_1day'):.1f}%"  if d.get("wr_1day")  is not None else "—",
             f"{d['win_rate']:.1f}%",
-            f"{d.get('wr_15day'):.1f}%" if d.get("wr_15day") is not None else "—",
-            f"+{d['avg_gain']:.1f}%"    if d.get("avg_gain") is not None else "—",
-            f"{d['avg_loss']:.1f}%"     if d.get("avg_loss") is not None else "—",
+            f"+{d['avg_gain']:.1f}%" if d.get("avg_gain") is not None else "—",
+            f"{d['avg_loss']:.1f}%"  if d.get("avg_loss") is not None else "—",
         ])
     if sig_rows:
         story.append(_clean_table(
-            ["Signal Type", "N", "1-Day WR", "5-Day WR", "15-Day WR", "Avg Gain", "Avg Loss"],
+            ["Signal Type", "N", "Win Rate", "Avg Gain", "Avg Loss"],
             sig_rows,
-            [2.1 * inch, 0.45 * inch, 0.8 * inch, 0.8 * inch, 0.9 * inch, 0.8 * inch, 0.8 * inch],
-            right_cols=[1, 2, 3, 4, 5, 6],
+            [2.8 * inch, 0.6 * inch, 1.0 * inch, 1.0 * inch, 1.0 * inch],
+            right_cols=[1, 2, 3, 4],
         ))
     story.append(Spacer(1, 10))
 
@@ -697,7 +690,7 @@ def generate_checkpoint_60(df: pd.DataFrame, total_logged: int = 0) -> Optional[
     if verdict == "APPROVED":
         concl = (
             f"The scanner demonstrates statistically meaningful predictive accuracy over {s.get('resolved', 0)} "
-            f"resolved signals. 5-day win rate of {wr:.1f}% with average wins ({avg_w:+.2f}%) exceeding average "
+            f"resolved signals. 1-day win rate of {wr:.1f}% with average wins ({avg_w:+.2f}%) exceeding average "
             f"losses ({avg_l:.2f}%). At least one component shows strong correlation with positive outcomes. "
             f"Adjust weights based on the component correlation table above. "
             f"Recalibrate after each additional 30-day block."
