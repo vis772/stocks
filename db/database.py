@@ -128,11 +128,6 @@ def initialize_db():
         _init_postgres()
     else:
         _init_sqlite()
-    try:
-        from paper_broker import init_paper_trading_tables
-        init_paper_trading_tables()
-    except Exception as _pt_e:
-        print(f"  [db] paper trading tables init failed: {_pt_e}")
 
 
 def _init_postgres():
@@ -215,25 +210,6 @@ def _init_postgres():
         )
     """)
     cur.execute("INSERT INTO scanner_control (id) VALUES (1) ON CONFLICT DO NOTHING")
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS paper_trades (
-            id           SERIAL PRIMARY KEY,
-            trade_date   TEXT NOT NULL,
-            ticker       TEXT NOT NULL,
-            signal_type  TEXT NOT NULL,
-            entry_price  REAL NOT NULL,
-            stop_price   REAL NOT NULL,
-            target1      REAL NOT NULL,
-            target2      REAL NOT NULL,
-            entry_time   TEXT NOT NULL,
-            exit_price   REAL,
-            exit_time    TEXT,
-            outcome      TEXT DEFAULT 'open',
-            pnl_pct      REAL,
-            created_at   TIMESTAMP DEFAULT NOW()
-        )
-    """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -401,8 +377,6 @@ def _init_postgres():
     for ddl in [
         "ALTER TABLE scanner_state   ADD COLUMN IF NOT EXISTS vwap_snapshot      TEXT DEFAULT '{}'",
         "ALTER TABLE scanner_state   ADD COLUMN IF NOT EXISTS momentum_ranking   TEXT DEFAULT '[]'",
-        "ALTER TABLE paper_trades    ADD COLUMN IF NOT EXISTS source_type        TEXT DEFAULT 'signal'",
-        "ALTER TABLE paper_trades    ADD COLUMN IF NOT EXISTS score_at_entry     REAL",
         "ALTER TABLE portfolio       ADD COLUMN IF NOT EXISTS user_id            INTEGER DEFAULT 1",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS price_15day        REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS pct_change_15day   REAL",
@@ -624,25 +598,6 @@ def _init_sqlite():
     cur.execute("INSERT OR IGNORE INTO scanner_control (id) VALUES (1)")
 
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS paper_trades (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_date   TEXT NOT NULL,
-            ticker       TEXT NOT NULL,
-            signal_type  TEXT NOT NULL,
-            entry_price  REAL NOT NULL,
-            stop_price   REAL NOT NULL,
-            target1      REAL NOT NULL,
-            target2      REAL NOT NULL,
-            entry_time   TEXT NOT NULL,
-            exit_price   REAL,
-            exit_time    TEXT,
-            outcome      TEXT DEFAULT 'open',
-            pnl_pct      REAL,
-            created_at   TEXT DEFAULT (datetime('now'))
-        )
-    """)
-
-    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             username      TEXT NOT NULL UNIQUE,
@@ -807,8 +762,6 @@ def _init_sqlite():
     for col_sql in [
         "ALTER TABLE scanner_state   ADD COLUMN vwap_snapshot     TEXT DEFAULT '{}'",
         "ALTER TABLE scanner_state   ADD COLUMN momentum_ranking  TEXT DEFAULT '[]'",
-        "ALTER TABLE paper_trades    ADD COLUMN source_type       TEXT DEFAULT 'signal'",
-        "ALTER TABLE paper_trades    ADD COLUMN score_at_entry    REAL",
         "ALTER TABLE portfolio       ADD COLUMN user_id           INTEGER DEFAULT 1",
         "ALTER TABLE signal_outcomes ADD COLUMN price_15day       REAL",
         "ALTER TABLE signal_outcomes ADD COLUMN pct_change_15day  REAL",
