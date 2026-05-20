@@ -134,6 +134,15 @@ def _init_postgres():
     conn = _get_pg_conn()
     cur  = conn.cursor()
 
+    # Serialise concurrent schema migrations with a transaction-level advisory lock.
+    # If another process (scanner / Streamlit worker) already holds it, skip — the
+    # tables will exist by the time this process needs them.
+    cur.execute("SELECT pg_try_advisory_xact_lock(20260520)")
+    if not cur.fetchone()[0]:
+        cur.close()
+        _put_pg_conn(conn)
+        return
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS portfolio (
             ticker      TEXT PRIMARY KEY,
@@ -503,9 +512,11 @@ def _init_postgres():
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS direction           TEXT",
     ]:
         try:
+            cur.execute("SAVEPOINT _mig")
             cur.execute(ddl)
+            cur.execute("RELEASE SAVEPOINT _mig")
         except Exception:
-            pass
+            cur.execute("ROLLBACK TO SAVEPOINT _mig")
 
     cur.execute("UPDATE portfolio SET user_id = 1 WHERE user_id IS NULL")
 
