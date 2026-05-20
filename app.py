@@ -1928,7 +1928,7 @@ def _live_alerts_feed():
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["Control", "Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info", "Config", "Paper Trading"])
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(["Control", "Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info", "Config", "Paper Trading", "Health"])
 
 
 # ── TAB 0: CONTROL ───────────────────────────────────────────────────────────
@@ -3138,3 +3138,142 @@ with tab9:
         'FOR STRATEGY RESEARCH PURPOSES</div>',
         unsafe_allow_html=True,
     )
+
+# ── TAB 10: HEALTH ────────────────────────────────────────────────────────────
+with tab10:
+    import time as _time
+
+    # Auto-refresh every 60 seconds via lightweight JS injection
+    st.components.v1.html(
+        '<script>setTimeout(() => window.parent.location.reload(), 60000);</script>',
+        height=0,
+    )
+
+    _STATUS_COLORS = {"ok": "#10b981", "warn": "#f59e0b", "critical": "#f43f5e"}
+    _STATUS_ICONS  = {"ok": "●", "warn": "◐", "critical": "✗"}
+
+    def _status_badge(status: str, detail: str = "") -> str:
+        color = _STATUS_COLORS.get(status, "#8293a8")
+        icon  = _STATUS_ICONS.get(status, "?")
+        label = status.upper()
+        text  = f" <span style='color:#8293a8;font-size:0.78em'>{detail}</span>" if detail else ""
+        return (
+            f"<span style='color:{color};font-weight:700;font-size:0.88em'>"
+            f"{icon} {label}</span>{text}"
+        )
+
+    # Header
+    _ts = _time.strftime("%H:%M:%S ET", _time.localtime())
+    st.markdown(
+        f"<h2 style='color:#f59e0b;font-family:JetBrains Mono,monospace;margin-bottom:4px'>"
+        f"System Health</h2>"
+        f"<p style='color:#3a5068;font-size:0.8em;margin-top:0'>Last checked: {_ts} · auto-refreshes every 60 s</p>",
+        unsafe_allow_html=True,
+    )
+
+    try:
+        from health.monitor import HealthMonitor as _HM
+        from db.database import get_health_events, get_data_quality_summary
+
+        _results = _HM().run_all_checks()
+
+        # ── Status grid ──────────────────────────────────────────────────────
+        _LABELS = {
+            "database":           "Supabase",
+            "finnhub":            "Finnhub API",
+            "tiingo":             "Tiingo API",
+            "yfinance":           "yfinance",
+            "scanner_loop":       "Scanner Loop",
+            "universe":           "Universe",
+            "conviction_engine":  "Conviction Engine",
+            "accuracy_validator": "Accuracy Validator",
+            "telegram_bot":       "Telegram Bot",
+        }
+        _keys = list(_LABELS.keys())
+        _cols_per_row = 3
+        for _row_start in range(0, len(_keys), _cols_per_row):
+            _row_keys = _keys[_row_start:_row_start + _cols_per_row]
+            _grid_cols = st.columns(len(_row_keys))
+            for _ci, _key in enumerate(_row_keys):
+                _info   = _results.get(_key, {})
+                _status = _info.get("status", "warn")
+                _detail = _info.get("detail", "")
+                _chk    = _info.get("checked_at", "")
+                _color  = _STATUS_COLORS.get(_status, "#8293a8")
+                _border = f"2px solid {_color}44"
+                with _grid_cols[_ci]:
+                    st.markdown(
+                        f"""<div style='background:#101928;border:{_border};border-radius:8px;
+                                        padding:14px 16px;margin-bottom:8px'>
+                            <div style='color:#8293a8;font-size:0.75em;text-transform:uppercase;
+                                        letter-spacing:.08em;margin-bottom:6px'>{_LABELS[_key]}</div>
+                            <div style='font-size:1.1em;font-weight:700;color:{_color}'>
+                                {_STATUS_ICONS.get(_status,'?')} {_status.upper()}</div>
+                            <div style='color:#5c7a99;font-size:0.76em;margin-top:6px;
+                                        line-height:1.4'>{_detail}</div>
+                            <div style='color:#3a5068;font-size:0.68em;margin-top:6px'>{_chk}</div>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+        st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+
+        # ── Key metrics row ──────────────────────────────────────────────────
+        _uv_size = _results.get("universe", {}).get("size", 0) or 0
+        _fh_rate = _results.get("finnhub",  {}).get("success_rate")
+        _ti_rate = _results.get("tiingo",   {}).get("success_rate")
+        _yf_rate = _results.get("yfinance", {}).get("success_rate")
+        _fh_ms   = _results.get("finnhub",  {}).get("avg_latency_ms", 0)
+        _ti_ms   = _results.get("tiingo",   {}).get("avg_latency_ms", 0)
+
+        def _pct_str(v):
+            return f"{v*100:.0f}%" if v is not None else "n/a"
+
+        _m1, _m2, _m3, _m4 = st.columns(4)
+        with _m1:
+            st.metric("Universe Size",   f"{_uv_size:,} tickers")
+        with _m2:
+            st.metric("Finnhub Success", _pct_str(_fh_rate), delta=f"{_fh_ms:.0f} ms avg")
+        with _m3:
+            st.metric("Tiingo Success",  _pct_str(_ti_rate), delta=f"{_ti_ms:.0f} ms avg")
+        with _m4:
+            st.metric("yfinance Success", _pct_str(_yf_rate))
+
+        # ── Data quality table ───────────────────────────────────────────────
+        st.markdown("#### Quote Source Performance (last 24 h)")
+        _dq = get_data_quality_summary(hours_back=24)
+        if _dq:
+            import pandas as _pd_h
+            _dq_df = _pd_h.DataFrame(_dq)
+            _dq_df["success_rate"] = (_dq_df["success_rate"] * 100).round(1).astype(str) + "%"
+            _dq_df["avg_latency_ms"] = _dq_df["avg_latency_ms"].round(1).astype(str) + " ms"
+            _dq_df.columns = ["Source", "Total Calls", "OK", "Success Rate", "Avg Latency"]
+            st.dataframe(_dq_df, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No data_quality records in the last 24 hours.")
+
+        # ── Recent health events ─────────────────────────────────────────────
+        st.markdown("#### Recent Health Events")
+        _events = get_health_events(limit=40, hours_back=24)
+        if _events:
+            import pandas as _pd_h2
+            _ev_df = _pd_h2.DataFrame(_events)
+            # Color-code status column
+            def _color_row(row):
+                color = {"ok": "#10b98120", "warn": "#f59e0b20",
+                         "critical": "#f43f5e20"}.get(row["status"], "")
+                return [f"background-color:{color}"] * len(row)
+            _ev_df.columns = ["Subsystem", "Status", "Detail", "Action", "Time"]
+            st.dataframe(_ev_df.style.apply(_color_row, axis=1),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("No health events in the last 24 hours — all clean.")
+
+        # ── Manual refresh button ────────────────────────────────────────────
+        if st.button("↻ Refresh Now", key="health_manual_refresh"):
+            st.rerun()
+
+    except ImportError as _hi:
+        st.error(f"Health monitor not available: {_hi}")
+    except Exception as _he:
+        st.error(f"Health tab error: {_he}")

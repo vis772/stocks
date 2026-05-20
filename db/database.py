@@ -413,6 +413,21 @@ def _init_postgres():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS health_log (
+            id          SERIAL PRIMARY KEY,
+            subsystem   TEXT NOT NULL,
+            status      TEXT NOT NULL,
+            detail      TEXT DEFAULT '',
+            action      TEXT DEFAULT '',
+            created_at  TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_health_log_created
+        ON health_log (created_at DESC)
+    """)
+
     # Migration-safe: add new columns to existing deployments
     for ddl in [
         "ALTER TABLE scanner_state   ADD COLUMN IF NOT EXISTS vwap_snapshot      TEXT DEFAULT '{}'",
@@ -463,6 +478,7 @@ def _init_postgres():
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_risk             TEXT",
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_time_sensitivity TEXT",
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS outcome_label       TEXT DEFAULT 'pending'",
+        "ALTER TABLE scanner_control ADD COLUMN IF NOT EXISTS finnhub_degraded    BOOLEAN DEFAULT FALSE",
     ]:
         try:
             cur.execute("SAVEPOINT _mig")
@@ -835,6 +851,17 @@ def _init_sqlite():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS health_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            subsystem   TEXT NOT NULL,
+            status      TEXT NOT NULL,
+            detail      TEXT DEFAULT '',
+            action      TEXT DEFAULT '',
+            created_at  TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     for col_sql in [
         "ALTER TABLE scanner_state   ADD COLUMN vwap_snapshot     TEXT DEFAULT '{}'",
         "ALTER TABLE scanner_state   ADD COLUMN momentum_ranking  TEXT DEFAULT '[]'",
@@ -884,6 +911,7 @@ def _init_sqlite():
         "ALTER TABLE conviction_buys ADD COLUMN ai_risk             TEXT",
         "ALTER TABLE conviction_buys ADD COLUMN ai_time_sensitivity TEXT",
         "ALTER TABLE conviction_buys ADD COLUMN outcome_label       TEXT DEFAULT 'pending'",
+        "ALTER TABLE scanner_control ADD COLUMN finnhub_degraded    INTEGER DEFAULT 0",
     ]:
         try:
             cur.execute(col_sql)
@@ -1398,7 +1426,8 @@ def get_scanner_control() -> dict:
 
 
 def set_scanner_control(paused: bool = None, force_scan: bool = None,
-                        scanner_started_at=None, current_mode: str = None) -> None:
+                        scanner_started_at=None, current_mode: str = None,
+                        finnhub_degraded: bool = None) -> None:
     """Update scanner control flags."""
     if _is_postgres():
         ph = "%s"
@@ -1413,6 +1442,8 @@ def set_scanner_control(paused: bool = None, force_scan: bool = None,
         sets.append(f"scanner_started_at = {ph}"); vals.append(str(scanner_started_at))
     if current_mode is not None:
         sets.append(f"current_mode = {ph}"); vals.append(current_mode)
+    if finnhub_degraded is not None:
+        sets.append(f"finnhub_degraded = {ph}"); vals.append(finnhub_degraded)
     if not sets:
         return
     sets.append("updated_at = NOW()" if _is_postgres() else "updated_at = datetime('now')")
@@ -2458,6 +2489,116 @@ def get_scanner_state() -> dict:
         result["current_mode"], result.get("last_heartbeat"), result["paused"]
     )
     return result
+
+
+def log_health_event(subsystem: str, status: str,
+                     detail: str = "", action: str = "") -> None:
+    """Insert a row into health_log; trim to 2000 rows to prevent unbounded growth."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO health_log (subsystem, status, detail, action) VALUES (%s,%s,%s,%s)",
+                (subsystem, status, detail[:500], action[:200]),
+            )
+            cur.execute("""
+                DELETE FROM health_log
+                WHERE id NOT IN (
+                    SELECT id FROM health_log ORDER BY created_at DESC LIMIT 2000
+                )
+            """)
+            conn.commit(); cur.close(); _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute(
+                "INSERT INTO health_log (subsystem, status, detail, action) VALUES (?,?,?,?)",
+                (subsystem, status, detail[:500], action[:200]),
+            )
+            conn.execute("""
+                DELETE FROM health_log
+                WHERE id NOT IN (
+                    SELECT id FROM health_log ORDER BY created_at DESC LIMIT 2000
+                )
+            """)
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] log_health_event failed: {e}")
+
+
+def get_health_events(limit: int = 50, hours_back: int = 24) -> list:
+    """Return recent health_log rows newest-first."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT subsystem, status, detail, action, created_at
+                FROM health_log
+                WHERE created_at > NOW() - INTERVAL '1 hour' * %s
+                ORDER BY created_at DESC
+                LIMIT %s
+            """, (hours_back, limit))
+            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT subsystem, status, detail, action, created_at
+                FROM health_log
+                WHERE created_at > datetime('now', ? || ' hours')
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (f"-{hours_back}", limit))
+            rows = cur.fetchall(); conn.close()
+        return [
+            {"subsystem": r[0], "status": r[1], "detail": r[2],
+             "action": r[3], "created_at": str(r[4])}
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"  [db] get_health_events failed: {e}")
+        return []
+
+
+def get_data_quality_summary(hours_back: int = 24) -> list:
+    """
+    Return per-source quote success rates and average latency.
+    Result: [{source, total, ok_count, success_rate, avg_latency_ms}, ...]
+    """
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT source,
+                       COUNT(*)  AS total,
+                       SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok_count,
+                       AVG(latency_ms) AS avg_ms
+                FROM data_quality
+                WHERE created_at > NOW() - INTERVAL '1 hour' * %s
+                GROUP BY source
+                ORDER BY source
+            """, (hours_back,))
+            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT source,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok_count,
+                       AVG(latency_ms) AS avg_ms
+                FROM data_quality
+                WHERE created_at > datetime('now', ? || ' hours')
+                GROUP BY source
+                ORDER BY source
+            """, (f"-{hours_back}",))
+            rows = cur.fetchall(); conn.close()
+        return [
+            {"source": r[0], "total": r[1] or 0, "ok_count": r[2] or 0,
+             "success_rate": round((r[2] or 0) / max(r[1] or 1, 1), 4),
+             "avg_latency_ms": round(r[3] or 0, 1)}
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"  [db] get_data_quality_summary failed: {e}")
+        return []
 
 
 def get_accuracy_metrics() -> list:

@@ -88,6 +88,11 @@ SCAN_INTERVAL_SEC       = 60
 PREMARKET_SCAN_INTERVAL = 90
 PREMARKET_SEC_INTERVAL  = 300
 AFTERHOURS_INTERVAL     = 300
+HEALTH_CHECK_INTERVAL   = 300  # run health checks every 5 minutes
+
+# When True, scan_one_ticker uses resilient_fetcher instead of direct Finnhub calls.
+# Set by health.monitor when Finnhub failure rate exceeds threshold.
+_FINNHUB_DEGRADED_MODE: bool = False
 
 
 def now_et():
@@ -571,7 +576,19 @@ def _check_vwap_alerts(ticker, price, vwap, change_pct, state, et) -> List[str]:
 def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
     fired = []
     try:
-        quote = _fh_get("quote", {"symbol": ticker})
+        if _FINNHUB_DEGRADED_MODE:
+            # Finnhub is degraded — fall back to resilient_fetcher for real-time quote
+            try:
+                from resilient_fetcher import get_quote as _rf_get_quote
+                _qr = _rf_get_quote(ticker)
+                if not _qr or _qr.price <= 0:
+                    return fired
+                quote = {"c": _qr.price, "pc": _qr.prev_close,
+                         "v": _qr.volume, "h": _qr.high, "l": _qr.low}
+            except Exception:
+                return fired
+        else:
+            quote = _fh_get("quote", {"symbol": ticker})
         if not quote or not quote.get("c") or quote["c"] <= 0:
             return fired
 
@@ -896,6 +913,19 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
             if not price:
                 continue
 
+            # Bad-data guard: score=100 with <1% price move is almost certainly corrupt data
+            _chg_pct = abs(result.get("change_pct", 0) or 0)
+            if round(score) >= 100 and _chg_pct < 1.0:
+                print(f"  [anomaly] {ticker} score={score:.0f} but Δ={_chg_pct:.2f}% — bad data, suppressed")
+                try:
+                    from db.database import log_health_event
+                    log_health_event("scoring", "warn",
+                                     f"{ticker} score={score:.0f} price_change={_chg_pct:.2f}% (<1%)",
+                                     "signal suppressed")
+                except Exception:
+                    pass
+                continue
+
             signal_label = result.get("signal", "Hold")
 
             try:
@@ -1062,6 +1092,7 @@ def run_scanner():
     watchlist:         List[str] = []
     morning_brief_sent = False
     last_digest_time   = now_et()
+    last_health_check  = now_et() - timedelta(hours=1)
     eod_report_sent    = False
     news_thread        = None
     last_screen_date: Optional[str] = None
@@ -1403,6 +1434,14 @@ def run_scanner():
                 else:
                     print(f"  ✓ No alerts this scan")
                     _log("info", f"Pre-market scan #{state.scan_count} complete — no alerts")
+                # ── Health monitor (every 5 min) ──────────────────────────────
+                if (et - last_health_check).total_seconds() >= HEALTH_CHECK_INTERVAL:
+                    try:
+                        from health.monitor import HealthMonitor
+                        HealthMonitor().run_health_check_cycle(state)
+                    except Exception as _hm_e:
+                        print(f"  [health] check error: {_hm_e}")
+                    last_health_check = et
 
             # ── MARKET ────────────────────────────────────────────────────────
             elif mode == "MARKET":
@@ -1435,6 +1474,14 @@ def run_scanner():
                 except Exception:
                     pass
                 state.save()
+                # ── Health monitor (every 5 min) ──────────────────────────────
+                if (et - last_health_check).total_seconds() >= HEALTH_CHECK_INTERVAL:
+                    try:
+                        from health.monitor import HealthMonitor
+                        HealthMonitor().run_health_check_cycle(state)
+                    except Exception as _hm_e:
+                        print(f"  [health] check error: {_hm_e}")
+                    last_health_check = et
                 if (et - state.last_prediction_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
                     print("\n[PREDICTION SCAN] Running 30-min full-score scan...")
                     _log("info", f"Prediction scan started — top {PREDICTION_TOP_N} stocks")
