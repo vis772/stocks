@@ -931,6 +931,11 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
             else:
                 quality_tag = "LOW"
 
+            from config import MIN_SIGNAL_SCORE
+            if score < MIN_SIGNAL_SCORE:
+                print(f"  [signal_log] ✗ {ticker} | {signal_label} | score={score:.0f} below MIN_SIGNAL_SCORE={MIN_SIGNAL_SCORE} — skipped")
+                continue
+
             try:
                 from db.database import log_signal
                 breakdown = {
