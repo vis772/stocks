@@ -1006,12 +1006,12 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
 
             _rvol = state.last_rvol.get(ticker, 1.0)
             _qt_adj = float(quant_adj) if quant_adj else 0.0
-            if score >= 75 and _qt_adj >= 5 and _rvol >= 2.0:
-                quality_tag = "HIGH"
-            elif score >= 65 and _rvol >= 1.3:
-                quality_tag = "MEDIUM"
+            if score >= 75:
+                quality_tag = "HIGH"      # Strong Buy territory
+            elif score >= 60:
+                quality_tag = "MEDIUM"    # Speculative Buy territory
             else:
-                quality_tag = "LOW"
+                quality_tag = "LOW"       # Watchlist territory
 
             from config import MIN_SIGNAL_SCORE
             if score < MIN_SIGNAL_SCORE:
