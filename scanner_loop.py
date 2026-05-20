@@ -1283,6 +1283,11 @@ def run_scanner():
                 alert_morning_brief(watchlist, n_filings, gap_ups)
                 morning_brief_sent = True
                 state.log_alert(f"Morning brief sent — {len(watchlist)} stocks")
+                try:
+                    from reports.morning_report import generate_morning_report
+                    generate_morning_report()
+                except Exception as _mr_e:
+                    print(f"  [morning_report] Failed: {_mr_e}")
 
             if et.hour == 9 and 0 <= et.minute < 15 and state.regime_updated_date != today_str:
                 if _REGIME_AVAILABLE:
