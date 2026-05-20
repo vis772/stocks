@@ -74,33 +74,34 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap');
 @keyframes pulse-amber {
-    0%,100% { box-shadow: 0 0 0 1px rgba(194,97,15,0.2); }
-    50%      { box-shadow: 0 0 0 3px rgba(194,97,15,0.35); }
+    0%,100% { box-shadow: 0 0 0 1px rgba(245,158,11,0.15); }
+    50%      { box-shadow: 0 0 0 3px rgba(245,158,11,0.3); }
 }
-@keyframes fadeIn { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:none; } }
-@keyframes live-dot { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+@keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+@keyframes live-dot { 0%,100% { opacity:1; } 50% { opacity:0.25; } }
+@keyframes glow-green { 0%,100% { box-shadow: 0 0 6px rgba(16,185,129,0.3); } 50% { box-shadow: 0 0 14px rgba(16,185,129,0.55); } }
 
 :root {
-    --bg:       #f7f8fb;
-    --bg2:      #eff1f7;
-    --bg3:      #e6e9f2;
-    --bgcard:   #ffffff;
-    --bghover:  #f0f2f9;
-    --border:   #dde1ec;
-    --borderhi: #b0bace;
-    --green:    #16a34a;
-    --green2:   #15803d;
-    --blue:     #1d6fa5;
-    --blue2:    #2563eb;
-    --amber:    #c2610f;
-    --amber2:   #ea580c;
-    --red:      #dc2626;
-    --red2:     #ef4444;
-    --purple:   #6d28d9;
-    --t1:       #0f172a;
-    --t2:       #334155;
-    --t3:       #94a3b8;
-    --tdim:     #cbd5e1;
+    --bg:       #080d14;
+    --bg2:      #090e16;
+    --bg3:      #0f1824;
+    --bgcard:   #101928;
+    --bghover:  #162033;
+    --border:   #1a2740;
+    --borderhi: #253a55;
+    --green:    #10b981;
+    --green2:   #059669;
+    --blue:     #38bdf8;
+    --blue2:    #60a5fa;
+    --amber:    #f59e0b;
+    --amber2:   #fbbf24;
+    --red:      #f43f5e;
+    --red2:     #fb7185;
+    --purple:   #a78bfa;
+    --t1:       #e2eaf4;
+    --t2:       #8293a8;
+    --t3:       #3a5068;
+    --tdim:     #1e3048;
 }
 
 /* ── Base ── */
@@ -119,7 +120,7 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
 
 /* ── Inputs ── */
 .stTextInput input, .stTextArea textarea {
-    background: var(--bgcard) !important;
+    background: var(--bg3) !important;
     border: 1px solid var(--border) !important;
     color: var(--t1) !important;
     border-radius: 6px !important;
@@ -128,9 +129,10 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
     transition: border-color 0.2s !important;
 }
 .stTextInput input:focus, .stTextArea textarea:focus {
-    border-color: var(--blue) !important;
-    box-shadow: 0 0 0 3px rgba(29,111,165,0.12) !important;
+    border-color: var(--amber) !important;
+    box-shadow: 0 0 0 3px rgba(245,158,11,0.12) !important;
 }
+.stTextInput input::placeholder { color: var(--t3) !important; }
 
 /* ── Buttons ── */
 .stButton > button {
@@ -153,8 +155,8 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
 .stButton > button[kind="primary"] {
     background: var(--amber) !important;
     border-color: var(--amber) !important;
-    color: #fff !important;
-    font-weight: 600 !important;
+    color: #000 !important;
+    font-weight: 700 !important;
 }
 .stButton > button[kind="primary"]:hover {
     background: var(--amber2) !important;
@@ -171,10 +173,10 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
 .stTabs [data-baseweb="tab"] {
     font-family: 'Inter', sans-serif !important;
     font-weight: 500 !important;
-    font-size: 0.8em !important;
+    font-size: 0.79em !important;
     letter-spacing: 0.01em !important;
     color: var(--t3) !important;
-    padding: 11px 20px !important;
+    padding: 12px 22px !important;
     border-bottom: 2px solid transparent !important;
     background: transparent !important;
     transition: color 0.15s !important;
@@ -198,10 +200,10 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
 [data-testid="metric-container"] label {
     color: var(--t3) !important;
     font-size: 0.66em !important;
-    letter-spacing: 0.06em !important;
+    letter-spacing: 0.07em !important;
     text-transform: uppercase !important;
     font-family: 'Inter', sans-serif !important;
-    font-weight: 500 !important;
+    font-weight: 600 !important;
 }
 [data-testid="metric-container"] [data-testid="metric-value"] {
     color: var(--t1) !important;
@@ -237,6 +239,13 @@ hr { border-color: var(--border) !important; margin: 10px 0 !important; }
 p, li { color: var(--t2); line-height: 1.7; }
 h1,h2,h3 { color: var(--t1) !important; font-family: 'Inter', sans-serif !important; font-weight: 700 !important; letter-spacing: -0.02em !important; }
 
+/* ── Select boxes ── */
+.stSelectbox > div > div {
+    background: var(--bg3) !important;
+    border-color: var(--border) !important;
+    color: var(--t1) !important;
+}
+
 /* ── Radio (used as toggle) ── */
 [data-testid="stRadio"] > div { gap: 4px !important; }
 [data-testid="stRadio"] label {
@@ -253,75 +262,76 @@ h1,h2,h3 { color: var(--t1) !important; font-family: 'Inter', sans-serif !import
 [data-testid="stRadio"] label:hover { border-color: var(--borderhi) !important; color: var(--t1) !important; }
 [data-testid="stRadio"] label[data-checked="true"],
 [data-testid="stRadio"] label:has(input:checked) {
-    background: var(--bghover) !important;
+    background: rgba(245,158,11,0.1) !important;
     border-color: var(--amber) !important;
     color: var(--amber) !important;
+}
+
+/* ── Alerts / info boxes ── */
+[data-testid="stAlert"] {
+    background: var(--bgcard) !important;
+    border-color: var(--border) !important;
+    color: var(--t2) !important;
 }
 
 /* ── Custom components ── */
 
 /* Score pill */
-.pill { display:inline-flex; align-items:center; padding:2px 9px; border-radius:4px; font-family:'Inter',sans-serif; font-weight:600; font-size:0.68em; letter-spacing:0.03em; }
-.p-sb  { background:rgba(22,163,74,0.1);  color:#16a34a; border:1px solid rgba(22,163,74,0.25); }
-.p-sp  { background:rgba(21,128,61,0.1);  color:#15803d; border:1px solid rgba(21,128,61,0.25); }
-.p-wl  { background:rgba(194,97,15,0.1);  color:#c2610f; border:1px solid rgba(194,97,15,0.25); }
-.p-ho  { background:rgba(194,97,15,0.1);  color:#c2610f; border:1px solid rgba(194,97,15,0.2); }
-.p-tr  { background:rgba(234,88,12,0.1);  color:#ea580c; border:1px solid rgba(234,88,12,0.2); }
-.p-se  { background:rgba(220,38,38,0.1);  color:#dc2626; border:1px solid rgba(220,38,38,0.2); }
-.p-av  { background:rgba(220,38,38,0.1);  color:#dc2626; border:1px solid rgba(220,38,38,0.3); }
+.pill { display:inline-flex; align-items:center; padding:2px 9px; border-radius:4px; font-family:'Inter',sans-serif; font-weight:600; font-size:0.68em; letter-spacing:0.04em; }
+.p-sb  { background:rgba(16,185,129,0.12);  color:#10b981; border:1px solid rgba(16,185,129,0.3); }
+.p-sp  { background:rgba(5,150,105,0.12);   color:#059669; border:1px solid rgba(5,150,105,0.3); }
+.p-wl  { background:rgba(245,158,11,0.12);  color:#f59e0b; border:1px solid rgba(245,158,11,0.3); }
+.p-ho  { background:rgba(245,158,11,0.08);  color:#d97706; border:1px solid rgba(245,158,11,0.2); }
+.p-tr  { background:rgba(251,146,60,0.1);   color:#f97316; border:1px solid rgba(251,146,60,0.25); }
+.p-se  { background:rgba(244,63,94,0.1);    color:#f43f5e; border:1px solid rgba(244,63,94,0.25); }
+.p-av  { background:rgba(244,63,94,0.15);   color:#fb7185; border:1px solid rgba(244,63,94,0.35); }
 
 /* Risk flag chips */
-.flag { display:inline-flex; align-items:center; background:rgba(194,97,15,0.06); border:1px solid rgba(194,97,15,0.18); color:#c2610f; padding:1px 7px; border-radius:3px; font-size:0.64em; font-family:'JetBrains Mono',monospace; margin:2px 2px 2px 0; }
-.flag.crit { background:rgba(220,38,38,0.07); border-color:rgba(220,38,38,0.2); color:#dc2626; }
-.flag.earn { background:rgba(109,40,217,0.07); border-color:rgba(109,40,217,0.2); color:#6d28d9; }
+.flag { display:inline-flex; align-items:center; background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.2); color:#f59e0b; padding:1px 7px; border-radius:3px; font-size:0.64em; font-family:'JetBrains Mono',monospace; margin:2px 2px 2px 0; }
+.flag.crit { background:rgba(244,63,94,0.1); border-color:rgba(244,63,94,0.25); color:#f43f5e; }
+.flag.earn { background:rgba(167,139,250,0.1); border-color:rgba(167,139,250,0.25); color:#a78bfa; }
 
 /* Score bar */
-.sbar-track { background:rgba(0,0,0,0.08); border-radius:2px; height:3px; width:100%; }
+.sbar-track { background:rgba(255,255,255,0.06); border-radius:2px; height:3px; width:100%; }
 .sbar-fill { border-radius:2px; height:3px; }
 
 /* Stat rows */
-.stat-row { display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid rgba(0,0,0,0.05); }
+.stat-row { display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.04); }
 .slbl { color:var(--t3); font-size:0.68em; letter-spacing:0.04em; font-family:'Inter',sans-serif; font-weight:500; }
 .sval { color:var(--t1); font-size:0.8em; font-family:'JetBrains Mono',monospace; font-weight:500; }
-.sval.g { color:var(--green); } .sval.r { color:var(--red); } .sval.a { color:var(--amber); } .sval.b { color:var(--blue2); } .sval.p { color:var(--purple); }
+.sval.g { color:var(--green); } .sval.r { color:var(--red); } .sval.a { color:var(--amber); } .sval.b { color:var(--blue); } .sval.p { color:var(--purple); }
 
 /* Section headers */
-.sh { font-family:'Inter',sans-serif; font-size:0.68em; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; color:var(--t3); margin:16px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px; }
+.sh { font-family:'Inter',sans-serif; font-size:0.67em; font-weight:600; letter-spacing:0.09em; text-transform:uppercase; color:var(--t3); margin:16px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px; }
 
 /* Info boxes */
-.box { background:rgba(0,0,0,0.02); border:1px solid var(--border); border-radius:8px; padding:12px 16px; color:var(--t2); font-size:0.85em; line-height:1.75; }
-.box-blue   { border-color:rgba(29,111,165,0.25);  background:rgba(29,111,165,0.04); }
-.box-green  { border-color:rgba(22,163,74,0.25);   background:rgba(22,163,74,0.03); }
-.box-red    { border-color:rgba(220,38,38,0.25);   background:rgba(220,38,38,0.04); }
-.box-amber  { border-color:rgba(194,97,15,0.25);   background:rgba(194,97,15,0.04); }
-.box-purple { border-color:rgba(109,40,217,0.25);  background:rgba(109,40,217,0.04); }
+.box { background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:8px; padding:12px 16px; color:var(--t2); font-size:0.85em; line-height:1.75; }
+.box-blue   { border-color:rgba(56,189,248,0.2);  background:rgba(56,189,248,0.05); color:#7dd3fc; }
+.box-green  { border-color:rgba(16,185,129,0.2);  background:rgba(16,185,129,0.04); color:#6ee7b7; }
+.box-red    { border-color:rgba(244,63,94,0.2);   background:rgba(244,63,94,0.05);  color:#fda4af; }
+.box-amber  { border-color:rgba(245,158,11,0.2);  background:rgba(245,158,11,0.05); color:#fcd34d; }
+.box-purple { border-color:rgba(167,139,250,0.2); background:rgba(167,139,250,0.05);color:#c4b5fd; }
 
 /* Disclaimer */
-.disc { background:transparent; border:1px solid rgba(194,97,15,0.12); border-radius:4px; padding:6px 12px; color:rgba(194,97,15,0.5); font-size:0.62em; font-family:'JetBrains Mono',monospace; letter-spacing:0.05em; text-align:center; margin:8px 0; }
+.disc { background:transparent; border:1px solid rgba(245,158,11,0.1); border-radius:4px; padding:6px 12px; color:rgba(245,158,11,0.3); font-size:0.62em; font-family:'JetBrains Mono',monospace; letter-spacing:0.05em; text-align:center; margin:8px 0; }
 
 /* Empty states */
 .empty { text-align:center; padding:80px 20px; color:var(--t3); }
-.empty .ico { font-size:2.5em; margin-bottom:16px; opacity:0.4; }
+.empty .ico { font-size:2.5em; margin-bottom:16px; opacity:0.25; }
 .empty h3 { color:var(--t2) !important; letter-spacing:0.04em; font-size:1.3em; font-weight:600; }
 .empty p { color:var(--t3); font-size:0.82em; line-height:1.7; }
 
-/* Ticker header */
-.ticker-hero { padding:16px 0 14px; border-bottom:1px solid var(--border); margin-bottom:20px; }
-
 /* News item */
-.news-item { display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px solid rgba(0,0,0,0.05); }
+.news-item { display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.04); }
 .news-dot { width:5px; height:5px; border-radius:50%; margin-top:7px; flex-shrink:0; }
 
 /* Summary text */
-.summary-block { background:rgba(0,0,0,0.02); border-left:2px solid var(--borderhi); border-radius:0 8px 8px 0; padding:14px 16px; color:var(--t2); font-size:0.83em; line-height:1.85; white-space:pre-line; }
-
-/* Score ring */
-.score-ring-wrap { position:relative; display:inline-flex; align-items:center; justify-content:center; }
+.summary-block { background:rgba(255,255,255,0.02); border-left:2px solid var(--borderhi); border-radius:0 8px 8px 0; padding:14px 16px; color:var(--t2); font-size:0.83em; line-height:1.85; white-space:pre-line; }
 
 /* Sidebar logo */
 .axiom-logo { padding:20px 16px 12px; border-bottom:1px solid var(--border); margin-bottom:4px; }
-.axiom-logo .name { font-family:'Inter',sans-serif; font-size:1.4em; font-weight:700; color:var(--t1); letter-spacing:-0.02em; line-height:1; }
-.axiom-logo .sub { font-family:'JetBrains Mono',monospace; font-size:0.58em; color:var(--t3); letter-spacing:0.2em; margin-top:4px; }
+.axiom-logo .name { font-family:'Inter',sans-serif; font-size:1.4em; font-weight:700; color:var(--amber); letter-spacing:-0.02em; line-height:1; }
+.axiom-logo .sub { font-family:'JetBrains Mono',monospace; font-size:0.58em; color:var(--t3); letter-spacing:0.25em; margin-top:4px; }
 
 /* Signal count card */
 .sig-count { text-align:center; padding:10px 6px; background:var(--bgcard); border:1px solid var(--border); border-radius:8px; transition:border-color 0.15s; }
@@ -336,44 +346,32 @@ h1,h2,h3 { color: var(--t1) !important; font-family: 'Inter', sans-serif !import
 .rs-badge { display:inline-flex; align-items:center; gap:6px; padding:5px 12px; border-radius:4px; font-family:'JetBrains Mono',monospace; font-size:0.72em; font-weight:600; }
 
 /* Earnings warning */
-.earn-warn { background:rgba(109,40,217,0.05); border:1px solid rgba(109,40,217,0.18); border-radius:6px; padding:10px 14px; color:#6d28d9; font-size:0.78em; font-family:'JetBrains Mono',monospace; margin-top:8px; line-height:1.6; }
-
-/* Holdings sidebar row */
-.holding-row { display:grid; grid-template-columns:58px 60px 65px; align-items:center; padding:5px 10px; border-bottom:1px solid rgba(0,0,0,0.05); font-family:'JetBrains Mono',monospace; font-size:0.72em; gap:4px; animation:fadeIn 0.2s ease; }
-.holding-row:hover { background:var(--bghover); }
-.holding-ticker { color:#1d6fa5; font-weight:600; }
-.holding-val { color:var(--t3); text-align:right; }
-
-/* Portfolio table row */
-.ptrow { display:grid; grid-template-columns:60px 70px 70px 80px 90px 80px 70px 50px; align-items:center; padding:6px 12px; border-bottom:1px solid rgba(0,0,0,0.05); font-family:'JetBrains Mono',monospace; font-size:0.72em; transition:background 0.15s; }
-.ptrow:hover { background:var(--bghover); }
-.pthdr { color:var(--t3); font-size:0.6em; letter-spacing:0.08em; text-transform:uppercase; }
-
-/* Trade blotter row */
-.trade-row { display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:5px; margin-bottom:3px; font-family:'JetBrains Mono',monospace; font-size:0.72em; transition:background 0.15s; flex-wrap:wrap; }
-.trade-open  { border-left:2px solid rgba(194,97,15,0.6); background:rgba(194,97,15,0.05); animation:pulse-amber 3s infinite; }
-.trade-win   { border-left:2px solid rgba(22,163,74,0.4);  background:rgba(22,163,74,0.04); }
-.trade-loss  { border-left:2px solid rgba(220,38,38,0.4);  background:rgba(220,38,38,0.04); }
+.earn-warn { background:rgba(167,139,250,0.08); border:1px solid rgba(167,139,250,0.2); border-radius:6px; padding:10px 14px; color:#c4b5fd; font-size:0.78em; font-family:'JetBrains Mono',monospace; margin-top:8px; line-height:1.6; }
 
 /* Scanner result column header */
-.result-hdr { display:grid; grid-template-columns:70px 140px 80px 65px 65px 1fr; padding:5px 18px; background:rgba(0,0,0,0.02); border-bottom:1px solid var(--border); font-family:'Inter',sans-serif; font-size:0.6em; letter-spacing:0.08em; color:var(--t3); text-transform:uppercase; font-weight:600; }
+.result-hdr { display:grid; grid-template-columns:70px 140px 80px 65px 65px 1fr; padding:5px 18px; background:rgba(255,255,255,0.02); border-bottom:1px solid var(--border); font-family:'Inter',sans-serif; font-size:0.6em; letter-spacing:0.08em; color:var(--t3); text-transform:uppercase; font-weight:600; }
 
 /* Win-rate badge */
 .wr-badge { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:4px; font-family:'JetBrains Mono',monospace; font-size:0.78em; font-weight:600; }
-.wr-good  { background:rgba(22,163,74,0.08);  border:1px solid rgba(22,163,74,0.2);  color:#16a34a; }
-.wr-bad   { background:rgba(220,38,38,0.08);  border:1px solid rgba(220,38,38,0.2);  color:#dc2626; }
-.wr-neu   { background:rgba(194,97,15,0.08);  border:1px solid rgba(194,97,15,0.2);  color:#c2610f; }
+.wr-good  { background:rgba(16,185,129,0.1);  border:1px solid rgba(16,185,129,0.25); color:#10b981; }
+.wr-bad   { background:rgba(244,63,94,0.1);   border:1px solid rgba(244,63,94,0.25);  color:#f43f5e; }
+.wr-neu   { background:rgba(245,158,11,0.1);  border:1px solid rgba(245,158,11,0.25); color:#f59e0b; }
 
 /* Prediction direction chip */
-.dir-long  { background:rgba(22,163,74,0.07);  border:1px solid rgba(22,163,74,0.2);  color:#16a34a; padding:1px 7px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; }
-.dir-short { background:rgba(220,38,38,0.07);  border:1px solid rgba(220,38,38,0.2);  color:#dc2626; padding:1px 7px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; }
+.dir-long  { background:rgba(16,185,129,0.08);  border:1px solid rgba(16,185,129,0.2);  color:#10b981; padding:1px 7px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; }
+.dir-short { background:rgba(244,63,94,0.08);   border:1px solid rgba(244,63,94,0.2);   color:#f43f5e; padding:1px 7px; border-radius:3px; font-size:0.65em; font-family:'JetBrains Mono',monospace; }
 
 /* Live chart controls */
 .chart-bar { display:flex; align-items:center; justify-content:space-between; padding:8px 0 12px; gap:12px; flex-wrap:wrap; }
-.live-badge { display:inline-flex; align-items:center; gap:5px; font-family:'JetBrains Mono',monospace; font-size:0.68em; color:#16a34a; }
-.live-dot { width:6px; height:6px; border-radius:50%; background:#16a34a; animation:live-dot 1.4s ease-in-out infinite; }
+.live-badge { display:inline-flex; align-items:center; gap:5px; font-family:'JetBrains Mono',monospace; font-size:0.68em; color:var(--green); }
+.live-dot { width:6px; height:6px; border-radius:50%; background:var(--green); animation:live-dot 1.4s ease-in-out infinite; }
 
-/* ── Control panel (mobile-first) ── */
+/* Trade blotter */
+.trade-open  { border-left:2px solid rgba(245,158,11,0.7);  background:rgba(245,158,11,0.06);  animation:pulse-amber 3s infinite; }
+.trade-win   { border-left:2px solid rgba(16,185,129,0.5);  background:rgba(16,185,129,0.05); }
+.trade-loss  { border-left:2px solid rgba(244,63,94,0.5);   background:rgba(244,63,94,0.05); }
+
+/* Control panel */
 [data-testid="stTabPanel"]:first-of-type .stButton > button {
     padding: 1.1rem 1rem !important;
     font-size: 1em !important;
@@ -391,26 +389,11 @@ h1,h2,h3 { color: var(--t1) !important; font-family: 'Inter', sans-serif !import
     gap: 6px;
 }
 .ctrl-status .cs-row { display: flex; align-items: center; gap: 10px; }
-.ctrl-status .cs-dot {
-    width: 16px; height: 16px; border-radius: 50%;
-    flex-shrink: 0; margin-top: 1px;
-}
-.ctrl-status .cs-label {
-    font-family: 'Inter', sans-serif;
-    font-size: 1.05em; font-weight: 700; color: var(--t1);
-}
-.ctrl-status .cs-sub {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.72em; color: var(--t3); padding-left: 26px;
-}
-.ctrl-summary {
-    background: var(--bgcard); border: 1px solid var(--border);
-    border-radius: 10px; padding: 4px 0; margin-top: 8px;
-}
-.ctrl-row {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 10px 16px; border-bottom: 1px solid rgba(0,0,0,0.05);
-}
+.ctrl-status .cs-dot { width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0; margin-top: 1px; }
+.ctrl-status .cs-label { font-family: 'Inter', sans-serif; font-size: 1.05em; font-weight: 700; color: var(--t1); }
+.ctrl-status .cs-sub { font-family: 'JetBrains Mono', monospace; font-size: 0.72em; color: var(--t3); padding-left: 26px; }
+.ctrl-summary { background: var(--bgcard); border: 1px solid var(--border); border-radius: 10px; padding: 4px 0; margin-top: 8px; }
+.ctrl-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.04); }
 .ctrl-row:last-child { border-bottom: none; }
 .ctrl-lbl { font-family: 'Inter', sans-serif; font-size: 0.78em; color: var(--t3); font-weight: 500; }
 .ctrl-val { font-family: 'JetBrains Mono', monospace; font-size: 0.85em; color: var(--t1); font-weight: 600; }
@@ -418,6 +401,12 @@ h1,h2,h3 { color: var(--t1) !important; font-family: 'Inter', sans-serif !import
 .ctrl-val.a { color: var(--amber); }
 .ctrl-val.r { color: var(--red); }
 .ctrl-section { font-family: 'Inter', sans-serif; font-size: 0.65em; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--t3); margin: 20px 0 8px; }
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--borderhi); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -431,16 +420,16 @@ def pill_class(signal):
             "Hold":"p-ho","Trim":"p-tr","Sell":"p-se","Avoid":"p-av"}.get(signal,"p-ho")
 
 def sig_color(signal):
-    return {"Strong Buy Candidate":"#16a34a","Speculative Buy":"#15803d","Watchlist":"#c2610f",
-            "Hold":"#c2610f","Trim":"#ea580c","Sell":"#dc2626","Avoid":"#7f1d1d"}.get(signal,"#475569")
+    return {"Strong Buy Candidate":"#10b981","Speculative Buy":"#34d399","Watchlist":"#f59e0b",
+            "Hold":"#d97706","Trim":"#f97316","Sell":"#f43f5e","Avoid":"#fb7185"}.get(signal,"#475569")
 
 def score_col(s):
-    if s>=72: return "#16a34a"
-    if s>=58: return "#15803d"
-    if s>=45: return "#c2610f"
-    if s>=33: return "#ea580c"
-    if s>=22: return "#dc2626"
-    return "#991b1b"
+    if s>=72: return "#10b981"
+    if s>=58: return "#34d399"
+    if s>=45: return "#f59e0b"
+    if s>=33: return "#f97316"
+    if s>=22: return "#f43f5e"
+    return "#be123c"
 
 def fp(p):
     if p is None: return "—"
@@ -484,15 +473,15 @@ def score_ring_svg(score, color, size=80):
     dash = circ * score / 100
     return f"""
     <svg width="{size}" height="{size}" viewBox="0 0 80 80">
-      <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="6"/>
+      <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="6"/>
       <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" stroke-width="6"
               stroke-dasharray="{dash:.1f} {circ:.1f}" stroke-linecap="round"
               transform="rotate(-90 {cx} {cy})"
-              style="filter:drop-shadow(0 0 4px {color})"/>
+              style="filter:drop-shadow(0 0 6px {color}88)"/>
       <text x="{cx}" y="{cy+1}" text-anchor="middle" dominant-baseline="middle"
-            font-family="'Bebas Neue',sans-serif" font-size="18" fill="{color}">{score:.0f}</text>
+            font-family="'JetBrains Mono',monospace" font-size="16" font-weight="600" fill="{color}">{score:.0f}</text>
       <text x="{cx}" y="{cy+14}" text-anchor="middle" dominant-baseline="middle"
-            font-family="'JetBrains Mono',monospace" font-size="7" fill="rgba(255,255,255,0.25)">/100</text>
+            font-family="'JetBrains Mono',monospace" font-size="7" fill="rgba(255,255,255,0.2)">/100</text>
     </svg>"""
 
 
@@ -539,7 +528,7 @@ def render_result_card(r):
         with col_id:
             st.markdown(f"""
             <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:4px 0 12px;">
-                <span style="font-family:'Bebas Neue',sans-serif;font-size:2em;color:#0f172a;letter-spacing:0.08em;">{ticker}</span>
+                <span style="font-family:'Inter',sans-serif;font-size:2em;font-weight:800;color:var(--t1);letter-spacing:0.04em;">{ticker}</span>
                 <span style="color:#475569;font-size:0.88em;font-weight:400;">{name[:42]}</span>
                 <span class="pill {pc}">{signal}</span>
                 {flag_chips(flags)}
@@ -662,7 +651,7 @@ def render_holding_card(h):
         st.markdown(f"""
         <div class="port-header">
           <div style="display:flex;align-items:center;gap:14px;">
-            <span style="font-family:'Bebas Neue',sans-serif;font-size:1.8em;color:#0f172a;letter-spacing:0.08em;">{ticker}</span>
+            <span style="font-family:'Inter',sans-serif;font-size:1.8em;font-weight:800;color:var(--t1);letter-spacing:0.02em;">{ticker}</span>
             <span style="font-family:'Space Grotesk',sans-serif;font-size:0.95em;font-weight:700;color:{rcol};letter-spacing:0.05em;text-transform:uppercase;">{rec}</span>
           </div>
           <div style="text-align:right;">
@@ -716,12 +705,12 @@ def _build_live_chart(hist, chart_type, tf, r):
         ), row=1, col=1)
     else:
         close_vals = hist["Close"]
-        area_color = "#c2610f"
+        area_color = "#f59e0b"
         fig.add_trace(go.Scatter(
             x=hist.index, y=close_vals, name="Price",
             line=dict(color=area_color, width=2),
             fill="tozeroy",
-            fillcolor="rgba(194,97,15,0.06)",
+            fillcolor="rgba(245,158,11,0.07)",
         ), row=1, col=1)
 
     # ── Overlays ─────────────────────────────────────────────────────────────
@@ -783,13 +772,13 @@ def _build_live_chart(hist, chart_type, tf, r):
 
     # ── Layout ───────────────────────────────────────────────────────────────
     axis_style = dict(
-        gridcolor="rgba(0,0,0,0.05)", showgrid=True, zeroline=False,
-        showline=False, tickfont=dict(size=9, family="JetBrains Mono", color="#94a3b8"),
+        gridcolor="rgba(255,255,255,0.04)", showgrid=True, zeroline=False,
+        showline=False, tickfont=dict(size=9, family="JetBrains Mono", color="#3a5068"),
     )
     fig.update_layout(
         height=420,
         paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(248,249,252,0.98)",
+        plot_bgcolor="rgba(12,18,28,0.98)",
         font=dict(family="Inter", color="#94a3b8"),
         xaxis=dict(**axis_style, rangeslider_visible=False),
         xaxis2=dict(**axis_style, rangeslider_visible=False),
@@ -1050,9 +1039,9 @@ def _require_auth() -> dict:
         st.markdown("""
         <div style="text-align:center;padding:40px 0 28px;">
           <div style="font-family:'Inter',sans-serif;font-size:2em;font-weight:700;
-                      color:var(--t1);letter-spacing:-0.02em;line-height:1;">Axiom</div>
+                      color:#f59e0b;letter-spacing:-0.02em;line-height:1;">Axiom</div>
           <div style="font-family:'JetBrains Mono',monospace;font-size:0.58em;
-                      color:var(--t3);letter-spacing:0.2em;margin-top:4px;">TERMINAL</div>
+                      color:var(--t3);letter-spacing:0.25em;margin-top:4px;">TERMINAL</div>
         </div>""", unsafe_allow_html=True)
 
         with st.form("_login_form", clear_on_submit=False):
@@ -1928,7 +1917,7 @@ def _live_alerts_feed():
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Control", "Scanner", "Portfolio", "Deep Dive", "Predictions", "Live Alerts", "Accuracy", "Info", "Config"])
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Dashboard", "Scanner", "Portfolio", "Research", "Signals", "Alerts", "Performance", "System", "Config"])
 
 
 # ── TAB 0: CONTROL ───────────────────────────────────────────────────────────
