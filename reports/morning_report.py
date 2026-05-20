@@ -302,6 +302,66 @@ def generate_morning_report() -> Optional[str]:
     tbl.setStyle(ts2)
     story.append(tbl)
 
+    # ── Conviction picks — top 3 BUY signals scoring >= 70 ───────────────────
+    convictions = df[
+        df["signal_label"].isin(["Strong Buy Candidate", "Speculative Buy", "Gap-Up"]) &
+        (df["score"] >= 70)
+    ].head(3)
+
+    if not convictions.empty:
+        story.append(Spacer(1, 12))
+        story.append(Paragraph("CONVICTION PICKS", ST["section"]))
+        for rank, (_, row) in enumerate(convictions.iterrows(), 1):
+            bd    = row["score_breakdown"] if isinstance(row["score_breakdown"], dict) else {}
+            score = float(row["score"] or 0)
+            label = row["signal_label"] or ""
+            price = row["price_at_signal"]
+            price_str = f"${price:.2f}" if price else "—"
+
+            tech  = bd.get("technical",   0)
+            fund  = bd.get("fundamental", 0)
+            risk  = bd.get("risk",        0)
+            sent  = bd.get("sentiment",   0)
+            cat   = bd.get("catalyst",    0)
+
+            # Build conviction thesis
+            strengths = []
+            if fund >= 75: strengths.append(f"strong fundamentals ({fund:.0f}/100)")
+            elif fund >= 60: strengths.append(f"solid fundamentals ({fund:.0f}/100)")
+            if tech >= 70: strengths.append(f"high technical momentum ({tech:.0f}/100)")
+            elif tech >= 55: strengths.append(f"positive technicals ({tech:.0f}/100)")
+            if risk >= 65: strengths.append(f"low dilution risk ({risk:.0f}/100)")
+            if sent >= 70: strengths.append(f"positive sentiment ({sent:.0f}/100)")
+            if cat >= 60: strengths.append(f"active catalyst ({cat:.0f}/100)")
+            thesis = f"Score {score:.0f} — " + ("; ".join(strengths) if strengths else "broad strength across components") + "."
+
+            conv_data = [
+                [Paragraph(f"#{rank}  {row['ticker']}  —  {label}  |  Entry: {price_str}",
+                            ParagraphStyle("ch", fontName="Helvetica-Bold", fontSize=9,
+                                           textColor=C_GREEN, leading=12)),
+                 Paragraph(f"Score: {score:.0f}", ParagraphStyle("cs", fontName="Helvetica-Bold",
+                                                                   fontSize=9, textColor=C_GREEN,
+                                                                   alignment=TA_RIGHT, leading=12))],
+                [Paragraph(thesis, ParagraphStyle("ct", fontName="Helvetica", fontSize=8.5,
+                                                   textColor=C_DARK, leading=12)),
+                 Paragraph(f"Tech {tech:.0f}  Fund {fund:.0f}  Risk {risk:.0f}",
+                            ParagraphStyle("cb", fontName="Helvetica", fontSize=8,
+                                           textColor=C_GRAY, alignment=TA_RIGHT, leading=12))],
+            ]
+            conv_tbl = Table(conv_data, colWidths=[5.5 * inch, 1.5 * inch])
+            conv_tbl.setStyle(TableStyle([
+                ("BOX",          (0, 0), (-1, -1), 0.8, C_GREEN),
+                ("LINEBELOW",    (0, 0), (-1, 0),  0.4, C_XGRAY),
+                ("BACKGROUND",   (0, 0), (-1, 0),  colors.HexColor("#f0fff4")),
+                ("TOPPADDING",   (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING",(0, 0), (-1, -1), 6),
+                ("LEFTPADDING",  (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("VALIGN",       (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.append(conv_tbl)
+            story.append(Spacer(1, 6))
+
     # ── Component breakdown for top BUY signals ───────────────────────────────
     top_buys = df[df["signal_label"].isin(["Strong Buy Candidate", "Speculative Buy"])].head(5)
     if not top_buys.empty:

@@ -77,6 +77,65 @@ PREDICTION_BUY_THRESHOLD   = 65
 PREDICTION_SELL_THRESHOLD  = 30
 PREDICTION_TOP_N           = 50
 
+# ─── Session-level dedup — tickers scored today are not re-scored ─────────────
+_SESSION_SCORED: Set[str] = set()
+_SESSION_SCORED_DATE: str = ""
+
+# ─── Auto-suppressed labels — refreshed daily from rolling win-rate data ───────
+_SUPPRESSED_LABELS: Set[str] = set()
+_SUPPRESSED_LABELS_DATE: str = ""
+
+def _refresh_suppressed_labels() -> Set[str]:
+    """Labels with <30% 1-day win rate over last 30 days (min 20 resolved) are suppressed."""
+    global _SUPPRESSED_LABELS, _SUPPRESSED_LABELS_DATE
+    today = now_et().strftime("%Y-%m-%d")
+    if _SUPPRESSED_LABELS_DATE == today:
+        return _SUPPRESSED_LABELS
+    try:
+        from db.database import _is_postgres, _get_pg_conn, _put_pg_conn, _get_sqlite_conn
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT sl.signal_label,
+                       COUNT(*)                                                   AS total,
+                       SUM(CASE WHEN so.pct_change_1day > 2.0 THEN 1 ELSE 0 END) AS wins
+                FROM signal_log sl
+                JOIN signal_outcomes so ON so.signal_id = sl.id
+                WHERE sl.created_at >= NOW() - INTERVAL '30 days'
+                  AND so.pct_change_1day IS NOT NULL
+                GROUP BY sl.signal_label
+                HAVING COUNT(*) >= 20
+            """)
+            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT sl.signal_label,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN so.pct_change_1day > 2.0 THEN 1 ELSE 0 END) AS wins
+                FROM signal_log sl
+                JOIN signal_outcomes so ON so.signal_id = sl.id
+                WHERE sl.created_at >= datetime('now', '-30 days')
+                  AND so.pct_change_1day IS NOT NULL
+                GROUP BY sl.signal_label
+                HAVING COUNT(*) >= 20
+            """)
+            rows = cur.fetchall(); conn.close()
+        suppressed = set()
+        for label, total, wins in rows:
+            win_rate = (wins or 0) / total if total else 0
+            if win_rate < 0.30:
+                suppressed.add(label)
+                print(f"  [auto-suppress] {label}: {win_rate*100:.1f}% win rate — suppressed")
+        _SUPPRESSED_LABELS      = suppressed
+        _SUPPRESSED_LABELS_DATE = today
+        if not suppressed:
+            print("  [auto-suppress] No labels suppressed — all above 30% win rate")
+    except Exception as e:
+        print(f"  [auto-suppress] Failed to refresh: {e}")
+    return _SUPPRESSED_LABELS
+
+
 # ─── Market hours in ET ───────────────────────────────────────────────────────
 MARKET_OPEN_HOUR    = 9
 MARKET_OPEN_MIN     = 25
@@ -573,7 +632,19 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
     try:
         quote = _fh_get("quote", {"symbol": ticker})
         if not quote or not quote.get("c") or quote["c"] <= 0:
-            return fired
+            try:
+                import yfinance as yf
+                _fi = yf.Ticker(ticker).fast_info
+                _p  = getattr(_fi, "last_price", None) or getattr(_fi, "regular_market_price", None)
+                _pc = getattr(_fi, "previous_close", None)
+                if _p and float(_p) > 0:
+                    _p = float(_p); _pc = float(_pc or _p)
+                    quote = {"c": _p, "pc": _pc, "o": _pc, "h": _p, "l": _p, "v": 0}
+                    print(f"  [scan] {ticker} Finnhub failed — yfinance fallback ${_p:.2f}")
+                else:
+                    return fired
+            except Exception:
+                return fired
 
         prev_close = quote["pc"]
         volume     = quote.get("v", 0)
@@ -836,6 +907,8 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
 # ─── Prediction scan ──────────────────────────────────────────────────────────
 
 def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode: str = "MARKET") -> None:
+    global _SESSION_SCORED, _SESSION_SCORED_DATE
+
     # RTH signals have ~35% win rate vs 57-66% for premarket/overnight — suppress entirely
     if session_mode == "MARKET":
         print("  [prediction] RTH session — signals suppressed (low win-rate window)")
@@ -844,6 +917,15 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
     from core.scanner import scan_ticker
     from db.database import log_paper_trade
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Reset session dedup set daily
+    today = now_et().strftime("%Y-%m-%d")
+    if _SESSION_SCORED_DATE != today:
+        _SESSION_SCORED      = set()
+        _SESSION_SCORED_DATE = today
+
+    # Refresh auto-suppress labels once per day
+    _refresh_suppressed_labels()
 
     top_tickers = [r["ticker"] for r in state._momentum_ranking_cache[:PREDICTION_TOP_N]]
     if not top_tickers:
@@ -874,6 +956,12 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
         except Exception as _mfse:
             print(f"  [quant_mode] MultiFactorScorer in prediction scan failed: {_mfse}")
 
+    # Skip tickers already scored this session
+    fresh_tickers = [t for t in top_tickers if t not in _SESSION_SCORED]
+    skipped = len(top_tickers) - len(fresh_tickers)
+    if skipped:
+        print(f"  [prediction] {skipped} tickers skipped — already scored this session")
+
     def _score(ticker):
         try:
             return ticker, scan_ticker(ticker, save=False)
@@ -882,7 +970,7 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
             return ticker, None
 
     with ThreadPoolExecutor(max_workers=5) as ex:
-        futures = {ex.submit(_score, t): t for t in top_tickers}
+        futures = {ex.submit(_score, t): t for t in fresh_tickers}
         for fut in as_completed(futures, timeout=120):
             try:
                 ticker, result = fut.result()
@@ -907,6 +995,9 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
             except Exception:
                 pass
 
+            # Mark ticker as scored for this session
+            _SESSION_SCORED.add(ticker)
+
             quant_adj    = 0.0
             atr_14       = 0.0
             rsi_quant    = None
@@ -915,6 +1006,11 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
             if _QUANT_AVAILABLE:
                 try:
                     quant_adj, atr_14, rsi_quant, sigma_hist = run_quant_for_ticker(ticker, result)
+                    # Sanity check: a +22 quant adj on a <1% move is bad data — cap at +5
+                    intraday_pct = abs(float(result.get("return_1d") or 0))
+                    if intraday_pct < 1.0 and quant_adj > 5:
+                        print(f"  [quant] {ticker} adj capped {quant_adj:+.1f}→+5 (move {intraday_pct:.2f}%<1%)")
+                        quant_adj = 5.0
                     adj_score = round(float(max(0, min(100, score + quant_adj))), 1)
                     print(f"  [quant] {ticker} base={score:.0f} adj={quant_adj:+.1f} final={adj_score:.0f}")
                     score = adj_score
@@ -934,6 +1030,9 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
             from config import MIN_SIGNAL_SCORE
             if score < MIN_SIGNAL_SCORE:
                 print(f"  [signal_log] ✗ {ticker} | {signal_label} | score={score:.0f} below MIN_SIGNAL_SCORE={MIN_SIGNAL_SCORE} — skipped")
+                continue
+            if signal_label in _SUPPRESSED_LABELS:
+                print(f"  [signal_log] ✗ {ticker} | {signal_label} auto-suppressed (<30% win rate) — skipped")
                 continue
 
             try:
