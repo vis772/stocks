@@ -601,15 +601,6 @@ def _check_vwap_alerts(ticker, price, vwap, change_pct, state, et) -> List[str]:
             msg   = f"{ticker} crossed {direction} VWAP ${vwap:.4f}"
             state.log_alert(msg)
             fired.append(msg)
-            if is_above:
-                try:
-                    from db.database import log_paper_trade
-                    log_paper_trade(ticker, "vwap_reclaim", price,
-                                    round(price * 0.95, 4),
-                                    round(price * 1.08, 4),
-                                    round(price * 1.15, 4))
-                except Exception:
-                    pass
 
     if is_above and vwap > 0:
         ext_pct = (price - vwap) / vwap * 100
@@ -734,11 +725,7 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 state.log_alert(f"{ticker} gap-up {change_pct:+.1f}%")
                 fired.append(f"{ticker} gap-up {change_pct:+.1f}%")
                 try:
-                    from db.database import log_paper_trade, log_signal
-                    log_paper_trade(ticker, "gap_up", price,
-                                    round(price * 0.93, 4),
-                                    round(price * 1.10, 4),
-                                    round(price * 1.20, 4))
+                    from db.database import log_signal
                     sig_id = log_signal(
                         ticker           = ticker,
                         signal_label     = "Gap-Up",
@@ -915,7 +902,6 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
         return
 
     from core.scanner import scan_ticker
-    from db.database import log_paper_trade
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # Reset session dedup set daily
@@ -1073,36 +1059,10 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                 print(f"  [signal_log] FAILED for {ticker}: {_e}")
 
             if score >= PREDICTION_BUY_THRESHOLD:
-                stop_ = result.get("stop_loss")  or round(price * 0.93, 4)
-                t1    = result.get("target_1")   or round(price * 1.10, 4)
-                t2    = result.get("target_2")   or round(price * 1.20, 4)
-                log_paper_trade(ticker, "prediction_buy", price, stop_, t1, t2,
-                                source_type="prediction_buy", score_at_entry=round(score, 1))
-                try:
-                    from paper_broker import get_broker
-                    get_broker().submit_order(
-                        ticker       = ticker,
-                        side         = "buy",
-                        qty          = 10,
-                        order_type   = "market",
-                        stop_loss    = stop_,
-                        target_1     = t1,
-                        target_2     = t2,
-                        entry_reason = "prediction_buy",
-                        conviction   = round(score, 1),
-                        session_mode = session_mode,
-                    )
-                except Exception as _pbe:
-                    print(f"  [broker] prediction_buy submit failed: {_pbe}")
                 state.log_alert(f"PRED BUY {ticker} ({score:.0f}pt)")
                 print(f"  [prediction] BUY {ticker} score={score:.0f}")
 
             elif score <= PREDICTION_SELL_THRESHOLD:
-                s_stop = round(price * 1.07, 4)
-                s_t1   = round(price * 0.90, 4)
-                s_t2   = round(price * 0.80, 4)
-                log_paper_trade(ticker, "prediction_sell", price, s_stop, s_t1, s_t2,
-                                source_type="prediction_sell", score_at_entry=round(score, 1))
                 state.log_alert(f"PRED SELL {ticker} ({score:.0f}pt)")
                 print(f"  [prediction] SELL {ticker} score={score:.0f}")
 
@@ -1230,7 +1190,7 @@ def run_scanner():
         "WEEKEND":    "Weekend",
     }
     _MODE_DESC = {
-        "MARKET":     "Full scan every 60s — tickers, predictions, paper broker active.",
+        "MARKET":     "Full scan every 60s — tickers, predictions active.",
         "PREMARKET":  "Pre-market scan every 120s — gaps, news, SEC EDGAR. Conviction at 8:55 AM ET.",
         "AFTERHOURS": "After-hours every 120s — AH price alerts, conviction at 8:30 PM ET.",
         "OVERNIGHT":  "Light scan every 5min — SEC EDGAR + portfolio maintenance only.",
@@ -1404,15 +1364,6 @@ def run_scanner():
                         print(f"  [regime] update failed: {_rde}")
 
             if et.hour == 9 and 29 <= et.minute < 35:
-                _open_key = f"broker_open_{today_str}"
-                if not state.already_alerted(_open_key):
-                    try:
-                        from paper_broker import get_broker
-                        get_broker()._update_account_metrics()
-                        state.mark_alerted(_open_key)
-                    except Exception as _pbo:
-                        print(f"  [broker] open-bell update failed: {_pbo}")
-
                 # ── Market-open conviction push (9:30 AM ET = 8:30 AM CST) ─────
                 # Re-sends the pre-open conviction list right as the bell rings
                 # so the user has their buy list in hand the moment they can trade.
@@ -1497,13 +1448,6 @@ def run_scanner():
                             state.mark_alerted(_preopen_key)
                         except Exception as _cve_pre:
                             print(f"  [conviction] pre-open scan failed: {_cve_pre}")
-                try:
-                    from paper_broker import get_broker
-                    _pb = get_broker()
-                    _pb.process_pending_orders()
-                    _pb.update_all_positions()
-                except Exception as _pbp:
-                    print(f"  [broker] pre-market update failed: {_pbp}")
                 if _pre_alerts:
                     print(f"  🔔 {len(_pre_alerts)} alert(s) fired")
                     _log("info", f"Pre-market scan #{state.scan_count} complete — {len(_pre_alerts)} alert(s)")
@@ -1560,14 +1504,6 @@ def run_scanner():
                 if (et - last_digest_time).total_seconds() >= 1800 and state.alert_log:
                     alert_digest(state.alert_log[-10:], top_movers=top_movers[:5])
                     last_digest_time = et
-                try:
-                    from paper_broker import get_broker
-                    _pb = get_broker()
-                    _pb.process_pending_orders()
-                    _pb.update_all_positions()
-                    _pb._snapshot_equity_curve()
-                except Exception as _pbm:
-                    print(f"  [broker] market update failed: {_pbm}")
                 if et.hour == 16 and 0 <= et.minute < 5:
                     _close_key = f"conviction_close_{today_str}"
                     if not state.already_alerted(_close_key):
@@ -1577,44 +1513,6 @@ def run_scanner():
                             run_conviction_engine(session="close", regime=state.current_regime)
                             state.last_conviction_run_ts = now_et().isoformat()
                             state.mark_alerted(_close_key)
-                            try:
-                                from db.database import _get_pg_conn, _is_postgres, _get_sqlite_conn
-                                from paper_broker import get_broker
-                                _pb2 = get_broker()
-                                if _is_postgres():
-                                    _conn2 = _get_pg_conn()
-                                    _c2    = _conn2.cursor()
-                                    _c2.execute(
-                                        "SELECT ticker, COALESCE(shares, 1), COALESCE(limit_entry, entry), stop_loss, COALESCE(conviction_score, conviction) FROM conviction_buys WHERE session=%s ORDER BY rank LIMIT 5",
-                                        ("close",)
-                                    )
-                                    _buys = _c2.fetchall()
-                                    _conn2.close()
-                                else:
-                                    _conn2 = _get_sqlite_conn()
-                                    _c2    = _conn2.cursor()
-                                    _c2.execute(
-                                        "SELECT ticker, COALESCE(shares, 1), COALESCE(limit_entry, entry), stop_loss, COALESCE(conviction_score, conviction) FROM conviction_buys WHERE session=? ORDER BY rank LIMIT 5",
-                                        ("close",)
-                                    )
-                                    _buys  = _c2.fetchall()
-                                    _conn2.close()
-                                for _row in _buys:
-                                    _pb2.submit_order(
-                                        ticker      = _row[0],
-                                        side        = "buy",
-                                        qty         = int(_row[1]) if _row[1] else 1,
-                                        order_type  = "limit",
-                                        limit_price = float(_row[2]) if _row[2] else None,
-                                        stop_price  = float(_row[3]) if _row[3] else None,
-                                        notes       = f"conviction_close score={_row[4] or 0:.0f}",
-                                    )
-                            except Exception as _pb_buy:
-                                print(f"  [broker] conviction buy submit failed: {_pb_buy}")
-                            try:
-                                get_broker().snapshot_daily_stats()
-                            except Exception as _pbs:
-                                print(f"  [broker] snapshot_daily_stats failed: {_pbs}")
                         except Exception as _cve:
                             print(f"  [conviction] close scan failed: {_cve}")
                 if et.hour == 16 and 15 <= et.minute < 20 and not eod_report_sent:
@@ -1641,14 +1539,6 @@ def run_scanner():
                         check_and_run_checkpoints()
                     except Exception as _cp_e:
                         print(f"  [checkpoint] Failed: {_cp_e}")
-                    try:
-                        from db.database import close_paper_trades_eod
-                        close_paper_trades_eod(
-                            {t: p for t, p in state.last_prices.items() if p > 0}
-                        )
-                        print("  ✓ Paper trades closed for EOD")
-                    except Exception as e:
-                        print(f"  [paper] EOD close failed: {e}")
 
             # ── AFTERHOURS ────────────────────────────────────────────────────
             elif mode == "AFTERHOURS":
@@ -1685,13 +1575,6 @@ def run_scanner():
                             pass
                 except Exception as _yf_ah:
                     print(f"  [AH] yfinance fetch failed: {_yf_ah}")
-                try:
-                    from paper_broker import get_broker
-                    _pb3 = get_broker()
-                    _pb3.process_pending_orders()
-                    _pb3.update_all_positions()
-                except Exception as _pbah:
-                    print(f"  [broker] AH update failed: {_pbah}")
                 if (et - state.last_prediction_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
                     print("\n[PREDICTION SCAN] After-hours full-score scan...")
                     _log("info", f"After-hours prediction scan started — top {PREDICTION_TOP_N} stocks")
@@ -1749,13 +1632,6 @@ def run_scanner():
                         _overnight_wl = []
                     if _overnight_wl:
                         check_sec_filings(_overnight_wl, state)
-                try:
-                    from paper_broker import get_broker
-                    _pb4 = get_broker()
-                    _pb4.process_pending_orders()
-                    _pb4.update_all_positions()
-                except Exception as _pbon:
-                    print(f"  [broker] overnight update failed: {_pbon}")
                 if et.hour == 22 and 0 <= et.minute < 5:
                     _acc_key2 = f"accuracy_nightly_{today_str}"
                     if not state.already_alerted(_acc_key2):

@@ -19,7 +19,6 @@ from tools import (
     # New tools
     get_conviction_list,
     get_portfolio,
-    get_paper_trades,
     get_todays_graded_signals,
     get_regime,
     pause_scanner,
@@ -39,7 +38,7 @@ SYSTEM OVERVIEW:
 - Service 1: Streamlit dashboard (read-only UI at axiom-terminal.railway.app)
 - Service 2: Background scanner (runs every 60s market hours, 120s premarket/AH)
 - Service 3: You (Telegram bot, this session)
-- Database: PostgreSQL — tables: signal_log, signal_outcomes, watchlist, paper_trades, portfolio, conviction_buys, scanner_control, factor_scores, regime_log, alert_log
+- Database: PostgreSQL — tables: signal_log, signal_outcomes, watchlist, portfolio, conviction_buys, scanner_control, factor_scores, regime_log, alert_log
 
 TIME CONTEXT:
 - User is in CST (UTC-6). Market opens 8:30 AM CST / 9:30 AM ET.
@@ -61,7 +60,7 @@ SOFT LOCKS — require user to type "confirm" before executing:
 - pause_scanner / resume_scanner: halts or restarts scanning
 
 ALWAYS ALLOWED (no confirmation):
-- All read tools: get_conviction_list, get_portfolio, get_paper_trades,
+- All read tools: get_conviction_list, get_portfolio,
   get_todays_graded_signals, get_regime, get_scanner_status, get_signal_log,
   get_accuracy_summary, query_database, force_scan (just sets a flag — safe)
 
@@ -162,18 +161,6 @@ TOOLS = [
         "name": "get_portfolio",
         "description": "Show current portfolio holdings with shares, avg cost, current price, and unrealized P&L.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "get_paper_trades",
-        "description": "Paper trading history with P&L, win rate, and average return.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer", "description": "Number of trades (default 20, max 50)."},
-                "status": {"type": "string", "enum": ["open", "closed", "all"], "description": "Filter by trade status."}
-            },
-            "required": []
-        }
     },
     {
         "name": "get_todays_graded_signals",
@@ -395,10 +382,6 @@ async def _execute_tool(name: str, params: dict) -> dict:
                                            limit=params.get("limit", 5),
                                        ),
             "get_portfolio":           get_portfolio,
-            "get_paper_trades":        lambda: get_paper_trades(
-                                           limit=params.get("limit", 20),
-                                           status=params.get("status", "all"),
-                                       ),
             "get_todays_graded_signals": get_todays_graded_signals,
             "get_regime":              get_regime,
             "force_scan":              force_scan,

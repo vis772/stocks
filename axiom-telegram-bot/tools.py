@@ -412,49 +412,6 @@ def get_portfolio() -> dict:
         return {"error": str(e)}
 
 
-def get_paper_trades(limit: int = 20, status: str = "all") -> dict:
-    """Get paper trading history with P&L. Status: open | closed | all."""
-    limit = min(limit, 50)
-    try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                where = ""
-                if status == "open":
-                    where = "WHERE exit_price IS NULL"
-                elif status == "closed":
-                    where = "WHERE exit_price IS NOT NULL"
-
-                cur.execute(f"""
-                    SELECT ticker, signal_type, entry_price, exit_price,
-                           ROUND(((exit_price - entry_price) / entry_price * 100)::numeric, 2) AS return_pct,
-                           stop_loss, target_1, target_2,
-                           score_at_entry, created_at, closed_at
-                    FROM paper_trades
-                    {where}
-                    ORDER BY created_at DESC
-                    LIMIT %s
-                """, (limit,))
-                rows = cur.fetchall()
-                trades = [dict(r) for r in rows]
-
-                # Summary stats for closed trades
-                closed = [t for t in trades if t.get("exit_price")]
-                wins   = [t for t in closed if (t.get("return_pct") or 0) > 0]
-                win_rate = round(len(wins) / len(closed) * 100, 1) if closed else None
-                avg_return = round(sum(float(t.get("return_pct") or 0) for t in closed) / len(closed), 2) if closed else None
-
-                return {
-                    "trades": trades,
-                    "count": len(trades),
-                    "closed_count": len(closed),
-                    "win_rate_pct": win_rate,
-                    "avg_return_pct": avg_return,
-                }
-    except Exception as e:
-        logger.error(f"get_paper_trades error: {e}")
-        return {"error": str(e)}
-
-
 def get_todays_graded_signals() -> dict:
     """
     Show today's signals that have been graded by AccuracyValidator.
