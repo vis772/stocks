@@ -236,10 +236,14 @@ def get_signal_log(limit: int = 10, signal_label: str = None, ticker: str = None
                 params.append(limit)
 
                 cur.execute(f"""
-                    SELECT ticker, signal_label, score, price_at_signal, created_at
-                    FROM signal_log
+                    SELECT sl.ticker, sl.signal_label, sl.score,
+                           sl.price_at_signal, sl.entry_price, sl.stop_loss,
+                           sl.target_1, sl.target_2, sl.risk_reward,
+                           sl.created_at, so.direction, so.ret_1d
+                    FROM signal_log sl
+                    LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
                     {where}
-                    ORDER BY created_at DESC
+                    ORDER BY sl.created_at DESC
                     LIMIT %s
                 """, params)
 
@@ -669,10 +673,14 @@ def get_todays_signal_performance() -> dict:
         with _get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT ticker, signal_label, score, price_at_signal, created_at
-                    FROM signal_log
-                    WHERE created_at >= CURRENT_DATE
-                    ORDER BY score DESC
+                    SELECT sl.ticker, sl.signal_label, sl.score,
+                           sl.price_at_signal, sl.entry_price, sl.stop_loss,
+                           sl.target_1, sl.target_2, sl.risk_reward,
+                           sl.created_at, so.direction, so.ret_1d
+                    FROM signal_log sl
+                    LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
+                    WHERE sl.created_at >= CURRENT_DATE
+                    ORDER BY sl.score DESC
                     LIMIT 20
                 """)
                 rows = cur.fetchall()
@@ -707,8 +715,15 @@ def get_todays_signal_performance() -> dict:
                 "signal_label": r["signal_label"],
                 "score": r["score"],
                 "price_at_signal": signal_price,
+                "entry_price": r.get("entry_price"),
+                "stop_loss": r.get("stop_loss"),
+                "target_1": r.get("target_1"),
+                "target_2": r.get("target_2"),
+                "risk_reward": r.get("risk_reward"),
                 "live_price": live,
                 "move_pct": move_pct,
+                "direction": r.get("direction"),
+                "ret_1d": r.get("ret_1d"),
                 "signal_time": str(r["created_at"]),
             })
 

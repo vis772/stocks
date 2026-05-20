@@ -192,6 +192,9 @@ class AccuracyValidator:
                             so_upd[col] = ("win"  if ret >  WIN_THRESHOLD  * 100 else
                                            "loss" if ret <  LOSS_THRESHOLD * 100 else "neutral")
                             so_upd[f"ret_{col[8:]}"] = ret
+                    # Direction column: track which way the stock went after signal
+                    if ret_1d is not None:
+                        so_upd["direction"] = "UP" if ret_1d > 0.5 else "DOWN" if ret_1d < -0.5 else "FLAT"
                     if so_upd:
                         _write_graded_outcome(sig_id, so_upd)
 

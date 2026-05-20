@@ -1050,6 +1050,11 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                     quality_tag      = quality_tag,
                     scoring_path     = result.get("scoring_path", "static"),
                     catalyst_mult    = result.get("catalyst_mult", 1.0),
+                    entry_price      = result.get("entry_zone"),
+                    stop_loss        = result.get("stop_loss"),
+                    target_1         = result.get("target_1"),
+                    target_2         = result.get("target_2"),
+                    risk_reward      = result.get("risk_reward_at_t1"),
                 )
                 if sig_id:
                     print(f"  [signal_log] ✓ {ticker} | {signal_label} | score={score:.0f} | quant={quant_adj:+.1f} | id={sig_id}")

@@ -140,7 +140,8 @@ def _fetch_todays_signals() -> pd.DataFrame:
             cur.execute("""
                 SELECT DISTINCT ON (ticker)
                        id, ticker, signal_label, score, score_breakdown,
-                       price_at_signal, created_at
+                       price_at_signal, entry_price, stop_loss, target_1, target_2,
+                       risk_reward, created_at
                 FROM signal_log
                 WHERE created_at >= NOW() - INTERVAL '24 hours'
                   AND score >= 45
@@ -153,7 +154,8 @@ def _fetch_todays_signals() -> pd.DataFrame:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
                 SELECT id, ticker, signal_label, score, score_breakdown,
-                       price_at_signal, created_at
+                       price_at_signal, entry_price, stop_loss, target_1, target_2,
+                       risk_reward, created_at
                 FROM signal_log
                 WHERE created_at >= datetime('now', '-24 hours')
                   AND score >= 45
@@ -253,11 +255,14 @@ def generate_morning_report() -> Optional[str]:
     # ── Signal table ─────────────────────────────────────────────────────────────
     story.append(Paragraph("SIGNALS — RANKED BY SCORE", ST["section"]))
 
-    headers = ["#", "Ticker", "Score", "Signal", "Action", "Entry $", "Reason"]
-    col_w   = [0.3*inch, 0.7*inch, 0.55*inch, 1.4*inch, 0.65*inch, 0.65*inch, 2.65*inch]
+    headers = ["#", "Ticker", "Score", "Action", "Entry", "Stop", "T1", "Reason"]
+    col_w   = [0.28*inch, 0.68*inch, 0.52*inch, 0.62*inch,
+               0.65*inch, 0.65*inch, 0.65*inch, 2.1*inch]
 
     rows_data = [headers]
-    action_colors = []   # (row_index, color) for ACTION column coloring
+    action_colors = []   # (row_index, color) for ACTION column
+
+    def _p(v): return f"${v:.2f}" if v else "—"
 
     for i, row in df.iterrows():
         rank        = i + 1
@@ -265,13 +270,14 @@ def generate_morning_report() -> Optional[str]:
         score       = float(row["score"] or 0)
         label       = row["signal_label"] or ""
         bd          = row["score_breakdown"] if isinstance(row["score_breakdown"], dict) else {}
-        price       = row["price_at_signal"]
         action, col = _action(label, score)
         reason      = _reason(bd, label, score)
-        price_str   = f"${price:.2f}" if price else "—"
 
         rows_data.append([
-            str(rank), ticker, f"{score:.0f}", label, action, price_str,
+            str(rank), ticker, f"{score:.0f}", action,
+            _p(row.get("entry_price")),
+            _p(row.get("stop_loss")),
+            _p(row.get("target_1")),
             Paragraph(reason, ParagraphStyle("r", fontName="Helvetica", fontSize=7.5,
                                               textColor=C_DARK, leading=10)),
         ])
@@ -290,15 +296,13 @@ def generate_morning_report() -> Optional[str]:
         ("LEFTPADDING",   (0, 0), (-1, -1), 4),
         ("RIGHTPADDING",  (0, 0), (-1, -1), 4),
         ("ALIGN",         (0, 0), (0, -1),  "CENTER"),
-        ("ALIGN",         (2, 0), (2, -1),  "RIGHT"),
-        ("ALIGN",         (4, 0), (4, -1),  "CENTER"),
-        ("ALIGN",         (5, 0), (5, -1),  "RIGHT"),
-        ("FONTNAME",      (4, 1), (4, -1),  "Helvetica-Bold"),
+        ("ALIGN",         (2, 0), (6, -1),  "RIGHT"),
+        ("ALIGN",         (3, 0), (3, -1),  "CENTER"),
+        ("FONTNAME",      (3, 1), (3, -1),  "Helvetica-Bold"),
         ("VALIGN",        (0, 0), (-1, -1), "TOP"),
     ])
-    # Color the action column per row
     for row_idx, col in action_colors:
-        ts2.add("TEXTCOLOR", (4, row_idx), (4, row_idx), col)
+        ts2.add("TEXTCOLOR", (3, row_idx), (3, row_idx), col)
     tbl.setStyle(ts2)
     story.append(tbl)
 
@@ -335,13 +339,27 @@ def generate_morning_report() -> Optional[str]:
             if cat >= 60: strengths.append(f"active catalyst ({cat:.0f}/100)")
             thesis = f"Score {score:.0f} — " + ("; ".join(strengths) if strengths else "broad strength across components") + "."
 
+            entry  = row.get("entry_price")
+            stop   = row.get("stop_loss")
+            t1     = row.get("target_1")
+            t2     = row.get("target_2")
+            rr     = row.get("risk_reward")
+            entry_str = f"${entry:.2f}" if entry else price_str
+            stop_str  = f"${stop:.2f}"  if stop  else "—"
+            t1_str    = f"${t1:.2f}"    if t1    else "—"
+            t2_str    = f"${t2:.2f}"    if t2    else "—"
+            rr_str    = f"R/R {rr:.1f}x" if rr   else ""
+            trade_line = f"Entry: {entry_str}  ·  Stop: {stop_str}  ·  T1: {t1_str}  ·  T2: {t2_str}  {rr_str}"
+
             conv_data = [
-                [Paragraph(f"#{rank}  {row['ticker']}  —  {label}  |  Entry: {price_str}",
+                [Paragraph(f"#{rank}  {row['ticker']}  —  {label}",
                             ParagraphStyle("ch", fontName="Helvetica-Bold", fontSize=9,
                                            textColor=C_GREEN, leading=12)),
                  Paragraph(f"Score: {score:.0f}", ParagraphStyle("cs", fontName="Helvetica-Bold",
                                                                    fontSize=9, textColor=C_GREEN,
                                                                    alignment=TA_RIGHT, leading=12))],
+                [Paragraph(trade_line, ParagraphStyle("ctr", fontName="Helvetica-Bold", fontSize=8.5,
+                                                       textColor=C_DARK, leading=12)), ""],
                 [Paragraph(thesis, ParagraphStyle("ct", fontName="Helvetica", fontSize=8.5,
                                                    textColor=C_DARK, leading=12)),
                  Paragraph(f"Tech {tech:.0f}  Fund {fund:.0f}  Risk {risk:.0f}",

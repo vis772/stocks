@@ -493,6 +493,14 @@ def _init_postgres():
         "ALTER TABLE scanner_control ADD COLUMN IF NOT EXISTS restart_requested   BOOLEAN DEFAULT FALSE",
         "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS scoring_path        VARCHAR(10) DEFAULT 'static'",
         "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS catalyst_mult       FLOAT DEFAULT 1.0",
+        # Entry/stop/target columns
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS entry_price         REAL",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS stop_loss           REAL",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS target_1            REAL",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS target_2            REAL",
+        "ALTER TABLE signal_log      ADD COLUMN IF NOT EXISTS risk_reward         REAL",
+        # Direction column — UP / DOWN / FLAT after 1-day outcome
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS direction           TEXT",
     ]:
         try:
             cur.execute(ddl)
@@ -1444,7 +1452,10 @@ def log_signal(ticker: str, signal_label: str, score: float,
                volume_at_signal: float, alert_type: str,
                quant_adj: float = None, source_quality: str = None,
                session_mode: str = None, quality_tag: str = None,
-               scoring_path: str = "static", catalyst_mult: float = 1.0) -> Optional[int]:
+               scoring_path: str = "static", catalyst_mult: float = 1.0,
+               entry_price: float = None, stop_loss: float = None,
+               target_1: float = None, target_2: float = None,
+               risk_reward: float = None) -> Optional[int]:
     """Log a scanner signal. Returns the signal_log row id or None on failure."""
     breakdown_json = json.dumps(score_breakdown)
     try:
@@ -1456,13 +1467,15 @@ def log_signal(ticker: str, signal_label: str, score: float,
                     (ticker, signal_label, score, score_breakdown,
                      price_at_signal, volume_at_signal, alert_type,
                      quant_adj, source_quality, session_mode, quality_tag,
-                     scoring_path, catalyst_mult)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                     scoring_path, catalyst_mult,
+                     entry_price, stop_loss, target_1, target_2, risk_reward)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
             """, (ticker, signal_label, _f(score), breakdown_json,
                   _f(price_at_signal), _f(volume_at_signal), alert_type,
                   _f(quant_adj) if quant_adj is not None else None,
                   source_quality, session_mode or "MARKET", quality_tag,
-                  scoring_path, _f(catalyst_mult)))
+                  scoring_path, _f(catalyst_mult),
+                  _f(entry_price), _f(stop_loss), _f(target_1), _f(target_2), _f(risk_reward)))
             sig_id = cur.fetchone()[0]
             cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (%s)", (sig_id,))
             conn.commit(); cur.close(); conn.close()
@@ -1475,13 +1488,15 @@ def log_signal(ticker: str, signal_label: str, score: float,
                     (ticker, signal_label, score, score_breakdown,
                      price_at_signal, volume_at_signal, alert_type,
                      quant_adj, source_quality, session_mode, quality_tag,
-                     scoring_path, catalyst_mult)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     scoring_path, catalyst_mult,
+                     entry_price, stop_loss, target_1, target_2, risk_reward)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (ticker, signal_label, _f(score), breakdown_json,
                   _f(price_at_signal), _f(volume_at_signal), alert_type,
                   _f(quant_adj) if quant_adj is not None else None,
                   source_quality, session_mode or "MARKET", quality_tag,
-                  scoring_path, _f(catalyst_mult)))
+                  scoring_path, _f(catalyst_mult),
+                  _f(entry_price), _f(stop_loss), _f(target_1), _f(target_2), _f(risk_reward)))
             sig_id = cur.lastrowid
             cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (?)", (sig_id,))
             conn.commit(); conn.close()
