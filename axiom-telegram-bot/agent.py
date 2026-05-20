@@ -16,7 +16,6 @@ from tools import (
     restart_scanner,
     get_accuracy_summary,
     get_signal_log,
-    # New tools
     get_conviction_list,
     get_portfolio,
     get_todays_graded_signals,
@@ -26,6 +25,11 @@ from tools import (
     force_scan,
     trigger_conviction_scan,
     add_to_portfolio,
+    # Real-time tools
+    get_live_quote,
+    get_todays_signal_performance,
+    get_recent_alerts,
+    get_scanner_logs,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,7 +66,16 @@ SOFT LOCKS — require user to type "confirm" before executing:
 ALWAYS ALLOWED (no confirmation):
 - All read tools: get_conviction_list, get_portfolio,
   get_todays_graded_signals, get_regime, get_scanner_status, get_signal_log,
-  get_accuracy_summary, query_database, force_scan (just sets a flag — safe)
+  get_accuracy_summary, query_database, force_scan (just sets a flag — safe),
+  get_live_quote, get_todays_signal_performance, get_recent_alerts, get_scanner_logs
+
+REAL-TIME DATA:
+- "what's AAPL at" / "price of SOUN" → get_live_quote(ticker)
+- "how are my picks doing today" / "are today's signals working" → get_todays_signal_performance
+- "what alerts fired today" / "what pushover alerts" → get_recent_alerts
+- "what's the scanner doing" / "show me scanner logs" → get_scanner_logs
+- When asked about scanner status, ALWAYS use get_scanner_status first — it now includes universe size and top signals today
+- After showing conviction picks, proactively offer live prices with get_live_quote if the user seems ready to act
 
 CONVICTION FLOW:
 - "show me today's picks" → get_conviction_list
@@ -274,6 +287,44 @@ TOOLS = [
             "required": ["reason"]
         }
     },
+    {
+        "name": "get_live_quote",
+        "description": "Fetch live price, change%, volume, and 52-week range for any ticker. Use whenever user asks about a specific ticker's current price.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Ticker symbol (e.g. SOUN, AAPL)"}
+            },
+            "required": ["ticker"]
+        }
+    },
+    {
+        "name": "get_todays_signal_performance",
+        "description": "Today's scanner signals with their live intraday price vs the price at signal time. Shows which picks are working right now.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "get_recent_alerts",
+        "description": "Most recent scanner alerts — every Pushover notification that was sent. Shows alert type, ticker, and message.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Number of alerts to return (default 10, max 30)"}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_scanner_logs",
+        "description": "Recent scanner log messages (INFO/WARN/ERROR) from the scanner loop. Use to diagnose issues or see what the scanner is actively doing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Number of log lines to return (default 30, max 100)"}
+            },
+            "required": []
+        }
+    },
 ]
 
 # Tools that require "confirm" before executing
@@ -392,10 +443,14 @@ async def _execute_tool(name: str, params: dict) -> dict:
                                            params["ticker"], params["shares"],
                                            params["avg_cost"], params.get("notes", ""),
                                        ),
-            "update_weights":          lambda: update_weights(params["weights"]),
-            "adjust_thresholds":       lambda: adjust_thresholds(params["thresholds"]),
-            "modify_watchlist":        lambda: modify_watchlist(params["action"], params["tickers"]),
-            "restart_scanner":         lambda: restart_scanner(params["reason"]),
+            "update_weights":               lambda: update_weights(params["weights"]),
+            "adjust_thresholds":            lambda: adjust_thresholds(params["thresholds"]),
+            "modify_watchlist":             lambda: modify_watchlist(params["action"], params["tickers"]),
+            "restart_scanner":              lambda: restart_scanner(params["reason"]),
+            "get_live_quote":               lambda: get_live_quote(params["ticker"]),
+            "get_todays_signal_performance": get_todays_signal_performance,
+            "get_recent_alerts":            lambda: get_recent_alerts(params.get("limit", 10)),
+            "get_scanner_logs":             lambda: get_scanner_logs(params.get("limit", 30)),
         }
         fn = dispatch.get(name)
         if fn is None:

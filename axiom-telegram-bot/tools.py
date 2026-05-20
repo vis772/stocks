@@ -54,7 +54,7 @@ def query_database(sql: str, description: str = "") -> dict:
 
 
 def get_scanner_status() -> dict:
-    """Check scanner health — last run time, today's signal count, watchlist size, current mode."""
+    """Check scanner health — last run time, today's signal count, universe size, current mode."""
     try:
         with _get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -72,14 +72,38 @@ def get_scanner_status() -> dict:
                 cur.execute("SELECT COUNT(*) as count FROM signal_log")
                 total_count = cur.fetchone()["count"]
 
-                cur.execute("SELECT COUNT(*) as count FROM watchlist")
-                watchlist_size = cur.fetchone()["count"]
+                cur.execute("SELECT COUNT(*) as count FROM stock_universe WHERE active = TRUE")
+                try:
+                    universe_size = cur.fetchone()["count"]
+                except Exception:
+                    universe_size = None
 
                 cur.execute("""
                     SELECT paused, force_scan, current_mode, scanner_started_at, updated_at
                     FROM scanner_control WHERE id = 1
                 """)
                 ctrl = cur.fetchone()
+
+                cur.execute("""
+                    SELECT scan_count FROM scanner_state
+                    WHERE date = CURRENT_DATE::TEXT
+                    LIMIT 1
+                """)
+                try:
+                    state_row = cur.fetchone()
+                    scan_cycles_today = state_row["scan_count"] if state_row else 0
+                except Exception:
+                    scan_cycles_today = None
+
+                # Top signals today for quick overview
+                cur.execute("""
+                    SELECT ticker, signal_label, score
+                    FROM signal_log
+                    WHERE created_at >= CURRENT_DATE
+                    ORDER BY score DESC
+                    LIMIT 5
+                """)
+                top_today = [dict(r) for r in cur.fetchall()]
 
                 now = datetime.now(timezone.utc)
                 if last_signal and last_signal["created_at"]:
@@ -104,8 +128,10 @@ def get_scanner_status() -> dict:
                     },
                     "minutes_since_last_signal": round(minutes_since, 1) if minutes_since else None,
                     "signals_today": today_count,
-                    "total_signals": total_count,
-                    "watchlist_size": watchlist_size,
+                    "scan_cycles_today": scan_cycles_today,
+                    "total_signals_all_time": total_count,
+                    "universe_size": universe_size,
+                    "top_signals_today": top_today,
                     "scanner_started_at": str(ctrl["scanner_started_at"]) if ctrl and ctrl["scanner_started_at"] else None,
                 }
     except Exception as e:
@@ -601,4 +627,137 @@ def add_to_portfolio(ticker: str, shares: float, avg_cost: float, notes: str = "
         }
     except Exception as e:
         logger.error(f"add_to_portfolio error: {e}")
+        return {"error": str(e)}
+
+
+# ── REAL-TIME TOOLS ──────────────────────────────────────────────────────────
+
+def get_live_quote(ticker: str) -> dict:
+    """Fetch live price, change%, volume, and 52-week range for any ticker via yfinance."""
+    ticker = ticker.upper().strip()
+    try:
+        import yfinance as yf
+        fi = yf.Ticker(ticker).fast_info
+        price = getattr(fi, "last_price", None) or getattr(fi, "regular_market_price", None)
+        if not price:
+            return {"error": f"No live price available for {ticker}"}
+        price = float(price)
+        prev  = getattr(fi, "previous_close", None)
+        vol   = getattr(fi, "last_volume", None)
+        hi52  = getattr(fi, "year_high", None)
+        lo52  = getattr(fi, "year_low", None)
+        mcap  = getattr(fi, "market_cap", None)
+        change_pct = round((price - float(prev)) / float(prev) * 100, 2) if prev and float(prev) > 0 else None
+        return {
+            "ticker": ticker,
+            "price": round(price, 2),
+            "change_pct": change_pct,
+            "prev_close": round(float(prev), 2) if prev else None,
+            "volume": int(vol) if vol else None,
+            "52w_high": round(float(hi52), 2) if hi52 else None,
+            "52w_low": round(float(lo52), 2) if lo52 else None,
+            "market_cap_M": round(float(mcap) / 1_000_000, 1) if mcap else None,
+        }
+    except Exception as e:
+        logger.error(f"get_live_quote {ticker}: {e}")
+        return {"error": str(e)}
+
+
+def get_todays_signal_performance() -> dict:
+    """Today's signals with live intraday price vs price_at_signal — shows which picks are working."""
+    try:
+        with _get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT ticker, signal_label, score, price_at_signal, created_at
+                    FROM signal_log
+                    WHERE created_at >= CURRENT_DATE
+                    ORDER BY score DESC
+                    LIMIT 20
+                """)
+                rows = cur.fetchall()
+
+        if not rows:
+            return {"signals": [], "count": 0, "message": "No signals today yet."}
+
+        import yfinance as yf
+        live_prices = {}
+        for r in rows:
+            t = r["ticker"]
+            if t in live_prices:
+                continue
+            try:
+                fi = yf.Ticker(t).fast_info
+                p = getattr(fi, "last_price", None) or getattr(fi, "regular_market_price", None)
+                if p:
+                    live_prices[t] = round(float(p), 2)
+            except Exception:
+                pass
+
+        results = []
+        for r in rows:
+            t = r["ticker"]
+            live = live_prices.get(t)
+            signal_price = float(r["price_at_signal"]) if r["price_at_signal"] else None
+            move_pct = None
+            if live and signal_price and signal_price > 0:
+                move_pct = round((live - signal_price) / signal_price * 100, 2)
+            results.append({
+                "ticker": t,
+                "signal_label": r["signal_label"],
+                "score": r["score"],
+                "price_at_signal": signal_price,
+                "live_price": live,
+                "move_pct": move_pct,
+                "signal_time": str(r["created_at"]),
+            })
+
+        winners = sum(1 for r in results if (r["move_pct"] or 0) > 2)
+        losers  = sum(1 for r in results if (r["move_pct"] or 0) < -2)
+        return {
+            "signals": results,
+            "count": len(results),
+            "up_2pct_plus": winners,
+            "down_2pct_plus": losers,
+        }
+    except Exception as e:
+        logger.error(f"get_todays_signal_performance: {e}")
+        return {"error": str(e)}
+
+
+def get_recent_alerts(limit: int = 10) -> dict:
+    """Get the most recent scanner alerts — every Pushover notification that was sent."""
+    limit = min(limit, 30)
+    try:
+        with _get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT alert_time, message, ticker, alert_type, created_at
+                    FROM alert_log
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (limit,))
+                rows = cur.fetchall()
+                return {"alerts": [dict(r) for r in rows], "count": len(rows)}
+    except Exception as e:
+        logger.error(f"get_recent_alerts: {e}")
+        return {"error": str(e)}
+
+
+def get_scanner_logs(limit: int = 30) -> dict:
+    """Get recent scanner log messages (INFO/WARN/ERROR from the scanner loop)."""
+    limit = min(limit, 100)
+    try:
+        with _get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT level, message, created_at
+                    FROM scanner_logs
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (limit,))
+                rows = cur.fetchall()
+                return {"logs": [dict(r) for r in rows], "count": len(rows)}
+    except Exception as e:
+        logger.error(f"get_scanner_logs: {e}")
         return {"error": str(e)}
