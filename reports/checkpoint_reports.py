@@ -131,6 +131,9 @@ def _clean_table(headers: list, rows: list, col_widths: list,
 
 def _compute_stats(df: pd.DataFrame) -> dict:
     """Derive all accuracy metrics from a signal_log DataFrame. Primary window: 1-day."""
+    WIN_PCT  =  2.0   # >+2% = win
+    LOSS_PCT = -2.0   # <-2% = loss
+
     s: dict = {"total": 0}
     if df.empty:
         return s
@@ -151,12 +154,9 @@ def _compute_stats(df: pd.DataFrame) -> dict:
     p15 = df.get("pct_change_15day")
     s["pct_15day_filled"] = round(p15.notna().mean() * 100, 1) if p15 is not None else 0.0
 
-    # Use outcome_1d (1-day win/loss label) as the primary resolved column.
-    # Falls back to legacy outcome_label if outcome_1d is unavailable.
-    outcome_col = "outcome_1d" if "outcome_1d" in df.columns and df["outcome_1d"].notna().any() else "outcome_label"
-    ret_col     = "ret_1d"     if "ret_1d"     in df.columns else "pct_change_1day"
-
-    resolved = df[df[outcome_col].isin(["win", "loss", "neutral"])].copy()
+    # Compute win/loss directly from pct_change_1day — no dependency on the
+    # nightly accuracy validator. A signal is resolved as soon as 1-day price exists.
+    resolved = df[df["pct_change_1day"].notna()].copy()
     s["resolved"] = len(resolved)
 
     if resolved.empty:
@@ -165,11 +165,14 @@ def _compute_stats(df: pd.DataFrame) -> dict:
                    "degenerate_labels": [], "missing_days": []})
         return s
 
-    n_wins = (resolved[outcome_col] == "win").sum()
+    resolved["_win"]  = resolved["pct_change_1day"] > WIN_PCT
+    resolved["_loss"] = resolved["pct_change_1day"] < LOSS_PCT
+
+    n_wins = resolved["_win"].sum()
     s["overall_win_rate"] = round(n_wins / len(resolved) * 100, 1)
 
-    wins_1d   = resolved.loc[resolved[outcome_col] == "win",  ret_col].dropna()
-    losses_1d = resolved.loc[resolved[outcome_col] == "loss", ret_col].dropna()
+    wins_1d   = resolved.loc[resolved["_win"],  "pct_change_1day"]
+    losses_1d = resolved.loc[resolved["_loss"], "pct_change_1day"]
     s["avg_win"]  = round(float(wins_1d.mean()),   2) if not wins_1d.empty  else None
     s["avg_loss"] = round(float(losses_1d.mean()), 2) if not losses_1d.empty else None
 
@@ -178,10 +181,9 @@ def _compute_stats(df: pd.DataFrame) -> dict:
         sub = resolved[resolved["signal_label"] == label]
         if len(sub) < 3:
             continue
-        wr = round((sub[outcome_col] == "win").sum() / len(sub) * 100, 1)
-        wg = sub.loc[sub[outcome_col] == "win",  ret_col].dropna()
-        lg = sub.loc[sub[outcome_col] == "loss", ret_col].dropna()
-
+        wr = round(sub["_win"].sum() / len(sub) * 100, 1)
+        wg = sub.loc[sub["_win"],  "pct_change_1day"]
+        lg = sub.loc[sub["_loss"], "pct_change_1day"]
         by_signal[label] = {
             "count":    len(sub),
             "win_rate": wr,
@@ -193,8 +195,8 @@ def _compute_stats(df: pd.DataFrame) -> dict:
     comp_names = ["technical", "catalyst", "fundamental", "risk", "sentiment"]
     comp_corr: dict = {}
     if "score_breakdown" in df.columns:
-        w_rows = resolved[resolved[outcome_col] == "win"]["score_breakdown"]
-        l_rows = resolved[resolved[outcome_col] == "loss"]["score_breakdown"]
+        w_rows = resolved[resolved["_win"]]["score_breakdown"]
+        l_rows = resolved[resolved["_loss"]]["score_breakdown"]
         for c in comp_names:
             w_vals = w_rows.apply(lambda bd: bd.get(c) if isinstance(bd, dict) else None).dropna()
             l_vals = l_rows.apply(lambda bd: bd.get(c) if isinstance(bd, dict) else None).dropna()
@@ -216,12 +218,12 @@ def _compute_stats(df: pd.DataFrame) -> dict:
     except Exception:
         s["missing_days"] = []
 
-    with_ret = resolved.dropna(subset=[ret_col])
+    with_ret = resolved.dropna(subset=["pct_change_1day"])
     if not with_ret.empty:
-        bi = with_ret[ret_col].idxmax()
-        wi = with_ret[ret_col].idxmin()
-        s["best_ticker"]  = (with_ret.loc[bi, "ticker"], with_ret.loc[bi, ret_col])
-        s["worst_ticker"] = (with_ret.loc[wi, "ticker"], with_ret.loc[wi, ret_col])
+        bi = with_ret["pct_change_1day"].idxmax()
+        wi = with_ret["pct_change_1day"].idxmin()
+        s["best_ticker"]  = (with_ret.loc[bi, "ticker"], with_ret.loc[bi, "pct_change_1day"])
+        s["worst_ticker"] = (with_ret.loc[wi, "ticker"], with_ret.loc[wi, "pct_change_1day"])
 
     return s
 
