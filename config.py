@@ -1,4 +1,4 @@
-# config.py
+# config.py  (v2 — reweighted 2026-05-20)
 # Central configuration for the scanner.
 # Edit these values to tune the system to your preferences.
 
