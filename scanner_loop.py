@@ -1235,11 +1235,13 @@ def run_scanner():
             # ── Morning screen at 6 AM ET ─────────────────────────────────────
             if is_morning_screen_time() and last_screen_date != today_str:
                 print("\n[MORNING SCREEN] Building today's watchlist...")
-                # Trigger a universe refresh if the DB is thin (< 200 tickers) or stale
+                # Trigger a universe refresh only if DB is thin (<200) or data is stale (>5 days).
+                # max_age_days=5 prevents daily 10-20 min yfinance re-enrichment that races
+                # with the morning screen and can corrupt avg_volume for healthy rows.
                 try:
                     from universe_manager import get_universe_size, needs_refresh, refresh_universe_async
                     _daily_usize = get_universe_size()
-                    if _daily_usize < 500 or needs_refresh(max_age_days=1):
+                    if _daily_usize < 200 or needs_refresh(max_age_days=5):
                         print(f"  [universe] DB has {_daily_usize} tickers / stale — refreshing in background...")
                         refresh_universe_async()
                 except Exception as _dur_e:

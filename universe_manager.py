@@ -325,8 +325,10 @@ def get_universe_tickers(min_market_cap: int = 20_000_000,
     try:
         from db.database import get_active_universe
         tickers = get_active_universe(min_market_cap, max_market_cap, min_adv)
-        if tickers:
+        if len(tickers) >= 100:
             return tickers[:limit]
+        if tickers:
+            _log(f"DB returned only {len(tickers)} tickers — too thin, checking fallbacks")
     except Exception as e:
         _log(f"get_universe_tickers DB query failed: {e}")
 

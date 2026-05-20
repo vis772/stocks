@@ -2924,8 +2924,12 @@ def upsert_universe_stock(ticker: str, name: str = "", exchange: str = "",
                 ON CONFLICT (ticker) DO UPDATE SET
                     name         = EXCLUDED.name,
                     exchange     = EXCLUDED.exchange,
-                    market_cap   = EXCLUDED.market_cap,
-                    avg_volume   = EXCLUDED.avg_volume,
+                    market_cap   = CASE WHEN EXCLUDED.market_cap > 0
+                                        THEN EXCLUDED.market_cap
+                                        ELSE stock_universe.market_cap END,
+                    avg_volume   = CASE WHEN EXCLUDED.avg_volume > 0
+                                        THEN EXCLUDED.avg_volume
+                                        ELSE stock_universe.avg_volume END,
                     sector       = EXCLUDED.sector,
                     min_price    = EXCLUDED.min_price,
                     last_updated = NOW(),
@@ -2970,8 +2974,12 @@ def bulk_upsert_universe_stocks(stocks: list) -> int:
                 ON CONFLICT (ticker) DO UPDATE SET
                     name         = EXCLUDED.name,
                     exchange     = EXCLUDED.exchange,
-                    market_cap   = EXCLUDED.market_cap,
-                    avg_volume   = EXCLUDED.avg_volume,
+                    market_cap   = CASE WHEN EXCLUDED.market_cap > 0
+                                        THEN EXCLUDED.market_cap
+                                        ELSE stock_universe.market_cap END,
+                    avg_volume   = CASE WHEN EXCLUDED.avg_volume > 0
+                                        THEN EXCLUDED.avg_volume
+                                        ELSE stock_universe.avg_volume END,
                     sector       = EXCLUDED.sector,
                     min_price    = EXCLUDED.min_price,
                     last_updated = NOW(),
@@ -2995,7 +3003,11 @@ def bulk_upsert_universe_stocks(stocks: list) -> int:
 def get_active_universe(min_market_cap: int = 20_000_000,
                         max_market_cap: int = 20_000_000_000,
                         min_avg_volume: int = 50_000) -> list:
-    """Return list of ticker strings from stock_universe that meet filters."""
+    """Return list of ticker strings from stock_universe that meet filters.
+    Falls back to market-cap-only filter if the strict ADV filter returns <100 rows,
+    which handles cases where avg_volume was stored as 0 during a partial refresh.
+    """
+    _MIN_MEANINGFUL = 100
     try:
         if _is_postgres():
             conn = _get_pg_conn(); cur = conn.cursor()
@@ -3006,7 +3018,17 @@ def get_active_universe(min_market_cap: int = 20_000_000,
                   AND avg_volume >= %s
                 ORDER BY market_cap DESC
             """, (min_market_cap, max_market_cap, min_avg_volume))
-            rows = cur.fetchall(); cur.close(); conn.close()
+            rows = cur.fetchall()
+            if len(rows) < _MIN_MEANINGFUL:
+                # Partial refresh may have zeroed avg_volume — relax to mcap-only
+                cur.execute("""
+                    SELECT ticker FROM stock_universe
+                    WHERE active = TRUE
+                      AND market_cap BETWEEN %s AND %s
+                    ORDER BY market_cap DESC
+                """, (min_market_cap, max_market_cap))
+                rows = cur.fetchall()
+            cur.close(); _put_pg_conn(conn)
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -3016,7 +3038,16 @@ def get_active_universe(min_market_cap: int = 20_000_000,
                   AND avg_volume >= ?
                 ORDER BY market_cap DESC
             """, (min_market_cap, max_market_cap, min_avg_volume))
-            rows = cur.fetchall(); conn.close()
+            rows = cur.fetchall()
+            if len(rows) < _MIN_MEANINGFUL:
+                cur.execute("""
+                    SELECT ticker FROM stock_universe
+                    WHERE active = 1
+                      AND market_cap BETWEEN ? AND ?
+                    ORDER BY market_cap DESC
+                """, (min_market_cap, max_market_cap))
+                rows = cur.fetchall()
+            conn.close()
         return [r[0] for r in rows]
     except Exception as e:
         print(f"  [db] get_active_universe failed: {e}")

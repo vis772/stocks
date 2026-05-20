@@ -89,18 +89,26 @@ def fetch_ticker_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
     elif yf_info.get("marketCap"):
         market_cap = yf_info["marketCap"]
 
-    # Volume
+    # Volume — cascade from most to least real-time
     today_volume = 0
     avg_vol_20   = 0
     if fh_quote and fh_quote.get("v"):
         today_volume = int(fh_quote["v"])
+    elif yf_info.get("regularMarketVolume"):
+        today_volume = int(yf_info["regularMarketVolume"])
+    elif yf_info.get("volume"):
+        today_volume = int(yf_info["volume"])
     elif not hist.empty:
         today_volume = int(hist["Volume"].iloc[-1])
 
     if not hist.empty and len(hist) >= 20:
         avg_vol_20 = int(hist["Volume"].tail(20).mean())
+    elif yf_info.get("averageVolume10days"):
+        avg_vol_20 = int(yf_info["averageVolume10days"])
     elif yf_info.get("averageVolume"):
-        avg_vol_20 = yf_info["averageVolume"]
+        avg_vol_20 = int(yf_info["averageVolume"])
+    elif yf_info.get("threeMonthAverageVolume"):
+        avg_vol_20 = int(yf_info["threeMonthAverageVolume"])
 
     rel_volume = round(today_volume / avg_vol_20, 2) if avg_vol_20 > 0 else 0
 
