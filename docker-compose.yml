@@ -1,0 +1,47 @@
+version: "3.9"
+
+services:
+
+  # ── Background scanner (runs forever, no exposed port) ──────────────────────
+  scanner:
+    build: .
+    image: axiom-terminal:latest
+    container_name: axiom-scanner
+    command: python scanner_loop.py
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - axiom-data:/app/data/persistent
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ── Streamlit dashboard (port 8501) ─────────────────────────────────────────
+  dashboard:
+    build: .
+    image: axiom-terminal:latest
+    container_name: axiom-dashboard
+    command: >
+      streamlit run app.py
+      --server.port=8501
+      --server.address=0.0.0.0
+      --server.headless=true
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - axiom-data:/app/data/persistent
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  axiom-data:
+    name: axiom-data

@@ -218,6 +218,67 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
     font-weight: 600 !important;
 }
 
+/* ── Nav radio — flat underline tabs, no boxes ── */
+div[data-testid="stRadio"] > label:first-child { display: none !important; }
+div[data-testid="stRadio"] [role="radiogroup"] {
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 0 !important;
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    scrollbar-width: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+    border-bottom: 1px solid var(--border) !important;
+    margin-bottom: 4px !important;
+}
+div[data-testid="stRadio"] [role="radiogroup"]::-webkit-scrollbar { display: none !important; }
+div[data-testid="stRadio"] [role="radiogroup"] label {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 10px 16px !important;
+    border: none !important;
+    border-bottom: 2px solid transparent !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    color: var(--t3) !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.71em !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase !important;
+    cursor: pointer !important;
+    white-space: nowrap !important;
+    margin: 0 !important;
+    transition: color 0.15s, border-color 0.15s !important;
+}
+div[data-testid="stRadio"] [role="radiogroup"] label:hover {
+    color: var(--t2) !important;
+    border-bottom-color: var(--borderhi) !important;
+    background: transparent !important;
+}
+div[data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) {
+    color: var(--amber) !important;
+    border-bottom: 2px solid var(--amber) !important;
+    font-weight: 700 !important;
+}
+div[data-testid="stRadio"] [role="radiogroup"] input[type="radio"] {
+    position: absolute !important;
+    opacity: 0 !important;
+    width: 0 !important;
+    height: 0 !important;
+}
+div[data-testid="stRadio"] [role="radiogroup"] label > div:first-child { display: none !important; }
+div[data-testid="stRadio"] [role="radiogroup"] p {
+    margin: 0 !important;
+    font-size: inherit !important;
+    font-family: inherit !important;
+    color: inherit !important;
+    text-transform: inherit !important;
+    letter-spacing: inherit !important;
+}
+
 /* ── Metrics ── */
 [data-testid="metric-container"] {
     background: var(--bgcard) !important;
@@ -2343,14 +2404,14 @@ def _terminal_dashboard():
                     except Exception as _e:
                         st.error(str(_e))
             else:
-                if st.button("⏸ PAUSE", use_container_width=True, key="dash_pause"):
+                if st.button("PAUSE", use_container_width=True, key="dash_pause"):
                     try:
                         from db.database import set_scanner_control as _ssc
                         _ssc(paused=True); st.rerun()
                     except Exception as _e:
                         st.error(str(_e))
         with _b2:
-            if st.button("⚡ SCAN", use_container_width=True, key="dash_scannow",
+            if st.button("SCAN", use_container_width=True, key="dash_scannow",
                          disabled=_force_scan):
                 try:
                     from db.database import set_scanner_control as _ssc
@@ -3602,7 +3663,7 @@ def _tab_health():
         if st.button("↻ Refresh Now", key="health_manual_refresh"):
             st.rerun()
 
-        if st.button("⚡ Force Grade Pending Signals", key="force_grade_btn"):
+        if st.button("Force Grade Pending Signals", key="force_grade_btn"):
             try:
                 from accuracy_validator import force_grade_all_pending
                 _result = force_grade_all_pending()
@@ -3627,15 +3688,19 @@ _TABS = [
 st.session_state.setdefault("active_tab", "Dashboard")
 
 # ── Nav bar ───────────────────────────────────────────────────────────────────
-_nav_cols = st.columns(len(_TABS))
-for _ni, (_nc, _tn) in enumerate(zip(_nav_cols, _TABS)):
-    _is_active = st.session_state["active_tab"] == _tn
-    if _nc.button(_tn, key=f"_nav_{_ni}", use_container_width=True,
-                  type="primary" if _is_active else "secondary"):
-        st.session_state["active_tab"] = _tn
-        st.rerun()
+_active = st.session_state.get("active_tab", "Dashboard")
+if _active not in _TABS:
+    _active = "Dashboard"
+_selected_tab = st.radio(
+    "nav", _TABS,
+    index=_TABS.index(_active),
+    horizontal=True,
+    label_visibility="collapsed",
+    key="_nav_radio",
+)
+st.session_state["active_tab"] = _selected_tab
 
-st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
 _at = st.session_state["active_tab"]
 if   _at == "Dashboard":      _terminal_dashboard()

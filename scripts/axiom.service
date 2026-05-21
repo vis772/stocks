@@ -1,0 +1,28 @@
+[Unit]
+Description=Axiom Terminal — Docker Compose stack (scanner + dashboard)
+Documentation=https://github.com/vis772/stocks
+After=docker.service network-online.target
+Requires=docker.service network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/axiom
+
+# Pull latest images / rebuild if needed before starting
+ExecStartPre=/usr/bin/docker compose pull --quiet
+ExecStart=/usr/bin/docker compose up
+ExecStop=/usr/bin/docker compose down
+
+# Give services up to 90 s to stop gracefully before killing them
+TimeoutStopSec=90
+
+Restart=on-failure
+RestartSec=10s
+
+# Inherit the docker group so the ubuntu user can talk to the daemon
+SupplementaryGroups=docker
+
+[Install]
+WantedBy=multi-user.target
