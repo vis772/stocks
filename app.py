@@ -80,6 +80,7 @@ st.markdown("""
 @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
 @keyframes live-dot { 0%,100% { opacity:1; } 50% { opacity:0.25; } }
 @keyframes glow-green { 0%,100% { box-shadow: 0 0 6px rgba(16,185,129,0.3); } 50% { box-shadow: 0 0 14px rgba(16,185,129,0.55); } }
+@keyframes scroll-ticker { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
 
 :root {
     --bg:       #080d14;
@@ -1914,15 +1915,467 @@ def _live_alerts_feed():
         """)
 
 
+def _terminal_dashboard():
+    """Tab 0: Terminal-style live dashboard — watchlist, regime, factor IC, conviction."""
+    # Auto-refresh every 15 s
+    st.components.v1.html(
+        '<script>setTimeout(()=>window.parent.location.reload(),15000);</script>',
+        height=0,
+    )
+
+    # ── Data loading ─────────────────────────────────────────────────────────
+    try:
+        from db.database import get_scanner_control, get_control_stats
+        _ctl = get_scanner_control()
+        _sts = get_control_stats()
+    except Exception:
+        _ctl = {"paused": False, "force_scan": False, "current_mode": "UNKNOWN"}
+        _sts = {"signals_today": 0, "alerts_today": 0, "scan_count": 0,
+                "last_updated": None, "top_signal": None}
+
+    _cur_mode   = _ctl.get("current_mode", "UNKNOWN")
+    _paused     = _ctl.get("paused", False)
+    _force_scan = _ctl.get("force_scan", False)
+    _scan_count = _sts.get("scan_count", 0)
+    _last_upd   = _sts.get("last_updated")
+
+    _scanner_state = _cached_load_scanner_state()
+    _univ_size     = _scanner_state.get("universe_size", 0)
+
+    _last_scan_str = "—"
+    _mins_ago = None
+    if _last_upd:
+        try:
+            _lu = datetime.fromisoformat(str(_last_upd).replace("Z", "+00:00"))
+            _lu_naive = _lu.replace(tzinfo=None) if _lu.tzinfo else _lu
+            _mins_ago = int((datetime.utcnow() - _lu_naive).total_seconds() / 60)
+            _last_scan_str = _lu_naive.strftime("%H:%M:%S ET")
+        except Exception:
+            pass
+
+    # Today's signals
+    _today_signals = []
+    try:
+        from db.database import get_signal_log as _gsl_dash
+        _sl_df = _gsl_dash(days=1)
+        if not _sl_df.empty:
+            _sl_df = _sl_df.sort_values("score", ascending=False).drop_duplicates("ticker")
+            _today_signals = _sl_df.head(20).to_dict("records")
+    except Exception:
+        pass
+
+    # Regime
+    _regime_str   = "SCANNING"
+    _regime_color = "#f59e0b"
+    _vix_str = "—"; _adv_str = "—"; _breadth_str = "—"
+    try:
+        from analysis.regime import get_current_regime as _gcr, regime_label as _rl
+        _rd = _gcr()
+        _rlbl, _rcolor, _ = _rl(_rd.get("regime", "UNKNOWN"))
+        _regime_str   = _rlbl.upper().replace("_", " ")
+        _regime_color = _rcolor
+        _vix_str  = f"{_rd.get('volatility_20d', 0):.1f}"
+        _adr      = _rd.get("adv_dec_ratio") or _rd.get("adv_dec")
+        _adv_str  = f"{float(_adr):.1f}" if _adr else "—"
+        _b = _rd.get("breadth_pct", 0.5)
+        _breadth_str = "NARROW" if _b < 0.35 else ("WIDE" if _b > 0.65 else "NORMAL")
+    except Exception:
+        pass
+
+    # Conviction
+    _cv_data    = _cached_conviction_list(max_age_minutes=90)
+    _cv_entries = _cv_data.get("entries", [])
+
+    # ── Signal label helper ──────────────────────────────────────────────────
+    def _sig_display(label: str):
+        if label in ("Strong Buy Candidate", "Speculative Buy"):
+            return "CONVICTION", "#0d9488"
+        if "Buy" in label:
+            return "BUY SIGNAL", "#5eead4"
+        if label == "Watchlist":
+            return "WATCHLIST", "#475569"
+        return label.upper()[:12], "#475569"
+
+    # ── Ticker tape ──────────────────────────────────────────────────────────
+    if _today_signals:
+        _tape_parts = []
+        for _s in _today_signals[:16]:
+            _t  = _s.get("ticker", "")
+            _sc = int(_s.get("score", 0))
+            _lbl_short, _lbl_color = _sig_display(_s.get("signal_label", ""))
+            _pct1 = _s.get("pct_change_1hr") or _s.get("pct_change_1day")
+            _pct_html = (
+                f'<span style="color:{"#10b981" if _pct1 >= 0 else "#f43f5e"};margin-left:3px;">'
+                f'{_pct1:+.1f}%</span>'
+                if _pct1 is not None else ""
+            )
+            _tape_parts.append(
+                f'<span style="color:#e2eaf4;font-weight:600;">{_t}</span>{_pct_html}'
+                f'<span style="color:{_lbl_color};margin-left:5px;font-size:0.85em;"> Score: {_sc}</span>'
+            )
+        _tape_html = ' &nbsp;<span style="color:#1e3048;margin:0 4px">·</span>&nbsp; '.join(_tape_parts * 2)
+        st.markdown(
+            f'<div style="background:#060b11;border-bottom:1px solid #1a2740;border-top:1px solid #1a2740;'
+            f'padding:6px 0;overflow:hidden;margin:-0.5rem -1.5rem 1.2rem;'
+            f'font-family:\'JetBrains Mono\',monospace;font-size:0.71em;">'
+            f'<div style="white-space:nowrap;animation:scroll-ticker 50s linear infinite;'
+            f'display:inline-block;padding-left:100%;">'
+            f'{_tape_html}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Terminal header ──────────────────────────────────────────────────────
+    _live_dot = "#10b981" if not _paused else "#f59e0b"
+    _live_lbl = "LIVE" if not _paused else "PAUSED"
+    _stocks_n = _univ_size or len(_today_signals)
+
+    st.markdown(
+        f'<div style="display:flex;align-items:center;justify-content:space-between;'
+        f'padding:2px 0 14px;flex-wrap:wrap;gap:8px;">'
+        f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:1.0em;'
+        f'font-weight:700;color:#f59e0b;letter-spacing:0.08em;">AXIOM TERMINAL</div>'
+        f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
+        f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.67em;color:#3a5068;">'
+        f'Last scan: <span style="color:#8293a8;">{_last_scan_str}</span>'
+        f'&nbsp;·&nbsp;<span style="color:#8293a8;">{_stocks_n:,} stocks processed</span>'
+        f'</span>'
+        f'<span style="display:inline-flex;align-items:center;gap:4px;'
+        f'background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);'
+        f'padding:2px 8px;border-radius:3px;font-family:\'JetBrains Mono\',monospace;'
+        f'font-size:0.6em;color:{_live_dot};font-weight:700;letter-spacing:0.08em;">'
+        f'<span style="width:5px;height:5px;border-radius:50%;background:{_live_dot};'
+        f'display:inline-block;animation:live-dot 1.5s ease-in-out infinite;"></span>'
+        f'{_live_lbl}</span>'
+        f'<span style="display:inline-flex;align-items:center;gap:4px;'
+        f'background:{_regime_color}18;border:1px solid {_regime_color}44;'
+        f'padding:2px 8px;border-radius:3px;font-family:\'JetBrains Mono\',monospace;'
+        f'font-size:0.6em;color:{_regime_color};font-weight:700;letter-spacing:0.06em;">'
+        f'● {_regime_str}</span>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── 2-column main layout ─────────────────────────────────────────────────
+    _cl, _cr = st.columns([58, 42], gap="medium")
+
+    # ─────────────────────────── LEFT COLUMN ──────────────────────────────────
+    with _cl:
+        # LIVE WATCHLIST panel
+        _wl_rows = ""
+        if _today_signals:
+            for _sig in _today_signals[:8]:
+                _t    = _sig.get("ticker", "")
+                _sc   = int(_sig.get("score", 0))
+                _pr   = _sig.get("price_at_signal") or 0
+                _lbl  = _sig.get("signal_label", "")
+                _sn, _sc_col = _sig_display(_lbl)
+                _pct1 = _sig.get("pct_change_1hr") or _sig.get("pct_change_1day")
+                if _pct1 is not None:
+                    _pct_html = (
+                        f'<span style="color:{"#10b981" if _pct1>=0 else "#f43f5e"};">'
+                        f'{_pct1:+.1f}%</span>'
+                    )
+                else:
+                    _pct_html = '<span style="color:#3a5068;">—</span>'
+                _pr_html = f'${_pr:.2f}' if _pr else '<span style="color:#3a5068;">—</span>'
+                _wl_rows += (
+                    f'<div style="display:grid;grid-template-columns:68px 44px 72px 72px 1fr;'
+                    f'padding:9px 14px;font-family:\'JetBrains Mono\',monospace;font-size:0.78em;'
+                    f'border-bottom:1px solid #0a1220;align-items:center;">'
+                    f'<span style="color:#e2eaf4;font-weight:600;">{_t}</span>'
+                    f'<span style="color:#e2eaf4;font-weight:700;">{_sc}</span>'
+                    f'<span style="color:#8293a8;">{_pr_html}</span>'
+                    f'<span>{_pct_html}</span>'
+                    f'<span style="color:{_sc_col};font-size:0.78em;font-weight:700;'
+                    f'letter-spacing:0.06em;">{_sn}</span>'
+                    f'</div>'
+                )
+        else:
+            _wl_rows = (
+                '<div style="padding:32px 14px;text-align:center;color:#3a5068;'
+                'font-family:\'JetBrains Mono\',monospace;font-size:0.72em;">'
+                'No signals today yet — market opens 9:30 AM ET</div>'
+            )
+
+        st.markdown(
+            f'<div style="border:1px solid #1a2740;border-radius:8px;overflow:hidden;'
+            f'background:#101928;margin-bottom:16px;">'
+            # panel header
+            f'<div style="padding:10px 14px;border-bottom:1px solid #1a2740;'
+            f'display:flex;align-items:center;justify-content:space-between;">'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.6em;font-weight:600;'
+            f'letter-spacing:0.12em;text-transform:uppercase;color:#3a5068;'
+            f'display:flex;align-items:center;gap:7px;">'
+            f'<span style="width:7px;height:7px;border-radius:50%;background:#10b981;'
+            f'display:inline-block;"></span>LIVE WATCHLIST</div>'
+            f'</div>'
+            # sub-header
+            f'<div style="padding:7px 14px 4px;display:flex;align-items:center;gap:6px;'
+            f'border-bottom:1px solid #0f1824;">'
+            f'<span style="width:6px;height:6px;border-radius:50%;background:#10b981;'
+            f'display:inline-block;animation:live-dot 2s ease-in-out infinite;"></span>'
+            f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.58em;'
+            f'color:#3a5068;letter-spacing:0.12em;font-weight:600;">TOP SIGNALS · TODAY</span>'
+            f'</div>'
+            # table header
+            f'<div style="display:grid;grid-template-columns:68px 44px 72px 72px 1fr;'
+            f'padding:5px 14px;font-family:\'JetBrains Mono\',monospace;font-size:0.58em;'
+            f'color:#3a5068;letter-spacing:0.1em;text-transform:uppercase;'
+            f'border-bottom:1px solid #0f1824;">'
+            f'<span>SYMBOL</span><span>SCORE</span><span>PRICE</span>'
+            f'<span>CHANGE</span><span>SIGNAL</span></div>'
+            # rows
+            f'{_wl_rows}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # REGIME DETECTOR panel
+        from config import SCORING_WEIGHTS as _sw
+        _factors_display = ["Technical", "Fundamental", "Risk", "Sentiment", "Catalyst"]
+        _factor_keys_d   = ["technical", "fundamental", "risk", "sentiment", "catalyst"]
+        _weights_display = [_sw.get(k, 0) * 100 for k in _factor_keys_d]
+        _bar_colors      = ["#0d9488", "#0ea5e9", "#a78bfa", "#5eead4", "#475569"]
+
+        st.markdown(
+            f'<div style="border:1px solid #1a2740;border-radius:8px;overflow:hidden;'
+            f'background:#101928;">'
+            f'<div style="padding:10px 14px;border-bottom:1px solid #1a2740;'
+            f'display:flex;align-items:center;justify-content:space-between;">'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.6em;font-weight:600;'
+            f'letter-spacing:0.12em;text-transform:uppercase;color:#3a5068;'
+            f'display:flex;align-items:center;gap:7px;">'
+            f'<span style="width:7px;height:7px;border-radius:50%;background:#f59e0b;'
+            f'display:inline-block;"></span>REGIME DETECTOR</div>'
+            f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.56em;'
+            f'color:#3a5068;letter-spacing:0.06em;">MARKET REGIME · ACTIVE</span>'
+            f'</div>'
+            f'<div style="padding:12px 14px 8px;">'
+            f'<div style="display:inline-flex;align-items:center;gap:6px;'
+            f'background:{_regime_color}18;border:1px solid {_regime_color}40;'
+            f'padding:5px 12px;border-radius:4px;margin-bottom:10px;">'
+            f'<span style="width:6px;height:6px;border-radius:50%;background:{_regime_color};'
+            f'display:inline-block;"></span>'
+            f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.7em;'
+            f'color:{_regime_color};font-weight:700;letter-spacing:0.05em;">● {_regime_str}</span>'
+            f'</div>'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.68em;color:#5c7a99;">'
+            f'VIX: <span style="color:#8293a8;">{_vix_str}</span>'
+            f'&nbsp;·&nbsp; ADV/DEC: <span style="color:#8293a8;">{_adv_str}</span>'
+            f'&nbsp;·&nbsp; Breadth: <span style="color:#8293a8;">{_breadth_str}</span>'
+            f'</div>'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.56em;'
+            f'color:#3a5068;letter-spacing:0.1em;text-transform:uppercase;margin-top:10px;">'
+            f'FACTOR WEIGHTS (1–10 DAY)</div>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        _fig_regime = go.Figure(go.Bar(
+            x=_factors_display, y=_weights_display,
+            marker_color=_bar_colors,
+            text=[f"{w:.0f}%" for w in _weights_display],
+            textposition="outside",
+            textfont=dict(family="JetBrains Mono", size=9, color="#5c7a99"),
+        ))
+        _fig_regime.update_layout(
+            height=115, margin=dict(l=0, r=0, t=16, b=0),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="JetBrains Mono", size=9, color="#5c7a99"),
+            xaxis=dict(showgrid=False, color="#3a5068", tickfont=dict(size=9),
+                       linecolor="#1a2740"),
+            yaxis=dict(visible=False),
+            showlegend=False,
+            bargap=0.35,
+        )
+        st.plotly_chart(_fig_regime, use_container_width=True,
+                        config={"displayModeBar": False})
+
+    # ─────────────────────────── RIGHT COLUMN ─────────────────────────────────
+    with _cr:
+        # FACTOR IC TRACKER panel
+        _ic_vals = {}
+        try:
+            from db.database import get_signal_log as _gsl2
+            import json as _json2
+            _ic_df = _gsl2(days=20)
+            if not _ic_df.empty and "score_breakdown" in _ic_df.columns:
+                for _fk in _factor_keys_d:
+                    _fscores = []
+                    for _, _row2 in _ic_df.iterrows():
+                        _bd = _row2.get("score_breakdown") or {}
+                        if isinstance(_bd, str):
+                            try: _bd = _json2.loads(_bd)
+                            except: _bd = {}
+                        _fv = _bd.get(_fk)
+                        if _fv is not None:
+                            _fscores.append(float(_fv))
+                    if _fscores:
+                        _ic_vals[_fk] = round(sum(_fscores) / len(_fscores) / 100, 3)
+        except Exception:
+            pass
+
+        _ic_display = [_ic_vals.get(k, 0) for k in _factor_keys_d]
+        _ic_bar_cols = [
+            "#0d9488" if v >= 0.12 else "#5eead4" if v >= 0.06 else "#475569"
+            for v in _ic_display
+        ]
+
+        _ic_badges = ""
+        for _lk, _lv in zip(_factor_keys_d, _ic_display):
+            if _lv:
+                _ic_badges += (
+                    f'<span style="background:#0f1824;border:1px solid #1a2740;border-radius:3px;'
+                    f'padding:2px 7px;font-family:\'JetBrains Mono\',monospace;font-size:0.6em;'
+                    f'color:#5c7a99;margin:0 4px 4px 0;display:inline-block;">'
+                    f'{_lk.title()} IC: <span style="color:#0d9488;">{_lv:.2f}</span></span>'
+                )
+
+        st.markdown(
+            f'<div style="border:1px solid #1a2740;border-radius:8px;overflow:hidden;'
+            f'background:#101928;margin-bottom:16px;">'
+            f'<div style="padding:10px 14px;border-bottom:1px solid #1a2740;">'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.6em;font-weight:600;'
+            f'letter-spacing:0.12em;text-transform:uppercase;color:#3a5068;">'
+            f'20-DAY ROLLING IC · ALL FACTORS</div></div>'
+            f'<div style="padding:4px 0 0;">',
+            unsafe_allow_html=True,
+        )
+
+        _fig_ic = go.Figure(go.Bar(
+            x=_factors_display, y=_ic_display,
+            marker_color=_ic_bar_cols,
+            text=[f"{v:.2f}" if v else "" for v in _ic_display],
+            textposition="outside",
+            textfont=dict(family="JetBrains Mono", size=9, color="#5c7a99"),
+        ))
+        _fig_ic.update_layout(
+            height=150, margin=dict(l=8, r=8, t=16, b=0),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="JetBrains Mono", size=9, color="#5c7a99"),
+            xaxis=dict(showgrid=False, color="#3a5068", tickfont=dict(size=9),
+                       linecolor="#1a2740"),
+            yaxis=dict(showgrid=True, gridcolor="#0f1824", tickfont=dict(size=8),
+                       zeroline=True, zerolinecolor="#1a2740"),
+            showlegend=False, bargap=0.35,
+        )
+        st.plotly_chart(_fig_ic, use_container_width=True,
+                        config={"displayModeBar": False})
+
+        if _ic_badges:
+            st.markdown(
+                f'<div style="padding:0 14px 10px;flex-wrap:wrap;display:flex;">'
+                f'{_ic_badges}</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # CONVICTION PANEL
+        _cv_count = len(_cv_entries)
+        _cv_rows = ""
+        if _cv_entries:
+            for _e in _cv_entries[:6]:
+                _et  = _e.get("ticker", "")
+                _es  = int(_e.get("composite") or _e.get("score") or _e.get("conviction") or 0)
+                _pts = []
+                if _e.get("ai_conviction") in ("Very High", "High"):
+                    _pts.append("High conviction")
+                if _e.get("ai_catalyst_quality") in ("Very Strong", "Strong"):
+                    _pts.append("Catalyst")
+                if _e.get("ai_setup_quality") in ("A+", "A"):
+                    _pts.append("A-grade setup")
+                _reason = " + ".join(_pts) if _pts else (
+                    (_e.get("ai_summary") or "Strong setup")[:44]
+                )
+                _cv_rows += (
+                    f'<div style="display:flex;align-items:center;gap:10px;'
+                    f'padding:9px 14px;border-bottom:1px solid #0a1220;">'
+                    f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.86em;'
+                    f'color:#e2eaf4;font-weight:700;min-width:50px;">{_et}</span>'
+                    f'<span style="background:#0d9488;color:#fff;font-family:\'JetBrains Mono\','
+                    f'monospace;font-size:0.68em;font-weight:700;padding:2px 7px;'
+                    f'border-radius:3px;">{_es}</span>'
+                    f'<span style="color:#5c7a99;font-family:\'JetBrains Mono\',monospace;'
+                    f'font-size:0.67em;flex:1;line-height:1.4;">{_reason}</span>'
+                    f'</div>'
+                )
+        else:
+            _cv_rows = (
+                '<div style="padding:24px 14px;text-align:center;color:#3a5068;'
+                'font-family:\'JetBrains Mono\',monospace;font-size:0.7em;">'
+                'No conviction picks — generate from sidebar</div>'
+            )
+
+        st.markdown(
+            f'<div style="border:1px solid #1a2740;border-radius:8px;overflow:hidden;'
+            f'background:#101928;">'
+            f'<div style="padding:10px 14px;border-bottom:1px solid #1a2740;'
+            f'display:flex;align-items:center;justify-content:space-between;">'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.6em;font-weight:600;'
+            f'letter-spacing:0.12em;text-transform:uppercase;color:#3a5068;'
+            f'display:flex;align-items:center;gap:7px;">'
+            f'<span style="width:7px;height:7px;border-radius:50%;background:#10b981;'
+            f'display:inline-block;"></span>CONVICTION PANEL</div>'
+            f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.58em;'
+            f'color:#0d9488;font-weight:600;">'
+            f'CONVICTION BUYS · THIS WEEK ({_cv_count})</span>'
+            f'</div>'
+            f'{_cv_rows}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Control strip ────────────────────────────────────────────────────────
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    _cc1, _cc2, _cc3 = st.columns([1, 1, 5])
+    with _cc1:
+        if _paused:
+            if st.button("▶ RESUME", use_container_width=True, key="dash_resume"):
+                try:
+                    from db.database import set_scanner_control as _ssc
+                    _ssc(paused=False); st.rerun()
+                except Exception as _e:
+                    st.error(str(_e))
+        else:
+            if st.button("⏸ PAUSE", use_container_width=True, key="dash_pause"):
+                try:
+                    from db.database import set_scanner_control as _ssc
+                    _ssc(paused=True); st.rerun()
+                except Exception as _e:
+                    st.error(str(_e))
+    with _cc2:
+        if st.button("SCANNING…" if _force_scan else "⚡ SCAN NOW",
+                     use_container_width=True, key="dash_scannow",
+                     disabled=_force_scan):
+            try:
+                from db.database import set_scanner_control as _ssc
+                _ssc(force_scan=True); st.rerun()
+            except Exception as _e:
+                st.error(str(_e))
+    with _cc3:
+        _today_n  = _sts.get("signals_today", 0)
+        _alerts_n = _sts.get("alerts_today", 0)
+        st.markdown(
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.68em;'
+            f'color:#3a5068;padding-top:8px;">'
+            f'<span style="color:#10b981;">{_today_n}</span> signals today'
+            f'&nbsp;·&nbsp;<span style="color:#f59e0b;">{_alerts_n}</span> alerts'
+            f'&nbsp;·&nbsp;Mode: <span style="color:#8293a8;">{_cur_mode}</span>'
+            f'&nbsp;·&nbsp;<span style="color:#8293a8;">{_scan_count:,} scans</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS
 # ══════════════════════════════════════════════════════════════════════════════
 tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(["Dashboard", "Scanner", "Portfolio", "Research", "Signals", "Alerts", "Performance", "System", "Config", "Paper Trading", "Health"])
 
 
-# ── TAB 0: CONTROL ───────────────────────────────────────────────────────────
+# ── TAB 0: DASHBOARD ─────────────────────────────────────────────────────────
 with tab0:
-    _live_control()
+    _terminal_dashboard()
 
 
 # ── TAB 1: SCANNER ────────────────────────────────────────────────────────────
