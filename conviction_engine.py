@@ -767,9 +767,9 @@ def _fallback_ai_analysis(data: dict) -> dict:
 
     if score >= 85:
         conviction = "Very High"
-    elif score >= 75:
-        conviction = "High"
     elif score >= 65:
+        conviction = "High"
+    elif score >= 55:
         conviction = "Medium"
     else:
         conviction = "Low"
@@ -798,7 +798,7 @@ def _fallback_ai_analysis(data: dict) -> dict:
 
     if score >= 85 and rvol >= 2.0:
         time_sens = "Act Now"
-    elif score >= 75:
+    elif score >= 65:
         time_sens = "Today"
     else:
         time_sens = "This Week"
@@ -824,7 +824,7 @@ def generate_live_conviction_list(session: str = "market") -> list:
     candidates = engine._load_todays_candidates()
 
     # Filter to high-composite candidates
-    candidates = [c for c in candidates if _safe(c.get("composite_score", 0)) >= 75]
+    candidates = [c for c in candidates if _safe(c.get("composite_score", 0)) >= 65]
 
     # Fetch live prices and filter out runaway movers
     enriched = []

@@ -23,7 +23,7 @@ FINNHUB_BASE = "https://finnhub.io/api/v1"
 CRITERIA = {
     "min_market_cap": 100_000_000,     # $100M floor — filters out micro-cap noise
     "max_market_cap": 20_000_000_000,  # $20B ceiling (small + mid-cap universe)
-    "min_adv":        1_000_000,       # 1M shares/day — ensures real institutional interest
+    "min_adv":        200_000,          # 200K shares/day — broad enough to capture emerging movers
     "min_price":      2.00,            # $2+ minimum — eliminates most penny/OTC noise
     "max_price":      300.0,           # $300 cap — focus on actionable price range
 }
@@ -316,7 +316,7 @@ def refresh_universe_async() -> threading.Thread:
 
 def get_universe_tickers(min_market_cap: int = 100_000_000,
                           max_market_cap: int = 20_000_000_000,
-                          min_adv: int = 1_000_000,
+                          min_adv: int = 200_000,
                           limit: int = 500) -> List[str]:
     """
     Fast path: return tickers from stock_universe (cached in DB).

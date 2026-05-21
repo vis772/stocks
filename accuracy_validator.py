@@ -7,8 +7,8 @@ from datetime import datetime
 from typing import Optional
 
 
-WIN_THRESHOLD  =  0.02   # >+2% = win
-LOSS_THRESHOLD = -0.02   # <-2% = loss
+WIN_THRESHOLD  =  0.01   # >+1% = win
+LOSS_THRESHOLD = -0.01   # <-1% = loss
 
 SCORE_BUCKETS = [
     (65, 70, "65-70"),

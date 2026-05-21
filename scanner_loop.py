@@ -1051,31 +1051,7 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                 print(f"  [signal_log] ✗ {ticker} | {signal_label} auto-suppressed (<30% win rate) — skipped")
                 continue
 
-            # ── Gate 1: Time gate — skip open/close noise windows ─────────────
-            from config import SESSION_OPEN_GATE, SESSION_CLOSE_GATE
-            _et_now = now_et()
-            _market_open      = _et_now.replace(hour=9,  minute=30, second=0, microsecond=0)
-            _market_close     = _et_now.replace(hour=16, minute=0,  second=0, microsecond=0)
-            _open_gate_end    = _market_open  + timedelta(minutes=SESSION_OPEN_GATE)
-            _close_gate_start = _market_close - timedelta(minutes=SESSION_CLOSE_GATE)
-            if _et_now <= _open_gate_end or _et_now >= _close_gate_start:
-                print(f"  [gate:time] {ticker} skipped — open/close noise window")
-                continue
-
-            # ── Gate 2: Volume gate — skip low-volume signals ─────────────────
-            from config import VOLUME_RATIO_GATE
-            _cur_vol = result.get("volume") or 0
-            _avg_vol = result.get("avg_volume") or 0
-            if _avg_vol > 0 and _cur_vol > 0 and (_cur_vol / _avg_vol) < VOLUME_RATIO_GATE:
-                print(f"  [gate:vol] {ticker} skipped — vol ratio {_cur_vol/_avg_vol:.2f}x < {VOLUME_RATIO_GATE}x")
-                continue
-
-            # ── Gate 3: Regime gate — suppress strong momentum in mean-reversion
-            if getattr(state, 'current_regime', '') == 'MEAN_REVERSION':
-                if score >= 75:
-                    print(f"  [gate:regime] {ticker} score={score:.0f} suppressed — MEAN_REVERSION regime")
-                    continue
-
+            # Log to signal_log first — always, if score passes floor
             try:
                 from db.database import log_signal
                 breakdown = {
@@ -1117,6 +1093,28 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                     print(f"  [signal_log] ✗ {ticker} — log_signal returned None (check DB connection)")
             except Exception as _e:
                 print(f"  [signal_log] FAILED for {ticker}: {_e}")
+
+            # Gates apply to ALERTS only — logging already happened above
+            from config import SESSION_OPEN_GATE, SESSION_CLOSE_GATE, ALERT_SCORE_MIN
+            _et_now = now_et()
+            _market_open      = _et_now.replace(hour=9,  minute=30, second=0, microsecond=0)
+            _market_close     = _et_now.replace(hour=16, minute=0,  second=0, microsecond=0)
+            _open_gate_end    = _market_open  + timedelta(minutes=SESSION_OPEN_GATE)
+            _close_gate_start = _market_close - timedelta(minutes=SESSION_CLOSE_GATE)
+            if _et_now <= _open_gate_end or _et_now >= _close_gate_start:
+                print(f"  [gate:time] {ticker} logged but alert suppressed — open/close window")
+                continue  # skip alert, next ticker
+
+            from config import VOLUME_RATIO_GATE
+            _cur_vol = result.get("volume") or 0
+            _avg_vol = result.get("avg_volume") or 0
+            if _avg_vol > 0 and _cur_vol > 0 and (_cur_vol / _avg_vol) < VOLUME_RATIO_GATE:
+                print(f"  [gate:vol] {ticker} logged but alert suppressed — vol {_cur_vol/_avg_vol:.2f}x < {VOLUME_RATIO_GATE}x")
+                continue
+
+            if getattr(state, 'current_regime', '') == 'MEAN_REVERSION' and score >= 75:
+                print(f"  [gate:regime] {ticker} logged but alert suppressed — MEAN_REVERSION")
+                continue
 
             if score >= PREDICTION_BUY_THRESHOLD:
                 state.log_alert(f"PRED BUY {ticker} ({score:.0f}pt)")

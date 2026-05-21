@@ -47,13 +47,13 @@ SIGNAL_THRESHOLDS = {
     "Avoid":                (0,  15),
 }
 
-# Signals scoring below this are not logged — Hold (35-45) and Trim (25-35)
-# showed 0% win rate at checkpoint 2. Only Watchlist and above are logged.
-MIN_SIGNAL_SCORE = 70
+# Minimum score to log to signal_log — needs 5-15 signals/day to build accuracy data
+MIN_SIGNAL_SCORE = 45
+ALERT_SCORE_MIN  = 60    # minimum score to fire a push alert (higher bar than logging)
 
-VOLUME_RATIO_GATE    = 1.5    # skip signal if current vol < 1.5x 3-month avg
-SESSION_OPEN_GATE    = 15     # skip first N minutes after market open (9:30-9:45 ET)
-SESSION_CLOSE_GATE   = 15     # skip last N minutes before market close (3:45-4:00 ET)
+VOLUME_RATIO_GATE    = 1.5    # alert gate: skip alert if vol < 1.5x 3-month avg (logging still happens)
+SESSION_OPEN_GATE    = 15     # alert gate: skip first N minutes after open (alerts only)
+SESSION_CLOSE_GATE   = 15     # alert gate: skip last N minutes before close (alerts only)
 
 # ─── Risk Flags ────────────────────────────────────────────────────────────────
 # These override scoring — a flagged stock gets a warning label regardless of score
