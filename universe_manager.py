@@ -21,11 +21,11 @@ from typing import List, Dict, Optional
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 
 CRITERIA = {
-    "min_market_cap": 20_000_000,      # $20M floor
+    "min_market_cap": 100_000_000,     # $100M floor — filters out micro-cap noise
     "max_market_cap": 20_000_000_000,  # $20B ceiling (small + mid-cap universe)
-    "min_adv":        500_000,         # 500K shares/day — meaningful liquidity
-    "min_price":      0.50,
-    "max_price":      500.0,
+    "min_adv":        1_000_000,       # 1M shares/day — ensures real institutional interest
+    "min_price":      2.00,            # $2+ minimum — eliminates most penny/OTC noise
+    "max_price":      300.0,           # $300 cap — focus on actionable price range
 }
 
 # Symbols containing these patterns are almost certainly not common stock
@@ -314,10 +314,10 @@ def refresh_universe_async() -> threading.Thread:
     return t
 
 
-def get_universe_tickers(min_market_cap: int = 20_000_000,
+def get_universe_tickers(min_market_cap: int = 100_000_000,
                           max_market_cap: int = 20_000_000_000,
-                          min_adv: int = 500_000,
-                          limit: int = 3000) -> List[str]:
+                          min_adv: int = 1_000_000,
+                          limit: int = 500) -> List[str]:
     """
     Fast path: return tickers from stock_universe (cached in DB).
     Falls back to legacy universe table → Finnhub symbol list → DEFAULT_UNIVERSE.
@@ -325,7 +325,7 @@ def get_universe_tickers(min_market_cap: int = 20_000_000,
     try:
         from db.database import get_active_universe
         tickers = get_active_universe(min_market_cap, max_market_cap, min_adv)
-        if len(tickers) >= 100:
+        if len(tickers) >= 50:
             return tickers[:limit]
         if tickers:
             _log(f"DB returned only {len(tickers)} tickers — too thin, checking fallbacks")

@@ -26,11 +26,10 @@ PRICE_MAX = 50.00                  # Maximum price — keep focus on speculative
 # Adjust them based on what you find actually correlates with your results.
 # They must sum to 1.0
 SCORING_WEIGHTS = {
-    "technical":    0.40,   # Strongest 1-day win predictor (+20.6 pt diff, checkpoint 2 data)
+    "technical":    0.43,   # Strongest predictor — 43% (includes former catalyst weight)
     "fundamental":  0.30,   # Second strongest (+11.9 pt diff)
     "risk":         0.20,   # Third (+8.5 pt diff)
     "sentiment":    0.07,   # Mild positive (+4.6 pt diff)
-    "catalyst":     0.03,   # Zero predictive value — minimal weight
 }
 
 # Validate weights sum to 1.0
@@ -50,7 +49,11 @@ SIGNAL_THRESHOLDS = {
 
 # Signals scoring below this are not logged — Hold (35-45) and Trim (25-35)
 # showed 0% win rate at checkpoint 2. Only Watchlist and above are logged.
-MIN_SIGNAL_SCORE = 45
+MIN_SIGNAL_SCORE = 70
+
+VOLUME_RATIO_GATE    = 1.5    # skip signal if current vol < 1.5x 3-month avg
+SESSION_OPEN_GATE    = 15     # skip first N minutes after market open (9:30-9:45 ET)
+SESSION_CLOSE_GATE   = 15     # skip last N minutes before market close (3:45-4:00 ET)
 
 # ─── Risk Flags ────────────────────────────────────────────────────────────────
 # These override scoring — a flagged stock gets a warning label regardless of score

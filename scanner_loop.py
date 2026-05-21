@@ -1051,6 +1051,31 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                 print(f"  [signal_log] ✗ {ticker} | {signal_label} auto-suppressed (<30% win rate) — skipped")
                 continue
 
+            # ── Gate 1: Time gate — skip open/close noise windows ─────────────
+            from config import SESSION_OPEN_GATE, SESSION_CLOSE_GATE
+            _et_now = now_et()
+            _market_open      = _et_now.replace(hour=9,  minute=30, second=0, microsecond=0)
+            _market_close     = _et_now.replace(hour=16, minute=0,  second=0, microsecond=0)
+            _open_gate_end    = _market_open  + timedelta(minutes=SESSION_OPEN_GATE)
+            _close_gate_start = _market_close - timedelta(minutes=SESSION_CLOSE_GATE)
+            if _et_now <= _open_gate_end or _et_now >= _close_gate_start:
+                print(f"  [gate:time] {ticker} skipped — open/close noise window")
+                continue
+
+            # ── Gate 2: Volume gate — skip low-volume signals ─────────────────
+            from config import VOLUME_RATIO_GATE
+            _cur_vol = result.get("volume") or 0
+            _avg_vol = result.get("avg_volume") or 0
+            if _avg_vol > 0 and _cur_vol > 0 and (_cur_vol / _avg_vol) < VOLUME_RATIO_GATE:
+                print(f"  [gate:vol] {ticker} skipped — vol ratio {_cur_vol/_avg_vol:.2f}x < {VOLUME_RATIO_GATE}x")
+                continue
+
+            # ── Gate 3: Regime gate — suppress strong momentum in mean-reversion
+            if getattr(state, 'current_regime', '') == 'MEAN_REVERSION':
+                if score >= 75:
+                    print(f"  [gate:regime] {ticker} score={score:.0f} suppressed — MEAN_REVERSION regime")
+                    continue
+
             try:
                 from db.database import log_signal
                 breakdown = {
@@ -1546,6 +1571,25 @@ def run_scanner():
                     run_prediction_scan(watchlist, state, session_mode="MARKET")
                     state.last_prediction_run = et
                     _log("info", "Prediction scan complete")
+                # ── Grade signals every 4 hours (not just 10 PM) ─────────────
+                _last_grade = state.last_accuracy_run_ts
+                if _last_grade:
+                    try:
+                        _last_grade_dt = datetime.fromisoformat(str(_last_grade).replace("Z", ""))
+                    except Exception:
+                        _last_grade_dt = now_et() - timedelta(hours=24)
+                else:
+                    _last_grade_dt = now_et() - timedelta(hours=24)
+                if (now_et() - _last_grade_dt).total_seconds() >= 4 * 3600:
+                    _grade_key = f"grade_{et.strftime('%Y%m%d_%H')}"
+                    if not state.already_alerted(_grade_key):
+                        try:
+                            from accuracy_validator import AccuracyValidator
+                            AccuracyValidator().grade_signals()
+                            state.last_accuracy_run_ts = now_et().isoformat()
+                            state.mark_alerted(_grade_key)
+                        except Exception as _ge:
+                            print(f"  [grader] periodic grade failed: {_ge}")
                 if is_market_hours() and (et - state.last_conviction_live_run).total_seconds() >= PREDICTION_SCAN_INTERVAL:
                     try:
                         from conviction_engine import generate_live_conviction_list
@@ -1635,6 +1679,25 @@ def run_scanner():
                     run_prediction_scan(watchlist, state, session_mode="AFTERHOURS")
                     state.last_prediction_run = et
                     _log("info", "After-hours prediction scan complete")
+                # ── Grade signals every 4 hours (not just 10 PM) ─────────────
+                _last_grade = state.last_accuracy_run_ts
+                if _last_grade:
+                    try:
+                        _last_grade_dt = datetime.fromisoformat(str(_last_grade).replace("Z", ""))
+                    except Exception:
+                        _last_grade_dt = now_et() - timedelta(hours=24)
+                else:
+                    _last_grade_dt = now_et() - timedelta(hours=24)
+                if (now_et() - _last_grade_dt).total_seconds() >= 4 * 3600:
+                    _grade_key = f"grade_{et.strftime('%Y%m%d_%H')}"
+                    if not state.already_alerted(_grade_key):
+                        try:
+                            from accuracy_validator import AccuracyValidator
+                            AccuracyValidator().grade_signals()
+                            state.last_accuracy_run_ts = now_et().isoformat()
+                            state.mark_alerted(_grade_key)
+                        except Exception as _ge:
+                            print(f"  [grader] periodic grade failed: {_ge}")
                 if et.hour == 20 and 30 <= et.minute < 35:
                     _ah_key = f"conviction_ah_{today_str}"
                     if not state.already_alerted(_ah_key):

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import traceback
 
-from config import SCORING_WEIGHTS, SIGNAL_THRESHOLDS, RISK_FLAGS
+from config import SCORING_WEIGHTS, SIGNAL_THRESHOLDS, RISK_FLAGS, MIN_SIGNAL_SCORE
 from data.market_data import fetch_ticker_snapshot, passes_universe_filter
 from data.sec_data import get_recent_filings, analyze_filing_risk, summarize_filing_with_claude
 from data.news_data import fetch_ticker_news, analyze_news_sentiment
@@ -82,42 +82,22 @@ def _fundamental_tier(fund_score: float) -> float:
 
 
 def _build_score_breakdown(
-    mode: str, has_factor_data: bool,
-    tech: float, cat: float, fund: float, risk_inv: float, raw_risk: float, sent: float,
-    factor_z_scores: Dict, quant_result: Dict, w: Dict,
+    tech: float, fund: float, risk_inv: float, raw_risk: float, sent: float,
+    w: Dict,
 ) -> Dict:
-    if has_factor_data:
-        cat_mult_str = "0.70×" if cat < 30 else "1.0×"
-        bd = {
-            "Scoring Mode":    "dynamic (quant factors available)",
-            "Technical":       f"{round(tech, 1)}/100  (weight: 40%)",
-            "Catalyst":        f"{round(cat, 1)}/100  (multiplier: {cat_mult_str})",
-            "Fundamental":     f"{round(fund, 1)}/100  (weight: 20%)",
-            "Risk (inverted)": f"{round(risk_inv, 1)}/100  (raw risk: {round(raw_risk, 1)}, weight: 30%)",
-            "Sentiment":       f"{round(sent, 1)}/100  (weight: 10%)",
-        }
-        if quant_result:
-            bd["Quant Composite"] = f"{quant_result.get('composite_score', 0):.1f}/100"
-        if factor_z_scores:
-            top_keys = list(factor_z_scores.keys())[:3]
-            bd["Quant Factors"] = f"{len(factor_z_scores)} factors — top: {', '.join(top_keys)}"
-    else:
-        tier_score = _fundamental_tier(fund)
-        bd = {
-            "Scoring Mode":    "static (no quant factor data)",
-            "Technical":       f"{round(tech, 1)}/100  (weight: {w['technical']:.0%})",
-            "Catalyst":        f"{round(cat, 1)}/100  (weight: {w['catalyst']:.0%})",
-            "Fundamental":     f"{round(fund, 1)}/100  (weight: {w['fundamental']:.0%})",
-            "Risk (inverted)": f"{round(risk_inv, 1)}/100  (raw risk: {round(raw_risk, 1)}, weight: {w['risk']:.0%})",
-            "Sentiment":       f"{round(sent, 1)}/100  (weight: {w['sentiment']:.0%})",
-            "Fund Tier (10%)": f"{tier_score:.0f}/100",
-        }
+    bd = {
+        "Scoring Mode":    "unified (four-factor formula)",
+        "Technical":       f"{round(tech, 1)}/100  (weight: {w['technical']:.0%})",
+        "Fundamental":     f"{round(fund, 1)}/100  (weight: {w['fundamental']:.0%})",
+        "Risk (inverted)": f"{round(risk_inv, 1)}/100  (raw risk: {round(raw_risk, 1)}, weight: {w['risk']:.0%})",
+        "Sentiment":       f"{round(sent, 1)}/100  (weight: {w['sentiment']:.0%})",
+    }
     return bd
 
 
 def _add_gap_continuation_to_breakdown(bd: Dict, gap_continuation: bool, prev_gap_pct: float) -> Dict:
     if gap_continuation:
-        bd["Gap Continuation"] = f"+15 bonus applied (prev-session gap: {prev_gap_pct:+.1f}%)"
+        bd["Gap Continuation"] = f"+8 added to technical score before formula (prev-session gap: {prev_gap_pct:+.1f}%)"
     return bd
 
 
@@ -212,7 +192,6 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
     # Step 6: Scoring
     tech_score       = technicals.get("technical_score", 50)
     catalyst_result  = score_catalyst(filings, news_sentiment, snapshot)
-    cat_score        = catalyst_result["catalyst_score"]
     fund_result      = score_fundamentals(snapshot)
     fund_score       = fund_result["fundamental_score"]
     risk_result      = score_risk(snapshot, sec_analysis["active_flags"])
@@ -220,81 +199,50 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
     risk_contribution = 100 - raw_risk
     sent_score       = news_sentiment.get("sentiment_score", 50)
 
-    # Step 6b: Multi-factor scoring via quant engine (best-effort)
-    quant_result: Dict = {}
-    try:
-        if os.environ.get("AXIOM_QUANT_MODE", "1") == "1":
-            from quant.factor_engine import MultiFactorScorer
-            _hist = snapshot.get("_history")
-            if _hist is not None and not _hist.empty:
-                quant_result = MultiFactorScorer().score_ticker(
-                    ticker, snapshot, _hist, regime="NEUTRAL", log_factors=True
-                )
-    except Exception:
-        pass
-
-    # Step 7: Hybrid Final Score
-    #
-    # PATH A — complete factor data (>= 3 factors from MultiFactorScorer):
-    #   Tech 40%, Risk 30%, Fund 20%, Sentiment 10%
-    #   Catalyst is a quality multiplier: score × 0.70 if catalyst_score < 30
-    #
-    # PATH B — insufficient factor data (new ticker or quant engine skipped):
-    #   Existing static weights blended with a fundamental quality tier at 10%
-    #   final = static_score × 0.90 + fund_tier × 0.10
-    factor_z_scores = quant_result.get("factor_z_scores", {})
-    _has_factor_data = len(factor_z_scores) >= 3
-
-    if _has_factor_data:
-        base_score = (
-            tech_score        * 0.40 +
-            risk_contribution * 0.30 +
-            fund_score        * 0.20 +
-            sent_score        * 0.10
-        )
-        catalyst_mult = 0.70 if cat_score < 30 else 1.0
-        final_score   = round(base_score * catalyst_mult, 1)
-        _scoring_mode = "dynamic"
-    else:
-        w = weights if weights is not None else SCORING_WEIGHTS
-        static_score = (
-            tech_score        * w["technical"]   +
-            cat_score         * w["catalyst"]    +
-            fund_score        * w["fundamental"] +
-            risk_contribution * w["risk"]        +
-            sent_score        * w["sentiment"]
-        )
-        fund_tier   = _fundamental_tier(fund_score)
-        final_score = round(static_score * 0.90 + fund_tier * 0.10, 1)
-        _scoring_mode = "static"
-
-    # Step 7.5: Gap-Continuation Bonus
-    #
-    # Catches day-2 runners like FCEL: previous session gapped up >5% and the
-    # stock is still technically sound — high probability of continuation.
-    # Conditions: prev-session gap > 5% AND tech_score > 60 AND fund_score > 65
-    # Effect: +15 to final_score (capped at 100), signal overridden to "GAP_CONTINUATION"
-    _gap_continuation     = False
-    _prev_gap_pct         = 0.0
+    # Step 6b: Gap-Continuation — detected before scoring so the +8 feeds into formula
+    _gap_continuation = False
+    _prev_gap_pct     = 0.0
     _gc_hist = snapshot.get("_history")
     if _gc_hist is not None and len(_gc_hist) >= 3:
         try:
-            _prev_open  = float(_gc_hist["Open"].iloc[-2])
+            _prev_open   = float(_gc_hist["Open"].iloc[-2])
             _prior_close = float(_gc_hist["Close"].iloc[-3])
             if _prior_close > 0:
                 _prev_gap_pct = (_prev_open - _prior_close) / _prior_close * 100
                 if _prev_gap_pct > 5.0 and tech_score > 60 and fund_score > 65:
-                    final_score = min(100.0, round(final_score + 15.0, 1))
+                    tech_score = min(100.0, tech_score + 8.0)
                     _gap_continuation = True
         except Exception:
             pass
 
     if _gap_continuation:
-        technicals["gap_continuation"]     = True
-        technicals["prev_gap_pct"]         = round(_prev_gap_pct, 2)
+        technicals["gap_continuation"] = True
+        technicals["prev_gap_pct"]     = round(_prev_gap_pct, 2)
+
+    # Step 7: Unified Final Score — one formula, four factors
+    w = weights if weights is not None else SCORING_WEIGHTS
+    risk_inv = 100.0 - float(raw_risk or 50)
+    final_score = (
+        float(tech_score  or 50) * w.get("technical",   0.43) +
+        float(fund_score  or 50) * w.get("fundamental", 0.30) +
+        risk_inv                 * w.get("risk",        0.20) +
+        float(sent_score  or 50) * w.get("sentiment",   0.07)
+    )
+    final_score = round(min(max(final_score, 0), 100), 1)
+
+    # Step 7.5: MIN_SIGNAL_SCORE early-return gate
+    if final_score < MIN_SIGNAL_SCORE:
+        return {
+            **result,
+            "company_name":  snapshot.get("company_name", ticker),
+            "price":         snapshot.get("price"),
+            "market_cap":    snapshot.get("market_cap"),
+            "filtered_out":  True,
+            "filter_reason": f"Score {final_score} below MIN_SIGNAL_SCORE ({MIN_SIGNAL_SCORE})",
+        }
 
     # Step 8: Signal
-    signal = "GAP_CONTINUATION" if _gap_continuation else _score_to_signal(final_score)
+    signal = _score_to_signal(final_score)
 
     # Step 9: Risk Flags
     all_flags = list(set(
@@ -325,7 +273,7 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
         "avg_volume":      snapshot.get("avg_volume"),
         "relative_volume": snapshot.get("relative_volume"),
         "technical_score":   round(tech_score, 1),
-        "catalyst_score":    round(cat_score, 1),
+        "catalyst_score":    round(catalyst_result.get("catalyst_score", 0), 1),
         "fundamental_score": round(fund_score, 1),
         "risk_score":        round(raw_risk, 1),
         "sentiment_score":   round(sent_score, 1),
@@ -367,16 +315,13 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
         "sector_return_20d":      snapshot.get("sector_return_20d"),
         "stock_vs_sector":        snapshot.get("stock_vs_sector"),
         "sector_rs_label":        snapshot.get("sector_rs_label"),
-        "scoring_path":           _scoring_mode,
-        "catalyst_mult":          catalyst_mult if _has_factor_data else 1.0,
+        "scoring_path":           "unified",
         "gap_continuation":       _gap_continuation,
         "gap_continuation_pct":   round(_prev_gap_pct, 2) if _gap_continuation else 0.0,
         "score_breakdown": _add_gap_continuation_to_breakdown(
             _build_score_breakdown(
-                _scoring_mode, _has_factor_data,
-                tech_score, cat_score, fund_score, risk_contribution, raw_risk, sent_score,
-                factor_z_scores, quant_result,
-                weights if weights is not None else SCORING_WEIGHTS,
+                tech_score, fund_score, risk_inv, raw_risk, sent_score,
+                w,
             ),
             _gap_continuation, _prev_gap_pct,
         ),
@@ -502,7 +447,7 @@ def _generate_summary(
     if technicals.get("gap_continuation") and prev_gap:
         parts.append(
             f"GAP CONTINUATION: Previous session gapped up {prev_gap:.1f}% and technical + "
-            f"fundamental scores remain strong — day-2 continuation setup. +15 score bonus applied."
+            f"fundamental scores remain strong — day-2 continuation setup. +8 added to technical score."
         )
 
     if vol:

@@ -56,10 +56,11 @@ def get_close_n_trading_days_after(ticker: str, entry_date, n: int):
 
 def _fetch_closes_after(ticker: str, entry_date) -> dict:
     """
-    Single yf.download() per signal. Returns {1: close, 3: close, 5: close}
+    Single yf.download() per signal (with retry). Returns {1: close, 3: close, 5: close}
     for whichever horizons have data. entry_date is excluded (strictly after).
     """
     import yfinance as yf
+    import time as _time
     from datetime import timedelta
 
     if isinstance(entry_date, str):
@@ -67,26 +68,27 @@ def _fetch_closes_after(ticker: str, entry_date) -> dict:
     elif hasattr(entry_date, "date"):
         entry_date = entry_date.date()
 
-    end = entry_date + timedelta(days=30)  # enough for 10 trading days + holidays
+    end = entry_date + timedelta(days=30)
 
-    try:
-        df = yf.download(ticker, start=str(entry_date), end=str(end),
-                         progress=False, auto_adjust=True)
-    except Exception:
-        return {}
-
-    if df is None or df.empty:
-        return {}
-
-    close_col = df["Close"]
-    if isinstance(close_col, type(df)):   # MultiIndex → DataFrame, take first col
-        close_col = close_col.iloc[:, 0]
-    closes = close_col.dropna()
-
-    idx_dates = [d.date() if hasattr(d, "date") else d for d in closes.index]
-    after = [float(c) for d, c in zip(idx_dates, closes) if d > entry_date]
-
-    return {n: after[n - 1] for n in [1, 3, 5, 10] if len(after) >= n}
+    for attempt in range(3):
+        try:
+            df = yf.download(ticker, start=str(entry_date), end=str(end),
+                             progress=False, auto_adjust=True)
+            if df is None or df.empty:
+                break
+            close_col = df["Close"]
+            if isinstance(close_col, type(df)):
+                close_col = close_col.iloc[:, 0]
+            closes = close_col.dropna()
+            idx_dates = [d.date() if hasattr(d, "date") else d for d in closes.index]
+            after = [float(c) for d, c in zip(idx_dates, closes) if d > entry_date]
+            return {n: after[n - 1] for n in [1, 3, 5, 10] if len(after) >= n}
+        except Exception as _e:
+            if attempt < 2:
+                _time.sleep(1.0 * (attempt + 1))
+            else:
+                print(f"  [accuracy] _fetch_closes_after {ticker} failed after 3 attempts: {_e}")
+    return {}
 
 
 def _safe(v, fallback=0.0):
@@ -126,7 +128,7 @@ class AccuracyValidator:
 
         _LABELS = (
             "'Strong Buy Candidate','Speculative Buy','Watchlist',"
-            "'Hold','Trim','Sell','Avoid','Gap-Up'"
+            "'Hold','Trim','Sell','Avoid','Gap-Up','GAP_CONTINUATION'"
         )
         _BASE = (
             "price_at_signal IS NOT NULL AND price_at_signal > 0 "
@@ -203,7 +205,7 @@ class AccuracyValidator:
                     failed += 1
                     print(f"  [accuracy] {ticker} id={sig_id} error: {_e}")
 
-                if i % 10 == 0:
+                if i % 50 == 0:
                     print(f"  [AccuracyValidator] Graded {i}/{total}...")
 
         # Pass 1: signals where outcome_1d hasn't been touched yet (>= 1 day old)
@@ -626,6 +628,35 @@ def _write_signal_log_outcomes(sig_id: int, ret_1d, ret_3d, ret_5d) -> None:
             conn.commit(); conn.close()
     except Exception as e:
         print(f"  [accuracy] _write_signal_log_outcomes failed for sig_id={sig_id}: {e}")
+
+
+def force_grade_all_pending() -> dict:
+    """
+    Force-grade ALL pending signals regardless of age. Used for catching up
+    after validator downtime. Safe to call any time — COALESCE prevents overwrites.
+    """
+    from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM signal_log WHERE outcome_1d IS NULL "
+                "AND price_at_signal IS NOT NULL AND price_at_signal > 0"
+            )
+            pending = cur.fetchone()[0]; cur.close(); conn.close()
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM signal_log WHERE outcome_1d IS NULL "
+                "AND price_at_signal IS NOT NULL AND price_at_signal > 0"
+            )
+            pending = cur.fetchone()[0]; conn.close()
+        print(f"  [accuracy] force_grade: {pending} pending signals")
+        graded = AccuracyValidator().grade_signals()
+        return {"graded": graded, "was_pending": pending}
+    except Exception as e:
+        print(f"  [accuracy] force_grade_all_pending failed: {e}")
+        return {"graded": 0, "was_pending": 0, "error": str(e)}
 
 
 def run_nightly_validation():

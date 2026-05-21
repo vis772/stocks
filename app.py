@@ -3567,6 +3567,14 @@ with tab10:
         if st.button("↻ Refresh Now", key="health_manual_refresh"):
             st.rerun()
 
+        if st.button("⚡ Force Grade Pending Signals", key="force_grade_btn"):
+            try:
+                from accuracy_validator import force_grade_all_pending
+                _result = force_grade_all_pending()
+                st.success(f"Graded {_result.get('graded', 0)} signals (was {_result.get('was_pending', 0)} pending)")
+            except Exception as _fge:
+                st.error(f"Force grade failed: {_fge}")
+
     except ImportError as _hi:
         st.error(f"Health monitor not available: {_hi}")
     except Exception as _he:
