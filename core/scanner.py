@@ -197,7 +197,7 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
             if _prior_close > 0:
                 _prev_gap_pct = (_prev_open - _prior_close) / _prior_close * 100
                 if _prev_gap_pct > 5.0 and tech_score > 60 and fund_score > 65:
-                    tech_score = min(100.0, tech_score + 8.0)
+                    tech_score = min(100.0, tech_score + 15.0)
                     _gap_continuation = True
         except Exception:
             pass
