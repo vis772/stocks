@@ -69,18 +69,6 @@ def _check_fcf_gate(snapshot: Dict) -> Dict:
     return {"passes": True, "reason": "FCF within acceptable range"}
 
 
-def _fundamental_tier(fund_score: float) -> float:
-    """Map fundamental score to a simple quality tier (0-100) for the static-path fallback."""
-    if fund_score >= 70:
-        return 80.0
-    elif fund_score >= 50:
-        return 60.0
-    elif fund_score >= 35:
-        return 40.0
-    else:
-        return 20.0
-
-
 def _build_score_breakdown(
     tech: float, fund: float, risk_inv: float, raw_risk: float, sent: float,
     w: Dict,
@@ -196,7 +184,6 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
     fund_score       = fund_result["fundamental_score"]
     risk_result      = score_risk(snapshot, sec_analysis["active_flags"])
     raw_risk         = risk_result["risk_score"]
-    risk_contribution = 100 - raw_risk
     sent_score       = news_sentiment.get("sentiment_score", 50)
 
     # Step 6b: Gap-Continuation — detected before scoring so the +8 feeds into formula
