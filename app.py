@@ -18,10 +18,7 @@ from db.database import (initialize_db, upsert_holding, delete_holding, get_port
                           create_session, get_user_by_username, create_user, update_last_login,
                           get_all_users, delete_user, change_user_password)
 from auth import check_password, hash_password, validate_password_strength
-from core.scanner import scan_ticker, scan_universe
-from analysis.portfolio import analyze_holding, compute_portfolio_summary
-from data.market_data import fetch_ticker_snapshot, get_price_history, get_chart_data
-from analysis.technicals import compute_technicals
+# Heavy modules loaded lazily inside their tabs — keeps startup fast
 
 # ── Cached DB helpers (ttl=60s keeps the dashboard snappy without hammering PG) ─
 
@@ -50,6 +47,38 @@ def _cached_conviction_list(max_age_minutes: int = 90) -> dict:
         return {"entries": [], "is_stale": True, "is_yesterday": False, "generated_at": None, "session": ""}
 
 # ──────────────────────────────────────────────────────────────────────────────
+
+@st.cache_resource(show_spinner=False)
+def _init_db_once():
+    initialize_db()
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_scanner_control() -> dict:
+    try:
+        from db.database import get_scanner_control
+        return get_scanner_control()
+    except Exception:
+        return {"paused": False, "force_scan": False, "current_mode": "UNKNOWN"}
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_control_stats() -> dict:
+    try:
+        from db.database import get_control_stats
+        return get_control_stats()
+    except Exception:
+        return {"signals_today": 0, "alerts_today": 0, "scan_count": 0,
+                "last_updated": None, "top_signal": None}
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_signal_log_today() -> list:
+    try:
+        from db.database import get_signal_log
+        df = get_signal_log(days=1)
+        if df.empty:
+            return []
+        return df.sort_values("score", ascending=False).drop_duplicates("ticker").head(20).to_dict("records")
+    except Exception:
+        return []
 
 _CONFIG_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_overrides.json")
 
@@ -871,6 +900,7 @@ def render_deep_dive(r):
     chart_key = f"chart_{ticker}_{tf}"
     if chart_key not in st.session_state or do_refresh:
         with st.spinner("Loading chart data…"):
+            from data.market_data import get_chart_data
             st.session_state[chart_key] = get_chart_data(ticker, tf)
     hist = st.session_state[chart_key]
 
@@ -1067,7 +1097,7 @@ def _require_auth() -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # INIT
 # ══════════════════════════════════════════════════════════════════════════════
-initialize_db()
+_init_db_once()
 _current_user = _require_auth()
 
 
@@ -1186,6 +1216,7 @@ with st.sidebar:
             st.warning("Add tickers first.")
         else:
             prog = st.progress(0, text="Starting...")
+            from core.scanner import scan_ticker
             results = []
             for i, t in enumerate(tickers):
                 prog.progress((i+1)/len(tickers), text=f"Scanning {t}... {i+1}/{len(tickers)}")
@@ -1915,23 +1946,13 @@ def _live_alerts_feed():
         """)
 
 
+@st.fragment(run_every=15)
 def _terminal_dashboard():
-    """Tab 0: Terminal-style live dashboard — watchlist, regime, factor IC, conviction."""
-    # Auto-refresh every 15 s
-    st.components.v1.html(
-        '<script>setTimeout(()=>window.parent.location.reload(),15000);</script>',
-        height=0,
-    )
+    """Tab 0: Terminal-style live dashboard — auto-refreshes only this fragment."""
 
-    # ── Data loading ─────────────────────────────────────────────────────────
-    try:
-        from db.database import get_scanner_control, get_control_stats
-        _ctl = get_scanner_control()
-        _sts = get_control_stats()
-    except Exception:
-        _ctl = {"paused": False, "force_scan": False, "current_mode": "UNKNOWN"}
-        _sts = {"signals_today": 0, "alerts_today": 0, "scan_count": 0,
-                "last_updated": None, "top_signal": None}
+    # ── Data loading (all cached — no raw DB calls on refresh) ───────────────
+    _ctl = _cached_scanner_control()
+    _sts = _cached_control_stats()
 
     _cur_mode   = _ctl.get("current_mode", "UNKNOWN")
     _paused     = _ctl.get("paused", False)
@@ -1954,15 +1975,7 @@ def _terminal_dashboard():
             pass
 
     # Today's signals
-    _today_signals = []
-    try:
-        from db.database import get_signal_log as _gsl_dash
-        _sl_df = _gsl_dash(days=1)
-        if not _sl_df.empty:
-            _sl_df = _sl_df.sort_values("score", ascending=False).drop_duplicates("ticker")
-            _today_signals = _sl_df.head(20).to_dict("records")
-    except Exception:
-        pass
+    _today_signals = _cached_signal_log_today()
 
     # Regime
     _regime_str   = "SCANNING"
@@ -2469,16 +2482,19 @@ with tab2:
                     technicals    = {"rsi_14": sr.get("rsi"), "macd_bullish": sr.get("macd_bullish")}
                     fundamentals  = {"runway_months": sr.get("runway_months")}
                 else:
+                    from data.market_data import fetch_ticker_snapshot
                     snap          = fetch_ticker_snapshot(ticker)
                     current_price = snap.get("price", avg_cost) if snap else avg_cost
                     final_score   = 50; active_flags = []; technicals = {}; fundamentals = {}
 
+                from analysis.portfolio import analyze_holding
                 analysis = analyze_holding(ticker=ticker, shares=shares, avg_cost=avg_cost,
                     current_price=current_price, final_score=final_score,
                     active_flags=active_flags, technicals=technicals, fundamentals=fundamentals)
                 analysis["final_score"] = final_score
                 holdings_analysis.append(analysis)
 
+        from analysis.portfolio import compute_portfolio_summary
         summary   = compute_portfolio_summary(holdings_analysis)
         total_pnl = summary.get("total_pnl",0)
         pnl_color = "#16a34a" if total_pnl >= 0 else "#dc2626"
@@ -2563,6 +2579,7 @@ with tab3:
 
     if run_dive and dive_ticker:
         with st.spinner(f"Running full analysis on {dive_ticker}..."):
+            from core.scanner import scan_ticker
             result = scan_ticker(dive_ticker, save=False, weights=st.session_state.get("scoring_weights"))
             if result:
                 st.session_state["dive_result"] = result
