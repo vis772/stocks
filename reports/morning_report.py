@@ -380,11 +380,14 @@ def _build_pdf(signals: list[dict], now: datetime) -> str:
 
 
 def generate_morning_report() -> Optional[str]:
-    """Generate PDF from today's signals and send via Pushover with PDF attached.
+    """Generate PDF from today's signals, upload to Filebin, and send download link via Pushover.
 
+    Falls back to attaching the PDF directly if the Filebin upload fails.
     Returns the local file path or None.
     """
-    from alerts import send_alert_with_pdf, PRIORITY_HIGH
+    import uuid
+    import requests as _requests
+    from alerts import send_alert, send_alert_with_pdf, PRIORITY_HIGH
 
     now = datetime.now(ET)
     print(f"\n[MORNING REPORT] Generating — {now.strftime('%Y-%m-%d %H:%M ET')}")
@@ -408,15 +411,47 @@ def generate_morning_report() -> Optional[str]:
     with open(fname, "rb") as f:
         pdf_bytes = f.read()
 
-    sent = send_alert_with_pdf(
-        title    = "📊 Axiom Morning Report",
-        message  = msg,
-        pdf_bytes = pdf_bytes,
-        filename = os.path.basename(fname),
-        priority = PRIORITY_HIGH,
-    )
+    # ── Upload to Filebin ──────────────────────────────────────────────────────
+    bin_id   = uuid.uuid4().hex[:12]
+    filename = os.path.basename(fname)
+    filebin_url = f"https://filebin.net/{bin_id}/{filename}"
+    uploaded = False
+    try:
+        resp = _requests.put(
+            filebin_url,
+            data=pdf_bytes,
+            headers={"Content-Type": "application/pdf"},
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            uploaded = True
+            print(f"  [morning_report] Filebin upload OK: {filebin_url}")
+        else:
+            print(f"  [morning_report] Filebin upload failed ({resp.status_code}): {resp.text[:200]}")
+    except Exception as e:
+        print(f"  [morning_report] Filebin upload error: {e}")
 
-    if not sent:
-        print("  [morning_report] Pushover keys not set — PDF saved locally only")
+    if uploaded:
+        print(filebin_url)
+        sent = send_alert(
+            title     = "📊 Axiom Morning Report",
+            message   = msg,
+            priority  = PRIORITY_HIGH,
+            url       = filebin_url,
+            url_title = "Download PDF",
+        )
+        if not sent:
+            print("  [morning_report] Pushover keys not set — Filebin link saved locally only")
+    else:
+        print("  [morning_report] Falling back to PDF attachment via Pushover")
+        sent = send_alert_with_pdf(
+            title     = "📊 Axiom Morning Report",
+            message   = msg,
+            pdf_bytes = pdf_bytes,
+            filename  = filename,
+            priority  = PRIORITY_HIGH,
+        )
+        if not sent:
+            print("  [morning_report] Pushover keys not set — PDF saved locally only")
 
     return fname
