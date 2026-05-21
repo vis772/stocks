@@ -358,6 +358,7 @@ def _init_postgres():
             reasoning      TEXT,
             composite      FLOAT,
             quant_adj      FLOAT,
+            catalyst_mult  NUMERIC DEFAULT 1.0,
             created_at     TIMESTAMP DEFAULT NOW()
         )
     """)
@@ -470,6 +471,7 @@ def _init_postgres():
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS ai_time_sensitivity TEXT",
         "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS outcome_label       TEXT DEFAULT 'pending'",
         "ALTER TABLE scanner_control ADD COLUMN IF NOT EXISTS finnhub_degraded    BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE conviction_buys ADD COLUMN IF NOT EXISTS catalyst_mult       NUMERIC DEFAULT 1.0",
     ]:
         try:
             cur.execute("SAVEPOINT _mig")
@@ -792,6 +794,7 @@ def _init_sqlite():
             reasoning      TEXT,
             composite      REAL,
             quant_adj      REAL,
+            catalyst_mult  REAL DEFAULT 1.0,
             created_at     TEXT DEFAULT (datetime('now'))
         )
     """)
@@ -895,6 +898,7 @@ def _init_sqlite():
         "ALTER TABLE conviction_buys ADD COLUMN ai_time_sensitivity TEXT",
         "ALTER TABLE conviction_buys ADD COLUMN outcome_label       TEXT DEFAULT 'pending'",
         "ALTER TABLE scanner_control ADD COLUMN finnhub_degraded    INTEGER DEFAULT 0",
+        "ALTER TABLE conviction_buys ADD COLUMN catalyst_mult       REAL DEFAULT 1.0",
     ]:
         try:
             cur.execute(col_sql)

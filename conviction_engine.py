@@ -316,6 +316,7 @@ class ConvictionEngine:
                 "ai_catalyst_quality": "Strong" if data.get("has_sec_catalyst") else "Moderate",
                 "ai_risk":            "Thin small-cap liquidity risk",
                 "ai_time_sensitivity": "Act Now" if hold == "DAYTRADE" else "Today",
+                "catalyst_mult":      float(data.get("catalyst_mult", 1.0) or 1.0),
                 "_params":            params,
                 "_data":              data,
             })
@@ -337,7 +338,7 @@ class ConvictionEngine:
                 cur.execute("""
                     SELECT sl.ticker, sl.score, sl.price_at_signal,
                            sl.quant_adj, sl.source_quality, sl.volume_at_signal,
-                           sl.score_breakdown
+                           sl.score_breakdown, sl.catalyst_mult
                     FROM signal_log sl
                     WHERE DATE(sl.created_at AT TIME ZONE 'America/New_York') = CURRENT_DATE AT TIME ZONE 'America/New_York'
                       AND sl.score >= 65
@@ -352,7 +353,7 @@ class ConvictionEngine:
                 cur.execute("""
                     SELECT sl.ticker, sl.score, sl.price_at_signal,
                            sl.quant_adj, sl.source_quality, sl.volume_at_signal,
-                           sl.score_breakdown
+                           sl.score_breakdown, sl.catalyst_mult
                     FROM signal_log sl
                     WHERE DATE(sl.created_at) = DATE('now')
                       AND sl.score >= 65
@@ -517,6 +518,7 @@ class ConvictionEngine:
                     "rs_vs_iwm_5d":      1.0,
                     "prev_close":        0.0,
                     "factor_z_scores":   factor_z_scores,
+                    "catalyst_mult":     float(d.get("catalyst_mult") or 1.0),
                 })
             return candidates
         except Exception as e:
@@ -576,38 +578,40 @@ def save_buy_list(buy_list: list, session: str) -> None:
             cur.execute("DELETE FROM conviction_buys WHERE date = %s AND session = %s", (today, session))
             for b in buy_list:
                 p = b.get("_params", {})
+                catalyst_mult = float(b.get("catalyst_mult", 1.0) or 1.0)
                 cur.execute("""
                     INSERT INTO conviction_buys
                         (date, session, rank, ticker, conviction, hold_type,
                          entry, stop_loss, target_1, target_2, target_3,
                          position_pct, expected_value, reasoning, composite, quant_adj,
-                         signal_label)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         signal_label, catalyst_mult)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (today, session, b["rank"], b["ticker"], b["conviction"], b["hold_type"],
                       p.get("entry"), p.get("stop_loss"), p.get("target_1"),
                       p.get("target_2"), p.get("target_3"), p.get("position_size"),
                       p.get("expected_value"), b.get("why"),
                       b.get("composite"), b.get("quant_adj"),
-                      b.get("signal_label", "Conviction Buy")))
+                      b.get("signal_label", "Conviction Buy"), catalyst_mult))
             conn.commit(); cur.close(); _put_pg_conn(conn)
         else:
             conn = _get_sqlite_conn()
             conn.execute("DELETE FROM conviction_buys WHERE date=? AND session=?", (today, session))
             for b in buy_list:
                 p = b.get("_params", {})
+                catalyst_mult = float(b.get("catalyst_mult", 1.0) or 1.0)
                 conn.execute("""
                     INSERT INTO conviction_buys
                         (date, session, rank, ticker, conviction, hold_type,
                          entry, stop_loss, target_1, target_2, target_3,
                          position_pct, expected_value, reasoning, composite, quant_adj,
-                         signal_label)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         signal_label, catalyst_mult)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (today, session, b["rank"], b["ticker"], b["conviction"], b["hold_type"],
                       p.get("entry"), p.get("stop_loss"), p.get("target_1"),
                       p.get("target_2"), p.get("target_3"), p.get("position_size"),
                       p.get("expected_value"), b.get("why"),
                       b.get("composite"), b.get("quant_adj"),
-                      b.get("signal_label", "Conviction Buy")))
+                      b.get("signal_label", "Conviction Buy"), catalyst_mult))
             conn.commit(); conn.close()
         print(f"  [conviction] Saved {len(buy_list)} buys for session={session}")
     except Exception as e:
