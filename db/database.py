@@ -33,6 +33,30 @@ _PG_POOL_MAX = 10  # well under Railway's limit
 _pooled_conn_ids: set = set()
 _pooled_conn_ids_lock = threading.Lock()
 
+# ── Column whitelists for f-string SQL safety ─────────────────────────────────
+_ALLOWED_PT_ACCOUNT_COLS = {
+    "balance", "equity", "day_start_equity", "total_pnl", "realized_pnl",
+    "unrealized_pnl", "total_trades", "winning_trades", "losing_trades",
+    "win_rate", "profit_factor", "max_drawdown", "peak_equity", "sharpe", "id",
+}
+_ALLOWED_PT_POSITION_COLS = {
+    "ticker", "side", "shares", "avg_cost", "current_price", "market_value",
+    "unrealized_pnl", "unrealized_pct", "stop_loss", "target_1", "target_2",
+    "target_3", "hold_type", "entry_reason", "conviction", "mae", "mfe",
+    "opened_at", "id",
+}
+_ALLOWED_PT_TRADE_COLS = {
+    "ticker", "side", "shares", "entry_price", "exit_price", "entry_at",
+    "exit_at", "hold_days", "gross_pnl", "net_pnl", "pnl_pct", "exit_reason",
+    "hold_type", "conviction", "id",
+}
+
+
+def _safe_cols(requested: list, allowed: set) -> str:
+    """Return comma-separated column string, only including whitelisted names."""
+    safe = [c for c in requested if c in allowed]
+    return ", ".join(safe) if safe else "id"
+
 
 def _is_postgres() -> bool:
     return bool(DATABASE_URL and DATABASE_URL.startswith("postgres"))
@@ -2531,7 +2555,7 @@ def get_account_summary() -> dict:
     defaults = dict(zip(cols, [100000.0, 100000.0, 100000.0, 0.0, 0.0, 0.0,
                                 0, 0, 0, 0.0, 0.0, 0.0, 100000.0, 0.0]))
     try:
-        q = ", ".join(cols)
+        q = _safe_cols(cols, _ALLOWED_PT_ACCOUNT_COLS)
         if _is_postgres():
             conn = _get_pg_conn(); cur = conn.cursor()
             cur.execute(f"SELECT {q} FROM pt_account WHERE id = 1")
@@ -2553,7 +2577,7 @@ def get_open_positions() -> list:
             "unrealized_pnl", "unrealized_pct", "stop_loss", "target_1", "target_2",
             "target_3", "hold_type", "entry_reason", "conviction", "mae", "mfe", "opened_at"]
     try:
-        q = ", ".join(cols)
+        q = _safe_cols(cols, _ALLOWED_PT_POSITION_COLS)
         if _is_postgres():
             conn = _get_pg_conn(); cur = conn.cursor()
             cur.execute(f"SELECT {q} FROM pt_positions ORDER BY market_value DESC NULLS LAST")
@@ -2589,7 +2613,7 @@ def get_recent_trades(n: int = 10) -> list:
     cols = ["ticker", "side", "shares", "entry_price", "exit_price", "entry_at", "exit_at",
             "hold_days", "gross_pnl", "net_pnl", "pnl_pct", "exit_reason", "hold_type", "conviction"]
     try:
-        q = ", ".join(cols)
+        q = _safe_cols(cols, _ALLOWED_PT_TRADE_COLS)
         if _is_postgres():
             conn = _get_pg_conn(); cur = conn.cursor()
             cur.execute(f"SELECT {q} FROM pt_trades ORDER BY exit_at DESC LIMIT %s", (n,))
