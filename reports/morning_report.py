@@ -8,9 +8,7 @@ Manual trigger:
     python3 -c "from reports.morning_report import generate_morning_report; generate_morning_report()"
 """
 import os
-import uuid
 import json
-import requests
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -363,44 +361,13 @@ def _build_pdf(signals: list[dict], now: datetime) -> str:
     return fname
 
 
-def _upload_to_filebin(filename: str) -> Optional[str]:
-    bin_id    = uuid.uuid4().hex[:12]
-    file_name = os.path.basename(filename)
-    try:
-        with open(filename, "rb") as f:
-            resp = requests.put(
-                f"https://filebin.net/{bin_id}/{file_name}",
-                data=f,
-                headers={"Content-Type": "application/pdf"},
-                timeout=30,
-            )
-        if resp.status_code in (200, 201):
-            return f"https://filebin.net/{bin_id}/{file_name}"
-    except Exception as e:
-        print(f"  [morning_report] filebin upload failed: {e}")
-    return None
-
-
-def _send_pushover(title: str, message: str, url: str = "") -> None:
-    user_key  = os.environ.get("PUSHOVER_USER_KEY", "")
-    api_token = os.environ.get("PUSHOVER_API_TOKEN", "")
-    if not user_key or not api_token:
-        return
-    payload = {"token": api_token, "user": user_key, "title": title, "message": message}
-    if url:
-        payload["url"] = url
-        payload["url_title"] = "Open PDF"
-    try:
-        requests.post("https://api.pushover.net/1/messages.json", data=payload, timeout=10)
-    except Exception as e:
-        print(f"  [morning_report] Pushover failed: {e}")
-
-
 def generate_morning_report() -> Optional[str]:
-    """Generate PDF from today's signals, upload to filebin, notify via Pushover.
+    """Generate PDF from today's signals and send via Pushover with PDF attached.
 
-    Returns filebin URL or None.
+    Returns the local file path or None.
     """
+    from alerts import send_alert_with_pdf, PRIORITY_HIGH
+
     now = datetime.now(ET)
     print(f"\n[MORNING REPORT] Generating — {now.strftime('%Y-%m-%d %H:%M ET')}")
 
@@ -416,15 +383,22 @@ def generate_morning_report() -> Optional[str]:
     fname = _build_pdf(signals, now)
     print(f"  [morning_report] PDF saved: {fname}")
 
-    url = _upload_to_filebin(fname)
-    if url:
-        print(f"  [morning_report] Uploaded: {url}")
-    else:
-        print("  [morning_report] Filebin upload skipped/failed — PDF saved locally")
-
     buys  = sum(1 for r in signals if r.get("score", 0) >= 60)
     watch = len(signals) - buys
-    msg   = f"{len(signals)} signals · {buys} BUY · {watch} WATCH"
-    _send_pushover("Axiom Morning Report", msg, url=url or "")
+    msg   = f"{len(signals)} signals · {buys} BUY · {watch} WATCH · {now.strftime('%b %d')}"
 
-    return url
+    with open(fname, "rb") as f:
+        pdf_bytes = f.read()
+
+    sent = send_alert_with_pdf(
+        title    = "📊 Axiom Morning Report",
+        message  = msg,
+        pdf_bytes = pdf_bytes,
+        filename = os.path.basename(fname),
+        priority = PRIORITY_HIGH,
+    )
+
+    if not sent:
+        print("  [morning_report] Pushover keys not set — PDF saved locally only")
+
+    return fname
