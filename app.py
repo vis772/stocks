@@ -1917,7 +1917,7 @@ def _live_alerts_feed():
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Dashboard", "Scanner", "Portfolio", "Research", "Signals", "Alerts", "Performance", "System", "Config"])
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(["Dashboard", "Scanner", "Portfolio", "Research", "Signals", "Alerts", "Performance", "System", "Config", "Paper Trading", "Health"])
 
 
 # ── TAB 0: CONTROL ───────────────────────────────────────────────────────────
@@ -2774,3 +2774,347 @@ with tab8:
             st.rerun()
 
 
+# ── TAB 9: PAPER TRADING ─────────────────────────────────────────────────────
+with tab9:
+    st.markdown("## Paper Trading")
+    st.markdown(
+        '<p style="color:#334155;font-size:0.82em;font-family:\'JetBrains Mono\',monospace;">'
+        '$100K virtual account. Conviction engine submits limit orders; positions managed with '
+        'T1/T2/T3 partial exits and ATR-based stops. No real money involved.</p>',
+        unsafe_allow_html=True,
+    )
+
+    try:
+        from paper_broker import get_broker
+        _broker = get_broker()
+        _dash   = _broker.get_dashboard_data()
+        _acct   = _dash.get("account", {})
+        _pos_df = _dash.get("positions",   pd.DataFrame())
+        _ord_df = _dash.get("orders",      pd.DataFrame())
+        _trd_df = _dash.get("trades",      pd.DataFrame())
+        _eq_df  = _dash.get("equity_curve", pd.DataFrame())
+        _day_df = _dash.get("daily_stats", pd.DataFrame())
+
+        # ── Section 1: Account summary bar ───────────────────────────────────
+        st.markdown('<div class="sh">Account Summary</div>', unsafe_allow_html=True)
+        _total_eq  = _acct.get("total_equity", 100000)
+        _cash      = _acct.get("cash_balance", 100000)
+        _open_pnl  = _acct.get("open_pnl", 0.0)
+        _total_pnl = _acct.get("total_pnl", 0.0)
+        _win_rate  = _acct.get("win_rate", 0.0)
+        _pf        = _acct.get("profit_factor")
+        _n_pos     = len(_pos_df) if not _pos_df.empty else 0
+        _n_trades  = _acct.get("total_trades", 0)
+        _max_dd    = _acct.get("max_drawdown", 0.0)
+
+        _a1, _a2, _a3, _a4, _a5, _a6, _a7 = st.columns(7)
+        _a1.metric("Total Equity",   f"${_total_eq:,.0f}",
+                   delta=f"{(_total_eq/100000-1)*100:+.1f}%")
+        _a2.metric("Cash",           f"${_cash:,.0f}")
+        _a3.metric("Open P&L",       f"${_open_pnl:+,.2f}")
+        _a4.metric("Total P&L",      f"${_total_pnl:+,.2f}")
+        _a5.metric("Win Rate",       f"{_win_rate:.0%}" if _win_rate else "—",
+                   delta=f"{_n_trades} trades")
+        _a6.metric("Profit Factor",  f"{_pf:.2f}" if _pf else "—")
+        _a7.metric("Max Drawdown",   f"{_max_dd:.1f}%")
+
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+        # ── Section 2: Equity curve chart ─────────────────────────────────────
+        st.markdown('<div class="sh">Equity Curve</div>', unsafe_allow_html=True)
+        if not _eq_df.empty and "equity" in _eq_df.columns:
+            _eq_df = _eq_df.sort_values("snapshot_time") if "snapshot_time" in _eq_df.columns else _eq_df
+            _fig_eq = go.Figure()
+            _fig_eq.add_trace(go.Scatter(
+                x=_eq_df.get("snapshot_time", _eq_df.index),
+                y=_eq_df["equity"],
+                mode="lines",
+                line=dict(color="#2563eb", width=2),
+                fill="tozeroy",
+                fillcolor="rgba(37,99,235,0.08)",
+                name="Equity",
+            ))
+            _fig_eq.add_hline(y=100000, line_dash="dot", line_color="#64748b",
+                              annotation_text="Starting $100K")
+            _fig_eq.update_layout(
+                height=220, margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="JetBrains Mono", size=11, color="#e2e8f0"),
+                xaxis=dict(showgrid=False, color="#64748b"),
+                yaxis=dict(showgrid=True, gridcolor="#1e293b",
+                           tickprefix="$", tickformat=",.0f", color="#64748b"),
+                showlegend=False,
+            )
+            st.plotly_chart(_fig_eq, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.markdown(
+                '<div class="empty"><div class="ico">--</div>'
+                '<p>Equity curve builds after the first scan cycle.</p></div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── Section 3: Open positions ─────────────────────────────────────────
+        st.markdown('<div class="sh">Open Positions</div>', unsafe_allow_html=True)
+        if not _pos_df.empty:
+            _show_cols = [c for c in ["ticker","side","qty","avg_cost","current_price",
+                                      "unrealized_pnl","unrealized_pnl_pct","stop_price",
+                                      "t1_price","t2_price","t3_price","t1_hit","t2_hit",
+                                      "hold_type","mae","mfe"] if c in _pos_df.columns]
+            _pos_show = _pos_df[_show_cols].copy()
+            for _pc in ["avg_cost","current_price","stop_price","t1_price","t2_price","t3_price","mae","mfe"]:
+                if _pc in _pos_show.columns:
+                    _pos_show[_pc] = _pos_show[_pc].apply(
+                        lambda v: f"${v:.2f}" if pd.notna(v) and v != 0 else "—"
+                    )
+            if "unrealized_pnl" in _pos_show.columns:
+                _pos_show["unrealized_pnl"] = _pos_show["unrealized_pnl"].apply(
+                    lambda v: f"${v:+,.2f}" if pd.notna(v) else "—"
+                )
+            if "unrealized_pnl_pct" in _pos_show.columns:
+                _pos_show["unrealized_pnl_pct"] = _pos_show["unrealized_pnl_pct"].apply(
+                    lambda v: f"{v:+.1f}%" if pd.notna(v) else "—"
+                )
+            st.dataframe(_pos_show, use_container_width=True, hide_index=True)
+        else:
+            st.markdown('<p style="color:#64748b;font-size:0.85em;">No open positions.</p>',
+                        unsafe_allow_html=True)
+
+        # ── Section 4: Pending orders ─────────────────────────────────────────
+        st.markdown('<div class="sh">Pending Orders</div>', unsafe_allow_html=True)
+        if not _ord_df.empty:
+            _pend = _ord_df[_ord_df["status"] == "pending"] if "status" in _ord_df.columns else _ord_df
+            if not _pend.empty:
+                _ord_cols = [c for c in ["order_id","ticker","side","order_type","qty",
+                                         "limit_price","stop_price","status","created_at"]
+                             if c in _pend.columns]
+                st.dataframe(_pend[_ord_cols], use_container_width=True, hide_index=True)
+            else:
+                st.markdown('<p style="color:#64748b;font-size:0.85em;">No pending orders.</p>',
+                            unsafe_allow_html=True)
+        else:
+            st.markdown('<p style="color:#64748b;font-size:0.85em;">No pending orders.</p>',
+                        unsafe_allow_html=True)
+
+        # ── Section 5: Trade history ──────────────────────────────────────────
+        st.markdown('<div class="sh">Trade History</div>', unsafe_allow_html=True)
+        if not _trd_df.empty:
+            _trd_cols = [c for c in ["ticker","side","qty","entry_price","exit_price",
+                                     "realized_pnl","realized_pnl_pct","hold_minutes",
+                                     "exit_reason","entry_time","exit_time"]
+                         if c in _trd_df.columns]
+            _trd_show = _trd_df[_trd_cols].head(50).copy()
+            for _tc in ["entry_price","exit_price"]:
+                if _tc in _trd_show.columns:
+                    _trd_show[_tc] = _trd_show[_tc].apply(
+                        lambda v: f"${v:.2f}" if pd.notna(v) else "—"
+                    )
+            if "realized_pnl" in _trd_show.columns:
+                _trd_show["realized_pnl"] = _trd_show["realized_pnl"].apply(
+                    lambda v: f"${v:+,.2f}" if pd.notna(v) else "—"
+                )
+            if "realized_pnl_pct" in _trd_show.columns:
+                _trd_show["realized_pnl_pct"] = _trd_show["realized_pnl_pct"].apply(
+                    lambda v: f"{v:+.1f}%" if pd.notna(v) else "—"
+                )
+            st.dataframe(_trd_show, use_container_width=True, hide_index=True)
+        else:
+            st.markdown('<p style="color:#64748b;font-size:0.85em;">No closed trades yet.</p>',
+                        unsafe_allow_html=True)
+
+        # ── Section 6: Performance metrics ────────────────────────────────────
+        st.markdown('<div class="sh">Performance Metrics</div>', unsafe_allow_html=True)
+        if not _trd_df.empty and len(_trd_df) >= 3:
+            _pm1, _pm2, _pm3, _pm4, _pm5, _pm6 = st.columns(6)
+            _closed_pnl = _trd_df["realized_pnl"] if "realized_pnl" in _trd_df.columns else pd.Series([])
+            _wins_pnl   = _closed_pnl[_closed_pnl > 0]
+            _loss_pnl   = _closed_pnl[_closed_pnl < 0]
+            _avg_w   = _wins_pnl.mean() if len(_wins_pnl) else 0
+            _avg_l   = _loss_pnl.mean() if len(_loss_pnl) else 0
+            _pf_val  = abs(_wins_pnl.sum() / _loss_pnl.sum()) if len(_loss_pnl) and _loss_pnl.sum() != 0 else None
+            _avg_hld = _trd_df["hold_minutes"].mean() if "hold_minutes" in _trd_df.columns else 0
+            _pm1.metric("Avg Win",      f"${_avg_w:+,.2f}")
+            _pm2.metric("Avg Loss",     f"${_avg_l:+,.2f}")
+            _pm3.metric("Profit Factor", f"{_pf_val:.2f}" if _pf_val else "—")
+            _pm4.metric("Best Trade",   f"${_closed_pnl.max():+,.2f}" if len(_closed_pnl) else "—")
+            _pm5.metric("Worst Trade",  f"${_closed_pnl.min():+,.2f}" if len(_closed_pnl) else "—")
+            _pm6.metric("Avg Hold",     f"{_avg_hld:.0f}m" if _avg_hld else "—")
+        else:
+            st.markdown('<p style="color:#64748b;font-size:0.85em;">Need at least 3 closed trades for metrics.</p>',
+                        unsafe_allow_html=True)
+
+        # ── Section 7: Daily P&L calendar ─────────────────────────────────────
+        st.markdown('<div class="sh">Daily P&L</div>', unsafe_allow_html=True)
+        if not _day_df.empty and "trade_date" in _day_df.columns and "day_pnl" in _day_df.columns:
+            _day_sorted = _day_df.sort_values("trade_date").tail(30)
+            _day_colors = ["#16a34a" if v >= 0 else "#dc2626"
+                           for v in _day_sorted["day_pnl"]]
+            _fig_day = go.Figure(go.Bar(
+                x=_day_sorted["trade_date"].astype(str),
+                y=_day_sorted["day_pnl"],
+                marker_color=_day_colors,
+                text=[f"${v:+,.0f}" for v in _day_sorted["day_pnl"]],
+                textposition="outside",
+            ))
+            _fig_day.update_layout(
+                height=200, margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="JetBrains Mono", size=11, color="#e2e8f0"),
+                xaxis=dict(showgrid=False, color="#64748b", tickangle=-45),
+                yaxis=dict(showgrid=True, gridcolor="#1e293b",
+                           tickprefix="$", tickformat=",.0f", color="#64748b"),
+                showlegend=False,
+            )
+            st.plotly_chart(_fig_day, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.markdown('<p style="color:#64748b;font-size:0.85em;">Daily P&L builds after 4 PM snapshots.</p>',
+                        unsafe_allow_html=True)
+
+    except ImportError:
+        st.warning("paper_broker module not found. Deploy the latest scanner service.")
+    except Exception as _pt_err:
+        st.error(f"Paper trading dashboard error: {_pt_err}")
+
+    st.markdown(
+        '<div class="disc" style="margin-top:20px;">PAPER TRADING ONLY · NOT REAL MONEY · '
+        'FOR STRATEGY RESEARCH PURPOSES</div>',
+        unsafe_allow_html=True,
+    )
+
+# ── TAB 10: HEALTH ────────────────────────────────────────────────────────────
+with tab10:
+    import time as _time
+
+    # Auto-refresh every 60 seconds via lightweight JS injection
+    st.components.v1.html(
+        '<script>setTimeout(() => window.parent.location.reload(), 60000);</script>',
+        height=0,
+    )
+
+    _STATUS_COLORS = {"ok": "#10b981", "warn": "#f59e0b", "critical": "#f43f5e"}
+    _STATUS_ICONS  = {"ok": "●", "warn": "◐", "critical": "✗"}
+
+    def _status_badge(status: str, detail: str = "") -> str:
+        color = _STATUS_COLORS.get(status, "#8293a8")
+        icon  = _STATUS_ICONS.get(status, "?")
+        label = status.upper()
+        text  = f" <span style='color:#8293a8;font-size:0.78em'>{detail}</span>" if detail else ""
+        return (
+            f"<span style='color:{color};font-weight:700;font-size:0.88em'>"
+            f"{icon} {label}</span>{text}"
+        )
+
+    # Header
+    _ts = _time.strftime("%H:%M:%S ET", _time.localtime())
+    st.markdown(
+        f"<h2 style='color:#f59e0b;font-family:JetBrains Mono,monospace;margin-bottom:4px'>"
+        f"System Health</h2>"
+        f"<p style='color:#3a5068;font-size:0.8em;margin-top:0'>Last checked: {_ts} · auto-refreshes every 60 s</p>",
+        unsafe_allow_html=True,
+    )
+
+    try:
+        from health.monitor import HealthMonitor as _HM
+        from db.database import get_health_events, get_data_quality_summary
+
+        _results = _HM().run_all_checks()
+
+        # ── Status grid ──────────────────────────────────────────────────────
+        _LABELS = {
+            "database":           "Supabase",
+            "finnhub":            "Finnhub API",
+            "tiingo":             "Tiingo API",
+            "yfinance":           "yfinance",
+            "scanner_loop":       "Scanner Loop",
+            "universe":           "Universe",
+            "conviction_engine":  "Conviction Engine",
+            "accuracy_validator": "Accuracy Validator",
+            "telegram_bot":       "Telegram Bot",
+        }
+        _keys = list(_LABELS.keys())
+        _cols_per_row = 3
+        for _row_start in range(0, len(_keys), _cols_per_row):
+            _row_keys = _keys[_row_start:_row_start + _cols_per_row]
+            _grid_cols = st.columns(len(_row_keys))
+            for _ci, _key in enumerate(_row_keys):
+                _info   = _results.get(_key, {})
+                _status = _info.get("status", "warn")
+                _detail = _info.get("detail", "")
+                _chk    = _info.get("checked_at", "")
+                _color  = _STATUS_COLORS.get(_status, "#8293a8")
+                _border = f"2px solid {_color}44"
+                with _grid_cols[_ci]:
+                    st.markdown(
+                        f"""<div style='background:#101928;border:{_border};border-radius:8px;
+                                        padding:14px 16px;margin-bottom:8px'>
+                            <div style='color:#8293a8;font-size:0.75em;text-transform:uppercase;
+                                        letter-spacing:.08em;margin-bottom:6px'>{_LABELS[_key]}</div>
+                            <div style='font-size:1.1em;font-weight:700;color:{_color}'>
+                                {_STATUS_ICONS.get(_status,'?')} {_status.upper()}</div>
+                            <div style='color:#5c7a99;font-size:0.76em;margin-top:6px;
+                                        line-height:1.4'>{_detail}</div>
+                            <div style='color:#3a5068;font-size:0.68em;margin-top:6px'>{_chk}</div>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+        st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+
+        # ── Key metrics row ──────────────────────────────────────────────────
+        _uv_size = _results.get("universe", {}).get("size", 0) or 0
+        _fh_rate = _results.get("finnhub",  {}).get("success_rate")
+        _ti_rate = _results.get("tiingo",   {}).get("success_rate")
+        _yf_rate = _results.get("yfinance", {}).get("success_rate")
+        _fh_ms   = _results.get("finnhub",  {}).get("avg_latency_ms", 0)
+        _ti_ms   = _results.get("tiingo",   {}).get("avg_latency_ms", 0)
+
+        def _pct_str(v):
+            return f"{v*100:.0f}%" if v is not None else "n/a"
+
+        _m1, _m2, _m3, _m4 = st.columns(4)
+        with _m1:
+            st.metric("Universe Size",   f"{_uv_size:,} tickers")
+        with _m2:
+            st.metric("Finnhub Success", _pct_str(_fh_rate), delta=f"{_fh_ms:.0f} ms avg")
+        with _m3:
+            st.metric("Tiingo Success",  _pct_str(_ti_rate), delta=f"{_ti_ms:.0f} ms avg")
+        with _m4:
+            st.metric("yfinance Success", _pct_str(_yf_rate))
+
+        # ── Data quality table ───────────────────────────────────────────────
+        st.markdown("#### Quote Source Performance (last 24 h)")
+        _dq = get_data_quality_summary(hours_back=24)
+        if _dq:
+            import pandas as _pd_h
+            _dq_df = _pd_h.DataFrame(_dq)
+            _dq_df["success_rate"] = (_dq_df["success_rate"] * 100).round(1).astype(str) + "%"
+            _dq_df["avg_latency_ms"] = _dq_df["avg_latency_ms"].round(1).astype(str) + " ms"
+            _dq_df.columns = ["Source", "Total Calls", "OK", "Success Rate", "Avg Latency"]
+            st.dataframe(_dq_df, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No data_quality records in the last 24 hours.")
+
+        # ── Recent health events ─────────────────────────────────────────────
+        st.markdown("#### Recent Health Events")
+        _events = get_health_events(limit=40, hours_back=24)
+        if _events:
+            import pandas as _pd_h2
+            _ev_df = _pd_h2.DataFrame(_events)
+            # Color-code status column
+            def _color_row(row):
+                color = {"ok": "#10b98120", "warn": "#f59e0b20",
+                         "critical": "#f43f5e20"}.get(row["status"], "")
+                return [f"background-color:{color}"] * len(row)
+            _ev_df.columns = ["Subsystem", "Status", "Detail", "Action", "Time"]
+            st.dataframe(_ev_df.style.apply(_color_row, axis=1),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("No health events in the last 24 hours — all clean.")
+
+        # ── Manual refresh button ────────────────────────────────────────────
+        if st.button("↻ Refresh Now", key="health_manual_refresh"):
+            st.rerun()
+
+    except ImportError as _hi:
+        st.error(f"Health monitor not available: {_hi}")
+    except Exception as _he:
+        st.error(f"Health tab error: {_he}")

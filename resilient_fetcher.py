@@ -213,7 +213,10 @@ def _yfinance(ticker: str) -> Optional[QuoteResult]:
         return QuoteResult(
             ticker=ticker, price=price,
             prev_close=float(getattr(fi, "previous_close", None) or price),
-            volume=float(getattr(fi, "three_month_average_volume", None) or 0),
+            volume=float(
+                getattr(fi, "last_volume", None) or
+                getattr(fi, "three_month_average_volume", None) or 0
+            ),
             high=float(getattr(fi, "day_high", None) or price),
             low=float(getattr(fi, "day_low", None) or price),
             source="yfinance", source_quality="live", latency_ms=ms,
