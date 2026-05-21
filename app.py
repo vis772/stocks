@@ -2381,18 +2381,11 @@ def _terminal_dashboard():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN TABS
+# TAB FUNCTIONS — only the active tab's function is called per rerun
 # ══════════════════════════════════════════════════════════════════════════════
-tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(["Dashboard", "Scanner", "Portfolio", "Research", "Signals", "Alerts", "Performance", "System", "Config", "Paper Trading", "Health"])
 
 
-# ── TAB 0: DASHBOARD ─────────────────────────────────────────────────────────
-with tab0:
-    _terminal_dashboard()
-
-
-# ── TAB 1: SCANNER ────────────────────────────────────────────────────────────
-with tab1:
+def _tab_scanner():
     results = st.session_state.get("scan_results",[])
     valid   = [r for r in results if not r.get("filtered_out") and not r.get("error")]
 
@@ -2455,8 +2448,7 @@ with tab1:
                     st.markdown(f'<span style="font-family:\'JetBrains Mono\',monospace;color:#cbd5e1;font-size:0.75em;">{r["ticker"]} — {r.get("filter_reason","")}</span>', unsafe_allow_html=True)
 
 
-# ── TAB 2: PORTFOLIO ──────────────────────────────────────────────────────────
-with tab2:
+def _tab_portfolio():
     portfolio_df = get_portfolio(_current_user["id"])
 
     if portfolio_df.empty:
@@ -2568,8 +2560,7 @@ with tab2:
             st.plotly_chart(fig_pie, use_container_width=True)
 
 
-# ── TAB 3: DEEP DIVE ──────────────────────────────────────────────────────────
-with tab3:
+def _tab_research():
     di, db = st.columns([4,1])
     with di:
         dive_ticker = st.text_input("dd", placeholder="Enter any ticker — e.g. SOUN, BBAI, CIFR, IONQ",
@@ -2600,9 +2591,7 @@ with tab3:
           SEC filing, earnings calendar, sector RS, and AI analysis.</p>
         </div>""", unsafe_allow_html=True)
 
-
-# ── TAB 4: PREDICTIONS ───────────────────────────────────────────────────────
-with tab4:
+def _tab_predictions():
     st.markdown("## Prediction Engine")
     st.markdown('<p style="color:#334155;font-size:0.82em;font-family:\'JetBrains Mono\',monospace;">The scanner scores each watchlist stock every 30 min. Score ≥65 → LONG, Score ≤30 → SHORT. Track signal log outcomes in the Accuracy tab.</p>', unsafe_allow_html=True)
 
@@ -2615,8 +2604,7 @@ with tab4:
     </div>""", unsafe_allow_html=True)
 
 
-# ── TAB 5: LIVE ALERTS ────────────────────────────────────────────────────────
-with tab5:
+def _tab_alerts():
     st.markdown("## Live Alert Feed")
     st.markdown(
         '<p style="color:#334155;font-size:0.82em;font-family:\'JetBrains Mono\',monospace;">'
@@ -2647,8 +2635,8 @@ with tab5:
 
     _live_alerts_feed()
 
-# ── TAB 6: INFO ───────────────────────────────────────────────────────────────
-with tab6:
+
+def _tab_performance():
     # ── Checkpoint Reports ────────────────────────────────────────────────────
     st.markdown('<div class="sh" style="margin-top:4px;">Accuracy Test Reports</div>', unsafe_allow_html=True)
     try:
@@ -3026,7 +3014,7 @@ with tab6:
             )
 
 
-with tab7:
+def _tab_system():
     _w = st.session_state.get("scoring_weights", SCORING_WEIGHTS)
     _wt = int(round(_w.get("technical",   0) * 100))
     _wf = int(round(_w.get("fundamental", 0) * 100))
@@ -3232,9 +3220,7 @@ Each stock scores 0–100 across four factors (unified formula, single path).
                         except Exception as _cpe:
                             st.error(f"Failed: {_cpe}")
 
-
-# ── TAB 8: CONFIG ─────────────────────────────────────────────────────────────
-with tab8:
+def _tab_config():
     st.markdown('<div class="sh">Scoring Weights</div>', unsafe_allow_html=True)
     st.markdown(
         '<p style="color:var(--t3);font-size:0.82em;margin-bottom:16px;">'
@@ -3297,8 +3283,7 @@ with tab8:
             st.rerun()
 
 
-# ── TAB 9: PAPER TRADING ─────────────────────────────────────────────────────
-with tab9:
+def _tab_paper_trading():
     st.markdown("## Paper Trading")
     st.markdown(
         '<p style="color:#334155;font-size:0.82em;font-family:\'JetBrains Mono\',monospace;">'
@@ -3503,15 +3488,9 @@ with tab9:
         unsafe_allow_html=True,
     )
 
-# ── TAB 10: HEALTH ────────────────────────────────────────────────────────────
-with tab10:
-    import time as _time
 
-    # Auto-refresh every 60 seconds via lightweight JS injection
-    st.components.v1.html(
-        '<script>setTimeout(() => window.parent.location.reload(), 60000);</script>',
-        height=0,
-    )
+def _tab_health():
+    import time as _time
 
     _STATUS_COLORS = {"ok": "#10b981", "warn": "#f59e0b", "critical": "#f43f5e"}
     _STATUS_ICONS  = {"ok": "●", "warn": "◐", "critical": "✗"}
@@ -3649,3 +3628,38 @@ with tab10:
         st.error(f"Health monitor not available: {_hi}")
     except Exception as _he:
         st.error(f"Health tab error: {_he}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN NAVIGATION — custom tab switcher; only the selected tab's code runs
+# ══════════════════════════════════════════════════════════════════════════════
+
+_TABS = [
+    "Dashboard", "Scanner", "Portfolio", "Research", "Signals",
+    "Alerts", "Performance", "System", "Config", "Paper Trading", "Health",
+]
+
+st.session_state.setdefault("active_tab", "Dashboard")
+
+# ── Nav bar ───────────────────────────────────────────────────────────────────
+_nav_cols = st.columns(len(_TABS))
+for _ni, (_nc, _tn) in enumerate(zip(_nav_cols, _TABS)):
+    _is_active = st.session_state["active_tab"] == _tn
+    if _nc.button(_tn, key=f"_nav_{_ni}", use_container_width=True,
+                  type="primary" if _is_active else "secondary"):
+        st.session_state["active_tab"] = _tn
+        st.rerun()
+
+st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+_at = st.session_state["active_tab"]
+if   _at == "Dashboard":      _terminal_dashboard()
+elif _at == "Scanner":        _tab_scanner()
+elif _at == "Portfolio":      _tab_portfolio()
+elif _at == "Research":       _tab_research()
+elif _at == "Signals":        _tab_predictions()
+elif _at == "Alerts":         _tab_alerts()
+elif _at == "Performance":    _tab_performance()
+elif _at == "System":         _tab_system()
+elif _at == "Config":         _tab_config()
+elif _at == "Paper Trading":  _tab_paper_trading()
+elif _at == "Health":         _tab_health()
