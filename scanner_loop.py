@@ -1105,11 +1105,17 @@ def run_prediction_scan(watchlist: List[str], state: ScannerState, session_mode:
                 print(f"  [gate:time] {ticker} logged but alert suppressed — open/close window")
                 continue  # skip alert, next ticker
 
-            from config import VOLUME_RATIO_GATE
+            from config import VOLUME_RATIO_GATE, PRICE_MOVE_GATE
             _cur_vol = result.get("volume") or 0
             _avg_vol = result.get("avg_volume") or 0
             if _avg_vol > 0 and _cur_vol > 0 and (_cur_vol / _avg_vol) < VOLUME_RATIO_GATE:
                 print(f"  [gate:vol] {ticker} logged but alert suppressed — vol {_cur_vol/_avg_vol:.2f}x < {VOLUME_RATIO_GATE}x")
+                continue
+
+            # Price movement gate — suppress alert if stock moved <1% (flat day, no real action)
+            _pct_chg = abs(float(result.get("change_pct", 0) or 0))
+            if _pct_chg < PRICE_MOVE_GATE:
+                print(f"  [gate:move] {ticker} logged but alert suppressed (move {_pct_chg*100:.2f}% < 1%)")
                 continue
 
             if getattr(state, 'current_regime', '') == 'MEAN_REVERSION' and score >= 75:

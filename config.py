@@ -52,6 +52,7 @@ MIN_SIGNAL_SCORE = 45
 ALERT_SCORE_MIN  = 60    # minimum score to fire a push alert (higher bar than logging)
 
 VOLUME_RATIO_GATE    = 1.5    # alert gate: skip alert if vol < 1.5x 3-month avg (logging still happens)
+PRICE_MOVE_GATE      = 0.01   # alert gate: skip alert if abs(pct_change) < 1% — flat day, no real action
 SESSION_OPEN_GATE    = 15     # alert gate: skip first N minutes after open (alerts only)
 SESSION_CLOSE_GATE   = 15     # alert gate: skip last N minutes before close (alerts only)
 
