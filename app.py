@@ -3011,30 +3011,28 @@ with tab6:
 
 with tab7:
     _w = st.session_state.get("scoring_weights", SCORING_WEIGHTS)
-    _wt = int(round(_w["technical"]   * 100))
-    _wc = int(round(_w["catalyst"]    * 100))
-    _wf = int(round(_w["fundamental"] * 100))
-    _wr = int(round(_w["risk"]        * 100))
-    _ws = int(round(_w["sentiment"]   * 100))
+    _wt = int(round(_w.get("technical",   0) * 100))
+    _wf = int(round(_w.get("fundamental", 0) * 100))
+    _wr = int(round(_w.get("risk",        0) * 100))
+    _ws = int(round(_w.get("sentiment",   0) * 100))
     st.markdown(f"""
 ## How Axiom Terminal Works
 
 ### Scoring Model
-Each stock scores 0–100 across five components. Adjust weights in the **Config** tab.
+Each stock scores 0–100 across four factors (unified formula, single path).
 
 | Component | Weight | What it measures |
 |-----------|--------|-----------------|
 | Technical | {_wt}% | RSI, MACD, moving averages, volume, momentum |
-| Catalyst | {_wc}% | SEC 8-K events, news, keyword signals |
 | Fundamental | {_wf}% | Revenue growth, cash, burn rate, margins |
 | Risk (inverted) | {_wr}% | Dilution, short interest, volatility, liquidity |
 | Sentiment | {_ws}% | News tone, analyst coverage, hype detection |
 
-### New Features
-- **Earnings Calendar** — flags stocks with earnings within 7 days (binary event warning)
-- **Insider Direction** — detects if Form 4 was a BUY or SELL with approximate value
-- **Sector Relative Strength** — compares stock vs its sector ETF over 20 days
-- **AI Filing Analysis** — Claude reads and summarizes actual SEC filing text
+### Signal Gates (all must pass before a signal fires)
+- **Score ≥ 70** — minimum floor; Watchlist/Hold signals suppressed
+- **Volume ≥ 1.5× avg** — confirms institutional interest
+- **Time gate** — first/last 15 min of session blocked (open/close noise)
+- **Regime gate** — Strong Buy signals suppressed in MEAN_REVERSION regime
 
 ### Signal Labels
 
@@ -3042,11 +3040,8 @@ Each stock scores 0–100 across five components. Adjust weights in the **Config
 |--------|-------|---------|
 | Strong Buy Candidate | 75–100 | Strong conditions — still research before acting |
 | Speculative Buy | 60–75 | Good setup, acceptable risk |
-| Watchlist | 45–60 | Interesting, not compelling yet |
-| Hold | 35–45 | No edge for new entries |
-| Trim | 25–35 | Weakening — consider reducing |
-| Sell | 15–25 | Weak across the board |
-| Avoid | 0–15 | Poor setup or critical flags active |
+| Watchlist | 45–60 | Interesting — suppressed from alerts (below floor) |
+| Hold / Trim / Sell / Avoid | 0–45 | Not logged |
 
 ### Data Sources
 - **Finnhub** — real-time quotes, earnings calendar, company profile
@@ -3058,6 +3053,64 @@ Each stock scores 0–100 across five components. Adjust weights in the **Config
 ---
 **Research tool only. Not financial advice. Small-cap stocks can lose 100% of value. Always do your own research.**
     """)
+
+    # ── Changelog ─────────────────────────────────────────────────────────────
+    st.markdown('<div class="sh" style="margin-top:20px;">Change Log</div>',
+                unsafe_allow_html=True)
+    try:
+        from db.database import get_changelog as _gcl
+        _cl_entries = _gcl(limit=50, days_back=90)
+        if _cl_entries:
+            _IMPACT_COLOR = {"high": "#f43f5e", "medium": "#f59e0b", "low": "#10b981"}
+            _CAT_COLOR    = {"scoring": "#a78bfa", "scanner": "#38bdf8", "universe": "#10b981",
+                             "validator": "#f59e0b", "dashboard": "#60a5fa", "database": "#94a3b8",
+                             "infrastructure": "#f97316", "health": "#10b981"}
+            for _cl in _cl_entries:
+                _dt  = str(_cl.get("change_date") or "")[:16]
+                _cat = _cl.get("category", "update")
+                _ttl = _cl.get("title", "")
+                _dsc = _cl.get("description", "")
+                _fls = _cl.get("files", "")
+                _sha = (_cl.get("commit_hash") or "")[:7]
+                _imp = _cl.get("impact", "medium")
+                _cc  = _CAT_COLOR.get(_cat, "#64748b")
+                _ic  = _IMPACT_COLOR.get(_imp, "#64748b")
+                _sha_html = (
+                    '<span style="font-family:JetBrains Mono,monospace;font-size:0.58em;'
+                    f'color:#3a5068;">{_sha}</span>'
+                ) if _sha and _sha != "current" else ""
+                _dsc_html = (
+                    '<div style="color:#5c7a99;font-size:0.72em;line-height:1.5;margin-bottom:4px;">'
+                    f'{_dsc}</div>'
+                ) if _dsc else ""
+                _fls_html = (
+                    '<div style="font-family:JetBrains Mono,monospace;font-size:0.6em;'
+                    f'color:#3a5068;">{_fls}</div>'
+                ) if _fls else ""
+                _html = (
+                    '<div style="border:1px solid #1a2740;border-radius:6px;'
+                    'padding:10px 14px;margin-bottom:8px;background:#101928;">'
+                    '<div style="display:flex;align-items:center;gap:8px;'
+                    'margin-bottom:5px;flex-wrap:wrap;">'
+                    f'<span style="font-family:JetBrains Mono,monospace;font-size:0.62em;color:#3a5068;">{_dt}</span>'
+                    f'<span style="background:{_cc}22;border:1px solid {_cc}55;border-radius:3px;'
+                    f'padding:1px 7px;font-family:JetBrains Mono,monospace;font-size:0.6em;'
+                    f'color:{_cc};font-weight:600;letter-spacing:0.06em;">{_cat.upper()}</span>'
+                    f'<span style="background:{_ic}18;border:1px solid {_ic}44;border-radius:3px;'
+                    f'padding:1px 6px;font-family:JetBrains Mono,monospace;font-size:0.58em;'
+                    f'color:{_ic};">{_imp.upper()} IMPACT</span>'
+                    f'{_sha_html}</div>'
+                    f'<div style="font-family:JetBrains Mono,monospace;font-size:0.8em;'
+                    f'color:#e2eaf4;font-weight:600;margin-bottom:4px;">{_ttl}</div>'
+                    f'{_dsc_html}{_fls_html}</div>'
+                )
+                st.markdown(_html,
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No changelog entries yet — seed_changelog.py populates this on first deploy.")
+    except Exception as _cle:
+        st.caption(f"Changelog unavailable: {_cle}")
 
     if _current_user["role"] == "admin":
         st.markdown("---")

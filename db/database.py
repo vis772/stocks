@@ -404,6 +404,23 @@ def _init_postgres():
         ON health_log (created_at DESC)
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS changelog (
+            id           SERIAL PRIMARY KEY,
+            change_date  TIMESTAMP DEFAULT NOW(),
+            category     TEXT NOT NULL,
+            title        TEXT NOT NULL,
+            description  TEXT DEFAULT '',
+            files        TEXT DEFAULT '',
+            commit_hash  TEXT DEFAULT '',
+            impact       TEXT DEFAULT 'medium'
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_changelog_date
+        ON changelog (change_date DESC)
+    """)
+
     # Migration-safe: add new columns to existing deployments
     for ddl in [
         "ALTER TABLE scanner_state   ADD COLUMN IF NOT EXISTS vwap_snapshot      TEXT DEFAULT '{}'",
@@ -814,6 +831,19 @@ def _init_sqlite():
             detail      TEXT DEFAULT '',
             action      TEXT DEFAULT '',
             created_at  TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS changelog (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            change_date TEXT DEFAULT (datetime('now')),
+            category    TEXT NOT NULL,
+            title       TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            files       TEXT DEFAULT '',
+            commit_hash TEXT DEFAULT '',
+            impact      TEXT DEFAULT 'medium'
         )
     """)
 
@@ -3079,3 +3109,83 @@ def seed_mobile_admin() -> None:
         print("  [db] Mobile admin 'admin' seeded")
     except Exception as e:
         print(f"  [db] seed_mobile_admin failed: {e}")
+
+
+# ─── Changelog ────────────────────────────────────────────────────────────────
+
+def log_change(title: str, description: str = "", category: str = "update",
+               files: str = "", commit_hash: str = "", impact: str = "medium") -> None:
+    """Insert one row into the changelog table."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO changelog (category, title, description, files, commit_hash, impact)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (category, title, description, files, commit_hash, impact))
+            conn.commit(); cur.close(); _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("""
+                INSERT INTO changelog (category, title, description, files, commit_hash, impact)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (category, title, description, files, commit_hash, impact))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] log_change failed: {e}")
+
+
+def get_changelog(limit: int = 50, days_back: int = 90) -> list:
+    """Return recent changelog rows newest-first as list of dicts."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT id, change_date, category, title, description, files, commit_hash, impact
+                FROM changelog
+                WHERE change_date >= NOW() - INTERVAL '%s days'
+                ORDER BY change_date DESC LIMIT %s
+            """, (days_back, limit))
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            cur.close(); _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT id, change_date, category, title, description, files, commit_hash, impact
+                FROM changelog
+                WHERE change_date >= datetime('now', ? || ' days')
+                ORDER BY change_date DESC LIMIT ?
+            """, (f"-{days_back}", limit))
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            conn.close()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        print(f"  [db] get_changelog failed: {e}")
+        return []
+
+
+def seed_changelog_entry(title: str, description: str, category: str,
+                          files: str, commit_hash: str, impact: str,
+                          change_date: str) -> None:
+    """Insert a changelog entry with a specific timestamp (for backfilling history)."""
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn(); cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO changelog (change_date, category, title, description, files, commit_hash, impact)
+                VALUES (%s::timestamp, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (change_date, category, title, description, files, commit_hash, impact))
+            conn.commit(); cur.close(); _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("""
+                INSERT OR IGNORE INTO changelog
+                    (change_date, category, title, description, files, commit_hash, impact)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (change_date, category, title, description, files, commit_hash, impact))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print(f"  [db] seed_changelog_entry failed: {e}")
