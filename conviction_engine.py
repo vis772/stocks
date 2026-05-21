@@ -316,7 +316,7 @@ class ConvictionEngine:
                 "ai_catalyst_quality": "Strong" if data.get("has_sec_catalyst") else "Moderate",
                 "ai_risk":            "Thin small-cap liquidity risk",
                 "ai_time_sensitivity": "Act Now" if hold == "DAYTRADE" else "Today",
-                "catalyst_mult":      float(data.get("catalyst_mult", 1.0) or 1.0),
+                "catalyst_mult":      float((_cm := data.get("catalyst_mult")) if _cm is not None else 1.0),
                 "_params":            params,
                 "_data":              data,
             })
@@ -363,6 +363,35 @@ class ConvictionEngine:
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
                 conn.close()
+
+            # Batch fetch factor scores for all candidates at once
+            _factor_map = {}  # {ticker: {factor_name: z_score}}
+            try:
+                import datetime as _dt
+                today_s = _dt.date.today().isoformat()
+                _all_tickers = [r[cols.index("ticker")] for r in rows if r[cols.index("ticker")]]
+                if _all_tickers:
+                    if _is_postgres():
+                        _fc = _get_pg_conn(); _fcc = _fc.cursor()
+                        _fcc.execute(
+                            "SELECT ticker, factor_name, z_score FROM factor_scores WHERE ticker = ANY(%s) AND scan_date = %s",
+                            (_all_tickers, today_s)
+                        )
+                        for _row in _fcc.fetchall():
+                            _factor_map.setdefault(_row[0], {})[_row[1]] = float(_row[2] or 0)
+                        _fcc.close(); _put_pg_conn(_fc)
+                    else:
+                        _fc = _get_sqlite_conn(); _fcc = _fc.cursor()
+                        placeholders = ",".join("?" * len(_all_tickers))
+                        _fcc.execute(
+                            f"SELECT ticker, factor_name, z_score FROM factor_scores WHERE ticker IN ({placeholders}) AND scan_date = ?",
+                            _all_tickers + [today_s]
+                        )
+                        for _row in _fcc.fetchall():
+                            _factor_map.setdefault(_row[0], {})[_row[1]] = float(_row[2] or 0)
+                        _fc.close()
+            except Exception:
+                pass
 
             candidates = []
             seen = set()
@@ -464,32 +493,8 @@ class ConvictionEngine:
                     except Exception:
                         pass
 
-                # Pull latest factor z-scores for this ticker from factor_scores table
-                factor_z_scores = {}
-                try:
-                    from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn, _put_pg_conn as _ppc2
-                    import datetime as _dt
-                    today_s = _dt.date.today().isoformat()
-                    if _is_postgres():
-                        _fc = _get_pg_conn(); _fcc = _fc.cursor()
-                        _fcc.execute(
-                            "SELECT factor_name, z_score FROM factor_scores "
-                            "WHERE ticker=%s AND scan_date=%s",
-                            (t, today_s)
-                        )
-                        factor_z_scores = {r[0]: r[1] for r in _fcc.fetchall()}
-                        _fcc.close(); _ppc2(_fc)
-                    else:
-                        _fc = _get_sqlite_conn()
-                        factor_z_scores = {
-                            r[0]: r[1] for r in _fc.execute(
-                                "SELECT factor_name, z_score FROM factor_scores "
-                                "WHERE ticker=? AND scan_date=?", (t, today_s)
-                            ).fetchall()
-                        }
-                        _fc.close()
-                except Exception:
-                    pass
+                # Look up pre-fetched factor z-scores for this ticker
+                factor_z_scores = _factor_map.get(t, {})
 
                 candidates.append({
                     "ticker":           t,
@@ -518,7 +523,7 @@ class ConvictionEngine:
                     "rs_vs_iwm_5d":      1.0,
                     "prev_close":        0.0,
                     "factor_z_scores":   factor_z_scores,
-                    "catalyst_mult":     float(d.get("catalyst_mult") or 1.0),
+                    "catalyst_mult":     float((_cm2 := d.get("catalyst_mult")) if _cm2 is not None else 1.0),
                 })
             return candidates
         except Exception as e:
@@ -578,7 +583,7 @@ def save_buy_list(buy_list: list, session: str) -> None:
             cur.execute("DELETE FROM conviction_buys WHERE date = %s AND session = %s", (today, session))
             for b in buy_list:
                 p = b.get("_params", {})
-                catalyst_mult = float(b.get("catalyst_mult", 1.0) or 1.0)
+                _cm_b = b.get("catalyst_mult"); catalyst_mult = float(_cm_b if _cm_b is not None else 1.0)
                 cur.execute("""
                     INSERT INTO conviction_buys
                         (date, session, rank, ticker, conviction, hold_type,
@@ -598,7 +603,7 @@ def save_buy_list(buy_list: list, session: str) -> None:
             conn.execute("DELETE FROM conviction_buys WHERE date=? AND session=?", (today, session))
             for b in buy_list:
                 p = b.get("_params", {})
-                catalyst_mult = float(b.get("catalyst_mult", 1.0) or 1.0)
+                _cm_b = b.get("catalyst_mult"); catalyst_mult = float(_cm_b if _cm_b is not None else 1.0)
                 conn.execute("""
                     INSERT INTO conviction_buys
                         (date, session, rank, ticker, conviction, hold_type,
@@ -934,7 +939,7 @@ def save_live_conviction_list(buy_list: list, session: str) -> None:
                     b.get("ai_key_reason"), b.get("ai_entry_suggestion"),
                     b.get("ai_stop_pct"), b.get("ai_target_pct"),
                     b.get("ai_risk"), b.get("ai_time_sensitivity"),
-                    float(b.get("catalyst_mult", 1.0) or 1.0),
+                    float((_cm_b := b.get("catalyst_mult")) if _cm_b is not None else 1.0),
                 ))
             conn.commit()
             cur.close()
@@ -969,7 +974,7 @@ def save_live_conviction_list(buy_list: list, session: str) -> None:
                     b.get("ai_key_reason"), b.get("ai_entry_suggestion"),
                     b.get("ai_stop_pct"), b.get("ai_target_pct"),
                     b.get("ai_risk"), b.get("ai_time_sensitivity"),
-                    float(b.get("catalyst_mult", 1.0) or 1.0),
+                    float((_cm_b := b.get("catalyst_mult")) if _cm_b is not None else 1.0),
                 ))
             conn.commit()
             conn.close()
