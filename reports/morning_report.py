@@ -9,7 +9,8 @@ Manual trigger:
 """
 import os
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # Load .env before any DB/alerts import so DATABASE_URL and Pushover keys are present
 def _load_env() -> None:
@@ -43,7 +44,7 @@ from reportlab.platypus import (
 
 REPORTS_DIR = "reports"
 
-ET = timezone(timedelta(hours=-4))   # EDT; change to -5 in winter
+ET = ZoneInfo("America/New_York")
 
 # ─── Palette ──────────────────────────────────────────────────────────────────
 C_BLACK = colors.HexColor("#1a1a1a")

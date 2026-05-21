@@ -10,6 +10,7 @@ import re
 import threading
 import traceback
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Set
 
@@ -156,14 +157,7 @@ _FINNHUB_DEGRADED_MODE: bool = False
 
 def now_et():
     """Get current time in US/Eastern timezone."""
-    try:
-        from zoneinfo import ZoneInfo
-        return datetime.now(ZoneInfo("America/New_York"))
-    except ImportError:
-        utc_now = datetime.utcnow()
-        month = utc_now.month
-        offset = -4 if 3 <= month <= 11 else -5
-        return utc_now + timedelta(hours=offset)
+    return datetime.now(ZoneInfo("America/New_York"))
 
 
 # ─── Telegram bot restart flag ────────────────────────────────────────────────
@@ -778,8 +772,8 @@ def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
                 pub_time = article.get("datetime", 0)
                 if not pub_time:
                     continue
-                pub_dt = datetime.utcfromtimestamp(pub_time) + timedelta(hours=-4 if 3 <= et.month <= 11 else -5)
-                if pub_dt.replace(tzinfo=None) < cutoff.replace(tzinfo=None):
+                pub_dt = datetime.fromtimestamp(pub_time, tz=ZoneInfo("America/New_York"))
+                if pub_dt < cutoff:
                     continue
                 headline = article.get("headline", "")
                 art_key  = f"{ticker}_news_{pub_time}"
@@ -869,8 +863,8 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
                             pub_time = article.get("datetime", 0)
                             if not pub_time:
                                 continue
-                            pub_dt = datetime.utcfromtimestamp(pub_time) + timedelta(hours=-4 if 3 <= et.month <= 11 else -5)
-                            if pub_dt.replace(tzinfo=None) < cutoff_dt.replace(tzinfo=None):
+                            pub_dt = datetime.fromtimestamp(pub_time, tz=ZoneInfo("America/New_York"))
+                            if pub_dt < cutoff_dt:
                                 continue
                             headline = article.get("headline", "")
                             art_key  = f"{ticker}_fastnews_{pub_time}"
