@@ -10,6 +10,13 @@ Manual trigger:
 import os
 import json
 from datetime import datetime, timezone, timedelta
+
+# Load .env before any DB/alerts import so DATABASE_URL and Pushover keys are present
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"), override=False)
+except ImportError:
+    pass
 from typing import Optional
 
 import pandas as pd
