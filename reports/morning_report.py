@@ -12,11 +12,22 @@ import json
 from datetime import datetime, timezone, timedelta
 
 # Load .env before any DB/alerts import so DATABASE_URL and Pushover keys are present
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"), override=False)
-except ImportError:
-    pass
+def _load_env() -> None:
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _, _v = _line.partition("=")
+            _k = _k.strip()
+            _v = _v.strip().strip('"').strip("'")
+            if _k and _k not in os.environ:
+                os.environ[_k] = _v
+
+_load_env()
 from typing import Optional
 
 import pandas as pd
