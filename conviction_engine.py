@@ -919,8 +919,8 @@ def save_live_conviction_list(buy_list: list, session: str) -> None:
                          volume_ratio, short_interest, catalyst_text,
                          ai_conviction, ai_catalyst_quality, ai_key_reason,
                          ai_entry_suggestion, ai_stop_pct, ai_target_pct,
-                         ai_risk, ai_time_sensitivity)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         ai_risk, ai_time_sensitivity, catalyst_mult)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     today, session, b["rank"], b["ticker"],
                     b.get("conviction"), b.get("hold_type"),
@@ -934,6 +934,7 @@ def save_live_conviction_list(buy_list: list, session: str) -> None:
                     b.get("ai_key_reason"), b.get("ai_entry_suggestion"),
                     b.get("ai_stop_pct"), b.get("ai_target_pct"),
                     b.get("ai_risk"), b.get("ai_time_sensitivity"),
+                    float(b.get("catalyst_mult", 1.0) or 1.0),
                 ))
             conn.commit()
             cur.close()
@@ -953,8 +954,8 @@ def save_live_conviction_list(buy_list: list, session: str) -> None:
                          volume_ratio, short_interest, catalyst_text,
                          ai_conviction, ai_catalyst_quality, ai_key_reason,
                          ai_entry_suggestion, ai_stop_pct, ai_target_pct,
-                         ai_risk, ai_time_sensitivity)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         ai_risk, ai_time_sensitivity, catalyst_mult)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     today, session, b["rank"], b["ticker"],
                     b.get("conviction"), b.get("hold_type"),
@@ -968,6 +969,7 @@ def save_live_conviction_list(buy_list: list, session: str) -> None:
                     b.get("ai_key_reason"), b.get("ai_entry_suggestion"),
                     b.get("ai_stop_pct"), b.get("ai_target_pct"),
                     b.get("ai_risk"), b.get("ai_time_sensitivity"),
+                    float(b.get("catalyst_mult", 1.0) or 1.0),
                 ))
             conn.commit()
             conn.close()
