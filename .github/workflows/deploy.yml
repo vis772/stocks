@@ -45,8 +45,8 @@ jobs:
             # ── 2. Rebuild & restart containers ─────────────────────────────
             echo ""
             echo "==> [2/3] Rebuilding containers"
-            docker compose down --remove-orphans
-            docker compose up -d --build
+            docker compose --project-directory /home/ubuntu/axiom down --remove-orphans
+            docker compose --project-directory /home/ubuntu/axiom up -d --build
             echo "    Build complete."
 
             # ── 3. Health check — all 3 services must be running ────────────

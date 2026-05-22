@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
 
   # ── Background scanner (runs forever, no exposed port) ──────────────────────
