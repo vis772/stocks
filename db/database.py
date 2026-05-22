@@ -25,7 +25,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 _pg_pool = None
 _pg_pool_lock = threading.Lock()
 _PG_POOL_MIN = 2
-_PG_POOL_MAX = 5
+_PG_POOL_MAX = 15
 _PG_CONNECT_TIMEOUT = 30  # seconds — applies to both pool creation and direct fallback
 
 # Track which live connections came from the pool so _put_pg_conn can return
