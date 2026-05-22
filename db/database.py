@@ -21,11 +21,12 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 # ── Connection pool (PostgreSQL only) ────────────────────────────────────────
 # Uses a ThreadedConnectionPool so the scanner's ThreadPoolExecutor workers
-# never exhaust Railway's PostgreSQL connection limit.
+# never exhaust Supabase/Railway's PostgreSQL connection limit.
 _pg_pool = None
 _pg_pool_lock = threading.Lock()
 _PG_POOL_MIN = 2
-_PG_POOL_MAX = 10  # well under Railway's limit
+_PG_POOL_MAX = 5
+_PG_CONNECT_TIMEOUT = 30  # seconds — applies to both pool creation and direct fallback
 
 # Track which live connections came from the pool so _put_pg_conn can return
 # them correctly.  We use id(conn) because psycopg2 connection objects are C
@@ -72,28 +73,69 @@ def _get_pg_pool():
                 import psycopg2.pool
                 url = DATABASE_URL.replace("postgres://", "postgresql://", 1)
                 _pg_pool = psycopg2.pool.ThreadedConnectionPool(
-                    _PG_POOL_MIN, _PG_POOL_MAX, url, sslmode="require"
+                    _PG_POOL_MIN, _PG_POOL_MAX, url,
+                    sslmode="require",
+                    connect_timeout=_PG_CONNECT_TIMEOUT,
                 )
-                print(f"  [db] Connection pool created (min={_PG_POOL_MIN} max={_PG_POOL_MAX})")
+                print(f"  [db] Connection pool created (min={_PG_POOL_MIN} max={_PG_POOL_MAX} timeout={_PG_CONNECT_TIMEOUT}s)")
             except Exception as e:
                 print(f"  [db] Pool creation failed, falling back to direct connect: {e}")
     return _pg_pool
 
 
+def _recreate_pg_pool():
+    """Tear down and rebuild the pool after a broken-connection error."""
+    global _pg_pool
+    with _pg_pool_lock:
+        old = _pg_pool
+        _pg_pool = None
+        if old is not None:
+            try:
+                old.closeall()
+            except Exception:
+                pass
+        try:
+            import psycopg2.pool
+            url = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+            _pg_pool = psycopg2.pool.ThreadedConnectionPool(
+                _PG_POOL_MIN, _PG_POOL_MAX, url,
+                sslmode="require",
+                connect_timeout=_PG_CONNECT_TIMEOUT,
+            )
+            print(f"  [db] Pool recreated (min={_PG_POOL_MIN} max={_PG_POOL_MAX})")
+        except Exception as e:
+            print(f"  [db] Pool recreation failed: {e}")
+
+
 def _get_pg_conn():
-    """Get a PostgreSQL connection from the pool (or direct if pool unavailable)."""
+    """Get a PostgreSQL connection from the pool, waiting up to 30s if exhausted."""
     import psycopg2
+    import time as _time
     pool = _get_pg_pool()
     if pool is not None:
-        try:
-            conn = pool.getconn()
-            with _pooled_conn_ids_lock:
-                _pooled_conn_ids.add(id(conn))
-            return conn
-        except Exception as e:
-            print(f"  [db] Pool.getconn failed: {e} — opening direct connection")
+        deadline = _time.monotonic() + _PG_CONNECT_TIMEOUT
+        delay = 0.05
+        while True:
+            try:
+                conn = pool.getconn()
+                with _pooled_conn_ids_lock:
+                    _pooled_conn_ids.add(id(conn))
+                return conn
+            except psycopg2.pool.PoolError:
+                # All connections checked out — wait and retry
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    print("  [db] Pool exhausted — 30s timeout, opening direct connection")
+                    break
+                _time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 2.0)
+            except Exception as e:
+                # Pool broken (DB restart, SSL timeout, etc.) — rebuild and fall through
+                print(f"  [db] Pool.getconn error ({e}) — recreating pool")
+                _recreate_pg_pool()
+                break
     url = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    conn = psycopg2.connect(url, sslmode="require")
+    conn = psycopg2.connect(url, sslmode="require", connect_timeout=_PG_CONNECT_TIMEOUT)
     return conn
 
 
@@ -108,11 +150,17 @@ def _put_pg_conn(conn):
         if from_pool:
             pool = _get_pg_pool()
             if pool:
-                pool.putconn(conn)
-                return
+                try:
+                    pool.putconn(conn)
+                    return
+                except Exception:
+                    pass  # pool closed/broken — fall through to conn.close()
         conn.close()
     except Exception:
-        pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _get_sqlite_conn() -> sqlite3.Connection:

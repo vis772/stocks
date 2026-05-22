@@ -167,10 +167,10 @@ def check_restart_flag() -> bool:
     Check if a restart was requested via the Telegram bot.
     The bot sets restart_requested = TRUE in scanner_control (id=1).
     If found, we clear it and return True — caller does sys.exit(0)
-    so Railway auto-restarts Service 2.
+    so the container auto-restarts Service 2.
     """
     try:
-        from db.database import _get_pg_conn
+        from db.database import _get_pg_conn, _put_pg_conn
         conn = _get_pg_conn()
         with conn.cursor() as cur:
             cur.execute("SELECT restart_requested FROM scanner_control WHERE id = 1")
@@ -180,11 +180,11 @@ def check_restart_flag() -> bool:
                     "UPDATE scanner_control SET restart_requested = FALSE, updated_at = NOW() WHERE id = 1"
                 )
                 conn.commit()
-                print("[restart] Restart flag detected — exiting for Railway restart")
+                print("[restart] Restart flag detected — exiting for container restart")
                 _log("warning", "Restart requested via Telegram bot — restarting service")
-                conn.close()
+                _put_pg_conn(conn)
                 return True
-        conn.close()
+        _put_pg_conn(conn)
     except Exception as e:
         print(f"[restart] Flag check error: {e}")
     return False
@@ -1730,13 +1730,14 @@ def run_scanner():
                 _log("info", f"Overnight scan | {et.strftime('%H:%M ET')}")
                 if (et - state.last_sec_check).total_seconds() >= 300:
                     try:
-                        from db.database import _is_postgres, _get_pg_conn, _get_sqlite_conn
+                        from db.database import _is_postgres, _get_pg_conn, _put_pg_conn, _get_sqlite_conn
                         if _is_postgres():
                             _oconn = _get_pg_conn()
                             _oc    = _oconn.cursor()
                             _oc.execute("SELECT ticker FROM conviction_buys ORDER BY created_at DESC LIMIT 20")
                             _overnight_wl = [r[0] for r in _oc.fetchall()]
-                            _oconn.close()
+                            _oc.close()
+                            _put_pg_conn(_oconn)
                         else:
                             _oconn = _get_sqlite_conn()
                             _oc    = _oconn.cursor()
