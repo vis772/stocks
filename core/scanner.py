@@ -5,7 +5,10 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import traceback
 
-from config import SCORING_WEIGHTS, SIGNAL_THRESHOLDS, RISK_FLAGS, MIN_SIGNAL_SCORE
+from config import (
+    SCORING_WEIGHTS, SIGNAL_THRESHOLDS, RISK_FLAGS, MIN_SIGNAL_SCORE,
+    STRONG_BUY_MAX_RSI, STRONG_BUY_MAX_5D_RET, STRONG_BUY_MIN_RVOL,
+)
 from data.market_data import fetch_ticker_snapshot, passes_universe_filter
 from data.sec_data import get_recent_filings, analyze_filing_risk, summarize_filing_with_claude
 from data.news_data import fetch_ticker_news, analyze_news_sentiment
@@ -110,7 +113,7 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
     except Exception as e:
         return {**result, "error": f"Market data fetch failed: {str(e)}"}
 
-    result["data_sources"].append("Finnhub (real-time) · Yahoo Finance (history/fundamentals)")
+    result["data_sources"].extend(snapshot.get("data_sources", ["market data"]))
 
     # Step 2: Universe Filter
     passes, reason = passes_universe_filter(snapshot)
@@ -238,8 +241,33 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
             "filter_reason": f"Score {final_score} below MIN_SIGNAL_SCORE ({MIN_SIGNAL_SCORE})",
         }
 
-    # Step 8: Signal
+    # Step 8: Signal — with Strong Buy extension guard
+    #
+    # 600-signal audit finding: Strong Buy (75+) had LOWER win rate (16.1%) than
+    # Speculative Buy (20.5%) because high-scoring setups are often climax setups:
+    # the stock is already extended when all four scoring components align at peak.
+    # Guard demotes to Speculative Buy when any extension condition is true.
+    _rsi_val   = float(technicals.get("rsi_14") or 50)
+    _ret5d     = float(technicals.get("return_5d") or 0)
+    _rvol      = float(snapshot.get("relative_volume") or technicals.get("relative_volume") or 1.0)
+
+    _extension_triggered = False
+    _extension_reason    = ""
+    if final_score >= 75:
+        if _rsi_val > STRONG_BUY_MAX_RSI:
+            _extension_triggered = True
+            _extension_reason    = f"RSI {_rsi_val:.1f} > {STRONG_BUY_MAX_RSI} (overbought — climax risk)"
+        elif _ret5d > STRONG_BUY_MAX_5D_RET:
+            _extension_triggered = True
+            _extension_reason    = f"5-day return +{_ret5d:.1f}% > {STRONG_BUY_MAX_5D_RET}% (already extended)"
+        elif _rvol < STRONG_BUY_MIN_RVOL:
+            _extension_triggered = True
+            _extension_reason    = f"rvol {_rvol:.2f}x < {STRONG_BUY_MIN_RVOL}x (no fresh momentum)"
+
     signal = _score_to_signal(final_score)
+    if _extension_triggered and signal == "Strong Buy Candidate":
+        signal = "Speculative Buy"
+        print(f"  [guard] {ticker} demoted Strong Buy → Speculative Buy: {_extension_reason}")
 
     # Step 9: Risk Flags
     all_flags = list(set(
@@ -315,6 +343,8 @@ def scan_ticker(ticker: str, save: bool = True, weights: Optional[Dict] = None) 
         "scoring_path":           "unified",
         "gap_continuation":       _gap_continuation,
         "gap_continuation_pct":   round(_prev_gap_pct, 2) if _gap_continuation else 0.0,
+        "extension_guard":        _extension_triggered,
+        "extension_reason":       _extension_reason if _extension_triggered else "",
         "score_breakdown": _add_gap_continuation_to_breakdown(
             _build_score_breakdown(
                 tech_score, fund_score, risk_inv, raw_risk, sent_score,

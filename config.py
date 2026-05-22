@@ -1,4 +1,4 @@
-# config.py  (v2 — reweighted 2026-05-20)
+# config.py  (v3 — post 600-signal audit 2026-05-22)
 # Central configuration for the scanner.
 # Edit these values to tune the system to your preferences.
 
@@ -22,34 +22,56 @@ PRICE_MIN = 0.50                   # Minimum price — below this is near-OTC te
 PRICE_MAX = 50.00                  # Maximum price — keep focus on speculative names
 
 # ─── Scoring Weights ───────────────────────────────────────────────────────────
-# These are YOUR assumptions, not objective truth.
-# Adjust them based on what you find actually correlates with your results.
-# They must sum to 1.0
+# Derived from 600-signal component-correlation audit (2026-05-22):
+#   Technical +20.6 differential | Fundamental +11.9 | Risk +8.5 | Sentiment +4.6
+#   Catalyst dropped — 0.0 differential across 600 signals.
+#
+# Weight rationale: scale proportionally to predictive difference, then
+# round to sensible values that sum to 1.0.
+#   Raw diff: tech=20.6, fund=11.9, risk=8.5, sent=4.6  total=45.6
+#   tech share: 20.6/45.6 = 45% → 0.50 (momentum scanner — round up)
+#   fund share: 11.9/45.6 = 26% → 0.22 (quality gate, not predictor)
+#   risk share:  8.5/45.6 = 19% → 0.20 (unchanged — dilution protection)
+#   sent share:  4.6/45.6 = 10% → 0.08 (slight positive signal)
 SCORING_WEIGHTS = {
-    "technical":    0.43,   # Strongest predictor — 43% (includes former catalyst weight)
-    "fundamental":  0.30,   # Second strongest (+11.9 pt diff)
-    "risk":         0.20,   # Third (+8.5 pt diff)
-    "sentiment":    0.07,   # Mild positive (+4.6 pt diff)
+    "technical":    0.50,   # +20.6 diff — momentum, gap, RSI, SMA crossovers
+    "fundamental":  0.22,   # +11.9 diff — revenue growth, balance sheet quality
+    "risk":         0.20,   # +8.5  diff — dilution, short interest, volatility
+    "sentiment":    0.08,   # +4.6  diff — news tone, catalyst keywords
 }
 
 # Validate weights sum to 1.0
 assert abs(sum(SCORING_WEIGHTS.values()) - 1.0) < 0.001, "Scoring weights must sum to 1.0"
 
 # ─── Signal Thresholds ─────────────────────────────────────────────────────────
-# What score ranges map to which recommendation label
+# Only two actionable labels — everything below 62 showed ≤4% win rate in 600-signal audit.
+# Watchlist / Hold / Trim / Sell / Avoid are retained for the UI display layer only;
+# they are never written to signal_log (MIN_SIGNAL_SCORE gate below prevents it).
 SIGNAL_THRESHOLDS = {
     "Strong Buy Candidate": (75, 100),
-    "Speculative Buy":      (60, 75),
-    "Watchlist":            (45, 60),
-    "Hold":                 (35, 45),
-    "Trim":                 (25, 35),
-    "Sell":                 (15, 25),
-    "Avoid":                (0,  15),
+    "Speculative Buy":      (62, 75),
+    "Watchlist":            (50, 62),   # display only — never logged (below MIN_SIGNAL_SCORE)
+    "Hold":                 (38, 50),   # display only
+    "Trim":                 (25, 38),   # display only
+    "Avoid":                (0,  25),   # display only
 }
 
-# Minimum score to log to signal_log — needs 5-15 signals/day to build accuracy data
-MIN_SIGNAL_SCORE = 45
-ALERT_SCORE_MIN  = 60    # minimum score to fire a push alert (higher bar than logging)
+# Minimum score to log to signal_log.
+# Raised from 45 → 62 after 600-signal audit showed:
+#   Watchlist (45-60): 4% win rate (149 signals, pure noise)
+#   Hold (35-45):      0% win rate (48 signals)
+#   Trim (25-35):      0% win rate (18 signals)
+# Only Speculative Buy (60+) and Gap-Up have positive expectancy.
+MIN_SIGNAL_SCORE = 62
+ALERT_SCORE_MIN  = 68   # push alert bar — raised from 60, matches conviction gate
+
+# ─── Strong Buy Extension Guard ───────────────────────────────────────────────
+# 600-signal audit: Strong Buy (75-100) had 16.1% win rate vs Speculative Buy 20.5%.
+# Root cause: high-composite-score setups are often "climax" setups — stock already
+# extended, RSI elevated, 5d return baked in. Cap to Speculative Buy when:
+STRONG_BUY_MAX_RSI    = 68.0   # above this = overbought, demote to Spec Buy
+STRONG_BUY_MAX_5D_RET = 20.0  # 5-day return already >20% = chasing, demote
+STRONG_BUY_MIN_RVOL   = 1.5   # must have fresh volume — static quality ≠ momentum
 
 VOLUME_RATIO_GATE    = 1.5    # alert gate: skip alert if vol < 1.5x 3-month avg (logging still happens)
 PRICE_MOVE_GATE      = 0.01   # alert gate: skip alert if abs(pct_change) < 1% — flat day, no real action
