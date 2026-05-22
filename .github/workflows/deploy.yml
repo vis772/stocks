@@ -1,0 +1,85 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - clean-combined-version
+
+# Cancel any in-progress deploy if a newer push arrives
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: SSH → git pull → docker compose up
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Deploy to Axiom EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+            cd /home/ubuntu/axiom
+
+            echo "========================================"
+            echo " Axiom Terminal — Auto Deploy"
+            echo " Branch : clean-combined-version"
+            echo " Host   : $(hostname)"
+            echo " Time   : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "========================================"
+
+            # ── 1. Pull latest code ──────────────────────────────────────────
+            echo ""
+            echo "==> [1/3] Pulling latest code"
+            git fetch origin
+            git reset --hard origin/clean-combined-version
+            echo "    HEAD: $(git log --oneline -1)"
+
+            # ── 2. Rebuild & restart containers ─────────────────────────────
+            echo ""
+            echo "==> [2/3] Rebuilding containers"
+            docker compose down --remove-orphans
+            docker compose up -d --build
+            echo "    Build complete."
+
+            # ── 3. Health check — all 3 services must be running ────────────
+            echo ""
+            echo "==> [3/3] Verifying services (waiting 12s for containers to stabilise)"
+            sleep 12
+
+            FAILED=0
+            for container in axiom-scanner axiom-dashboard axiom-telegram-bot; do
+              STATUS=$(docker inspect --format='{{.State.Status}}' "$container" 2>/dev/null || echo "missing")
+              RUNNING=$(docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null || echo "false")
+              if [ "$RUNNING" = "true" ]; then
+                UPTIME=$(docker inspect --format='{{.State.StartedAt}}' "$container" 2>/dev/null || echo "?")
+                echo "    [OK]   $container — running (started $UPTIME)"
+              else
+                echo "    [FAIL] $container — status: $STATUS"
+                FAILED=1
+              fi
+            done
+
+            # ── If any container failed, dump recent logs then exit 1 ───────
+            if [ "$FAILED" -ne 0 ]; then
+              echo ""
+              echo "==> One or more services failed. Dumping logs:"
+              for container in axiom-scanner axiom-dashboard axiom-telegram-bot; do
+                echo ""
+                echo "-------- $container (last 30 lines) --------"
+                docker logs --tail=30 "$container" 2>&1 || echo "(no logs available)"
+              done
+              exit 1
+            fi
+
+            echo ""
+            echo "========================================"
+            echo " All 3 services running. Deploy done."
+            echo "========================================"
