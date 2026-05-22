@@ -1,13 +1,16 @@
 # data/massive_client.py
-# Polygon.io data client (accessed via MASSIVE_API_KEY)
+# Massive.com market data client (MASSIVE_API_KEY)
+# polygon.io redirects to massive.com — same URL path structure, different host.
 #
-# Primary endpoints used:
-#   /v2/snapshot/locale/us/markets/stocks/tickers/{ticker}  — live quote + day OHLCV + prevDay
-#   /v2/aggs/ticker/{ticker}/prev                           — guaranteed prev-day close
-#   /v2/aggs/ticker/{ticker}/range/1/day/{from}/{to}        — historical daily OHLCV
-#   /v3/reference/tickers/{ticker}                          — name, market cap, description
+# Free-tier endpoints (work with any key):
+#   /v2/aggs/ticker/{ticker}/prev                           — prev-day close ✅
+#   /v2/aggs/ticker/{ticker}/range/1/day/{from}/{to}        — historical daily OHLCV ✅
+#   /v3/reference/tickers/{ticker}                          — name, market cap ✅
 #
-# All functions return None on failure — callers must fall through to yfinance / Finnhub.
+# Paid-tier only (403 NOT_AUTHORIZED on free):
+#   /v2/snapshot/locale/us/markets/stocks/tickers/{ticker}  — real-time quote ❌
+#
+# Use Massive for historical/reference data; fall through to yfinance/Finnhub for live price.
 
 import os
 import time
@@ -15,7 +18,7 @@ import requests
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
-POLYGON_BASE = "https://api.polygon.io"
+MASSIVE_BASE = "https://api.massive.com"
 
 
 # ─── Core HTTP helper ─────────────────────────────────────────────────────────
@@ -32,13 +35,13 @@ def _get(path: str, params: Optional[dict] = None, timeout: int = 8) -> Optional
         params = {}
     params["apiKey"] = key
     try:
-        resp = requests.get(f"{POLYGON_BASE}{path}", params=params, timeout=timeout)
+        resp = requests.get(f"{MASSIVE_BASE}{path}", params=params, timeout=timeout)
         if resp.status_code == 200:
             return resp.json()
         if resp.status_code == 429:
             # Rate limited — back off once and retry
             time.sleep(1.0)
-            resp = requests.get(f"{POLYGON_BASE}{path}", params=params, timeout=timeout)
+            resp = requests.get(f"{MASSIVE_BASE}{path}", params=params, timeout=timeout)
             if resp.status_code == 200:
                 return resp.json()
         return None
@@ -50,55 +53,19 @@ def _get(path: str, params: Optional[dict] = None, timeout: int = 8) -> Optional
 
 def get_snapshot(ticker: str) -> Optional[dict]:
     """
-    Single-call snapshot for one ticker.
-    Returns the raw Polygon 'ticker' sub-object, e.g.:
-      {day: {o,h,l,c,v}, prevDay: {c,...}, lastTrade: {p,...}, todaysChangePerc}
+    Real-time snapshot — requires Massive paid plan.
+    Returns None on free tier (403 NOT_AUTHORIZED). Use get_prev_close() instead.
     """
-    data = _get(f"/v2/snapshot/locale/us/markets/stocks/tickers/{ticker.upper()}")
-    if not data:
-        return None
-    # Polygon returns {"status": "OK", "ticker": {...}}
-    return data.get("ticker")
+    # Snapshot is paid-tier only. Skip the call to avoid 403 noise.
+    return None
 
 
 def get_quote(ticker: str) -> Optional[Dict[str, Any]]:
     """
-    Normalized quote dict with keys:
-      price, prev_close, volume, high, low, open, change_pct, source
-
-    Uses snapshot as primary; falls back to /prev for prev_close if snapshot
-    prevDay is missing.  Returns None if Polygon has no data for this ticker.
+    Live quote — requires Massive paid plan snapshot endpoint.
+    Returns None on free tier. Callers fall through to yfinance / Finnhub.
     """
-    snap = get_snapshot(ticker)
-    if not snap:
-        return None
-
-    day        = snap.get("day") or {}
-    prev_day   = snap.get("prevDay") or {}
-    last_trade = snap.get("lastTrade") or {}
-
-    # Best available price: lastTrade.p > day.c
-    price = float(last_trade.get("p") or day.get("c") or 0)
-    if price <= 0:
-        return None
-
-    prev_close = float(prev_day.get("c") or 0)
-    if prev_close <= 0:
-        # Try dedicated /prev endpoint as fallback for prev_close
-        prev_close = _get_prev_close_raw(ticker) or price
-
-    change_pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
-
-    return {
-        "price":      price,
-        "prev_close": prev_close,
-        "volume":     float(day.get("v") or 0),
-        "high":       float(day.get("h") or price),
-        "low":        float(day.get("l") or price),
-        "open":       float(day.get("o") or price),
-        "change_pct": round(change_pct, 2),
-        "source":     "massive",
-    }
+    return None
 
 
 def _get_prev_close_raw(ticker: str) -> Optional[float]:
@@ -119,47 +86,10 @@ def get_prev_close(ticker: str) -> Optional[float]:
 
 def batch_quotes(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
     """
-    Fetch quotes for multiple tickers in one HTTP call.
-    Polygon supports up to ~250 tickers per request via the tickers= param.
-    Returns {ticker: quote_dict} — missing tickers are absent from the dict.
+    Batch snapshot — requires Massive paid plan.
+    Returns empty dict on free tier. Callers fall through to yfinance / Finnhub.
     """
-    if not tickers or not _key():
-        return {}
-
-    results: Dict[str, Dict[str, Any]] = {}
-
-    # Polygon allows comma-separated tickers; chunk to be safe
-    chunk_size = 200
-    for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i : i + chunk_size]
-        data  = _get(
-            "/v2/snapshot/locale/us/markets/stocks/tickers",
-            {"tickers": ",".join(t.upper() for t in chunk)},
-        )
-        if not data or not data.get("tickers"):
-            continue
-        for snap in data["tickers"]:
-            sym        = snap.get("ticker", "")
-            day        = snap.get("day") or {}
-            prev_day   = snap.get("prevDay") or {}
-            last_trade = snap.get("lastTrade") or {}
-            price      = float(last_trade.get("p") or day.get("c") or 0)
-            if price <= 0:
-                continue
-            prev_close = float(prev_day.get("c") or price)
-            change_pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
-            results[sym] = {
-                "price":      price,
-                "prev_close": prev_close,
-                "volume":     float(day.get("v") or 0),
-                "high":       float(day.get("h") or price),
-                "low":        float(day.get("l") or price),
-                "open":       float(day.get("o") or price),
-                "change_pct": round(change_pct, 2),
-                "source":     "massive",
-            }
-
-    return results
+    return {}
 
 
 # ─── Daily OHLCV aggregates ───────────────────────────────────────────────────
@@ -224,8 +154,8 @@ def get_ticker_details(ticker: str) -> Optional[Dict[str, Any]]:
 # ─── Convenience: availability check ─────────────────────────────────────────
 
 def is_available() -> bool:
-    """True if MASSIVE_API_KEY is set and the API is reachable."""
+    """True if MASSIVE_API_KEY is set and the API is reachable (tests free-tier /prev endpoint)."""
     if not _key():
         return False
-    data = _get("/v2/snapshot/locale/us/markets/stocks/tickers/SPY")
-    return data is not None
+    data = _get("/v2/aggs/ticker/SPY/prev")
+    return data is not None and bool(data.get("results"))
