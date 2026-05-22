@@ -542,65 +542,117 @@ def compute_and_store_ic(horizon_days: int = 5) -> dict:
 def batch_pre_screen(tickers: list, max_workers: int = 20,
                      timeout_per_ticker: float = 3.0) -> list:
     """
-    Lightweight pre-screen across entire universe using only Finnhub quotes.
+    Lightweight pre-screen across entire universe.
     Computes a quick activity score (gap + rvol) to select top N for full scoring.
 
+    Primary: Massive/Polygon batch snapshot (one HTTP call per 200 tickers).
+    Fallback: per-ticker yfinance fast_info (threaded).
+    Last resort: Finnhub per-ticker (only if both above fail).
+
     Returns list of (ticker, activity_score, price, change_pct, rvol) sorted desc.
-    Uses utils.fh_get so 429 rate-limit responses are automatically retried once.
     """
     import os
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    try:
-        from utils import fh_get as _fhg
-    except Exception:
-        # Fallback if utils not available: plain requests with no retry
-        import requests as _requests
-        def _fhg(endpoint, params, timeout=8):
-            key = os.environ.get("FINNHUB_API_KEY", "")
-            if not key:
-                return None
-            try:
-                r = _requests.get(
-                    f"https://finnhub.io/api/v1/{endpoint}",
-                    params={**params, "token": key},
-                    timeout=timeout,
-                )
-                return r.json() if r.status_code == 200 else None
-            except Exception:
-                return None
+    results = []
 
-    if not os.environ.get("FINNHUB_API_KEY", ""):
-        print("  [batch_screen] No FINNHUB_API_KEY — skipping pre-screen")
-        return [(t, 0.0, 0.0, 0.0, 1.0) for t in tickers[:200]]
-
-    def _fetch_one(ticker: str):
+    # ── 1. Massive batch snapshot ─────────────────────────────────────────────
+    if os.environ.get("MASSIVE_API_KEY"):
         try:
-            d = _fhg("quote", {"symbol": ticker}, timeout=timeout_per_ticker)
-            if not d:
-                return None
-            price = float(d.get("c") or 0)
-            prev  = float(d.get("pc") or 0)
-            vol   = float(d.get("v") or 0)
+            from data.massive_client import batch_quotes
+            quotes = batch_quotes(tickers)
+            for ticker, q in quotes.items():
+                price = q["price"]
+                prev  = q["prev_close"]
+                vol   = q["volume"]
+                if price <= 0 or prev <= 0:
+                    continue
+                chg_pct  = (price - prev) / prev * 100
+                activity = abs(chg_pct) * 2 + min(vol / 500_000, 5.0)
+                results.append((ticker, round(activity, 2), round(price, 4), round(chg_pct, 2), 1.0))
+
+            if results:
+                results.sort(key=lambda x: x[1], reverse=True)
+                print(f"  [batch_screen/massive] Screened {len(tickers)} → {len(results)} active")
+                return results
+        except Exception as e:
+            print(f"  [batch_screen/massive] failed: {e} — falling back to yfinance")
+
+    # ── 2. yfinance fast_info per-ticker (threaded) ───────────────────────────
+    def _yf_one(ticker: str):
+        try:
+            import yfinance as _yf
+            fi    = _yf.Ticker(ticker).fast_info
+            price = float(getattr(fi, "last_price", None) or 0)
+            prev  = float(getattr(fi, "previous_close", None) or 0)
+            vol   = float(getattr(fi, "last_volume", None) or 0)
             if price <= 0 or prev <= 0:
                 return None
-            chg_pct = (price - prev) / prev * 100
-            # Activity score: |gap| + rvol proxy
+            chg_pct  = (price - prev) / prev * 100
             activity = abs(chg_pct) * 2 + min(vol / 500_000, 5.0)
             return (ticker, round(activity, 2), round(price, 4), round(chg_pct, 2), 1.0)
         except Exception:
             return None
 
-    results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_fetch_one, t): t for t in tickers}
-        for fut in as_completed(futures, timeout=120):
+    missing = [t for t in tickers if t not in {r[0] for r in results}]
+    if missing:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_yf_one, t): t for t in missing}
+            for fut in as_completed(futures, timeout=120):
+                try:
+                    res = fut.result()
+                    if res:
+                        results.append(res)
+                except Exception:
+                    pass
+
+    # ── 3. Finnhub last resort (only if yfinance also produced nothing) ────────
+    if not results and os.environ.get("FINNHUB_API_KEY"):
+        try:
+            from utils import fh_get as _fhg
+        except Exception:
+            import requests as _req
+            def _fhg(endpoint, params, timeout=8):
+                key = os.environ.get("FINNHUB_API_KEY", "")
+                if not key:
+                    return None
+                try:
+                    r = _req.get(f"https://finnhub.io/api/v1/{endpoint}",
+                                 params={**params, "token": key}, timeout=timeout)
+                    return r.json() if r.status_code == 200 else None
+                except Exception:
+                    return None
+
+        def _fh_one(ticker: str):
             try:
-                res = fut.result()
-                if res:
-                    results.append(res)
+                d = _fhg("quote", {"symbol": ticker}, timeout=timeout_per_ticker)
+                if not d:
+                    return None
+                price = float(d.get("c") or 0)
+                prev  = float(d.get("pc") or 0)
+                vol   = float(d.get("v") or 0)
+                if price <= 0 or prev <= 0:
+                    return None
+                chg_pct  = (price - prev) / prev * 100
+                activity = abs(chg_pct) * 2 + min(vol / 500_000, 5.0)
+                return (ticker, round(activity, 2), round(price, 4), round(chg_pct, 2), 1.0)
             except Exception:
-                pass
+                return None
+
+        print("  [batch_screen/finnhub] Massive + yfinance both failed — using Finnhub")
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_fh_one, t): t for t in tickers}
+            for fut in as_completed(futures, timeout=120):
+                try:
+                    res = fut.result()
+                    if res:
+                        results.append(res)
+                except Exception:
+                    pass
+
+    if not results:
+        print("  [batch_screen] All sources failed — returning unscored universe")
+        return [(t, 0.0, 0.0, 0.0, 1.0) for t in tickers[:200]]
 
     results.sort(key=lambda x: x[1], reverse=True)
     print(f"  [batch_screen] Screened {len(tickers)} → {len(results)} active tickers")

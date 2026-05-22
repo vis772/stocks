@@ -1,7 +1,7 @@
 # data/market_data.py
-# Primary: Finnhub (real-time, reliable, free tier 60 calls/min)
-# Fallback: yfinance (unlimited but unreliable)
-# New: Earnings calendar warning, sector relative strength
+# Primary: Massive/Polygon.io (MASSIVE_API_KEY)
+# Secondary: yfinance
+# Tertiary: Finnhub (fallback only, FINNHUB_API_KEY)
 
 import os
 import requests
@@ -14,6 +14,12 @@ import warnings
 warnings.filterwarnings("ignore")
 
 from config import MIN_MARKET_CAP, MAX_MARKET_CAP, MIN_AVG_VOLUME
+from data.massive_client import (
+    get_quote      as _massive_quote,
+    get_ticker_details,
+    get_daily_aggs as _massive_daily_aggs,
+    get_intraday_aggs as _massive_intraday_aggs,
+)
 
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 
@@ -56,10 +62,11 @@ def _fh_get(endpoint: str, params: dict) -> Optional[dict]:
 def fetch_ticker_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
     ticker = ticker.upper().strip()
 
-    fh_quote   = _fh_get("quote", {"symbol": ticker})
-    fh_profile = _fh_get("stock/profile2", {"symbol": ticker})
-    fh_metric  = _fh_get("stock/metric", {"symbol": ticker, "metric": "all"})
+    # ── 1. Massive/Polygon: live quote + company details ──────────────────────
+    massive_q      = _massive_quote(ticker)           # {price, prev_close, volume, high, low, open, source}
+    massive_detail = get_ticker_details(ticker)        # {name, market_cap, description, ...}
 
+    # ── 2. yfinance: history + fundamentals (always fetched for 60-day OHLCV) ─
     try:
         yf_ticker = yf.Ticker(ticker)
         hist      = yf_ticker.history(period="60d", auto_adjust=True)
@@ -68,9 +75,25 @@ def fetch_ticker_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
         hist    = pd.DataFrame()
         yf_info = {}
 
-    # Price
+    # ── 3. Finnhub: fallback for quote/profile only when Massive failed ────────
+    fh_quote   = None
+    fh_profile = None
+    fh_metric  = None
+    if not massive_q:
+        fh_quote   = _fh_get("quote",          {"symbol": ticker})
+        fh_profile = _fh_get("stock/profile2", {"symbol": ticker})
+        fh_metric  = _fh_get("stock/metric",   {"symbol": ticker, "metric": "all"})
+        if fh_quote:
+            print(f"  [snapshot/finnhub] {ticker}: Massive unavailable — fell back to Finnhub")
+
+    # Determine active quote source for logging
+    quote_source = "massive" if massive_q else ("finnhub" if fh_quote else "yfinance")
+
+    # ── Price ─────────────────────────────────────────────────────────────────
     price = None
-    if fh_quote and fh_quote.get("c") and fh_quote["c"] > 0:
+    if massive_q:
+        price = massive_q["price"]
+    elif fh_quote and fh_quote.get("c") and fh_quote["c"] > 0:
         price = fh_quote["c"]
     elif yf_info.get("currentPrice"):
         price = yf_info["currentPrice"]
@@ -82,17 +105,21 @@ def fetch_ticker_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
     if not price or price <= 0:
         return None
 
-    # Market cap
+    # ── Market cap ────────────────────────────────────────────────────────────
     market_cap = 0
-    if fh_profile and fh_profile.get("marketCapitalization"):
+    if massive_detail and massive_detail.get("market_cap"):
+        market_cap = massive_detail["market_cap"]          # Polygon already in USD
+    elif fh_profile and fh_profile.get("marketCapitalization"):
         market_cap = fh_profile["marketCapitalization"] * 1_000_000
     elif yf_info.get("marketCap"):
         market_cap = yf_info["marketCap"]
 
-    # Volume — cascade from most to least real-time
+    # ── Volume ────────────────────────────────────────────────────────────────
     today_volume = 0
     avg_vol_20   = 0
-    if fh_quote and fh_quote.get("v"):
+    if massive_q and massive_q.get("volume"):
+        today_volume = int(massive_q["volume"])
+    elif fh_quote and fh_quote.get("v"):
         today_volume = int(fh_quote["v"])
     elif yf_info.get("regularMarketVolume"):
         today_volume = int(yf_info["regularMarketVolume"])
@@ -112,46 +139,48 @@ def fetch_ticker_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
 
     rel_volume = round(today_volume / avg_vol_20, 2) if avg_vol_20 > 0 else 0
 
-    # Identity
-    company_name = (fh_profile or {}).get("name") or yf_info.get("longName") or ticker
-    sector       = (fh_profile or {}).get("finnhubIndustry") or yf_info.get("sector") or "Default"
-    industry     = (fh_profile or {}).get("finnhubIndustry") or yf_info.get("industry") or "Unknown"
+    # ── Identity ──────────────────────────────────────────────────────────────
+    # Massive/Polygon detail > Finnhub profile > yfinance
+    poly_name = (massive_detail or {}).get("name")
+    company_name = poly_name or (fh_profile or {}).get("name") or yf_info.get("longName") or ticker
+    sector       = yf_info.get("sector") or (fh_profile or {}).get("finnhubIndustry") or "Default"
+    industry     = yf_info.get("industry") or (fh_profile or {}).get("finnhubIndustry") or "Unknown"
 
-    # 52-week range
+    # ── 52-week range ─────────────────────────────────────────────────────────
     fh_m        = (fh_metric or {}).get("metric", {})
-    week52_high = fh_m.get("52WeekHigh") or yf_info.get("fiftyTwoWeekHigh")
-    week52_low  = fh_m.get("52WeekLow")  or yf_info.get("fiftyTwoWeekLow")
+    week52_high = yf_info.get("fiftyTwoWeekHigh") or fh_m.get("52WeekHigh")
+    week52_low  = yf_info.get("fiftyTwoWeekLow")  or fh_m.get("52WeekLow")
 
-    # Fundamentals
-    revenue        = yf_info.get("totalRevenue")
-    revenue_growth = yf_info.get("revenueGrowth")
-    gross_margins  = yf_info.get("grossMargins")
-    total_cash     = yf_info.get("totalCash")
-    total_debt     = yf_info.get("totalDebt")
-    free_cashflow        = yf_info.get("freeCashflow")
-    operating_cashflow   = yf_info.get("operatingCashflow")
-    ebitda         = yf_info.get("ebitda")
-    shares_out     = yf_info.get("sharesOutstanding")
-    float_shares   = yf_info.get("floatShares")
+    # ── Fundamentals (all from yfinance — most complete) ─────────────────────
+    revenue             = yf_info.get("totalRevenue")
+    revenue_growth      = yf_info.get("revenueGrowth")
+    gross_margins       = yf_info.get("grossMargins")
+    total_cash          = yf_info.get("totalCash")
+    total_debt          = yf_info.get("totalDebt")
+    free_cashflow       = yf_info.get("freeCashflow")
+    operating_cashflow  = yf_info.get("operatingCashflow")
+    ebitda              = yf_info.get("ebitda")
+    shares_out          = yf_info.get("sharesOutstanding")
+    float_shares        = yf_info.get("floatShares")
 
-    # Valuation
-    pe_ratio = fh_m.get("peTTM")    or yf_info.get("trailingPE")
-    ps_ratio = fh_m.get("psTTM")    or yf_info.get("priceToSalesTrailing12Months")
-    pb_ratio = fh_m.get("pbAnnual") or yf_info.get("priceToBook")
+    # ── Valuation ─────────────────────────────────────────────────────────────
+    pe_ratio = yf_info.get("trailingPE")               or fh_m.get("peTTM")
+    ps_ratio = yf_info.get("priceToSalesTrailing12Months") or fh_m.get("psTTM")
+    pb_ratio = yf_info.get("priceToBook")              or fh_m.get("pbAnnual")
 
-    # Short interest
+    # ── Short interest ────────────────────────────────────────────────────────
     short_pct   = yf_info.get("shortPercentOfFloat")
     short_ratio = yf_info.get("shortRatio")
 
-    # Analyst
+    # ── Analyst ───────────────────────────────────────────────────────────────
     analyst_rec    = yf_info.get("recommendationKey", "none")
     analyst_target = yf_info.get("targetMeanPrice")
     analyst_count  = yf_info.get("numberOfAnalystOpinions", 0)
 
-    # ── OPTION A: Earnings Calendar ───────────────────────────────────────────
-    earnings_date       = None
-    earnings_warning    = False
-    days_to_earnings    = None
+    # ── Earnings Calendar (Finnhub still used — no Polygon free-tier equiv) ───
+    earnings_date    = None
+    earnings_warning = False
+    days_to_earnings = None
     fh_earnings = _fh_get("calendar/earnings", {
         "symbol": ticker,
         "from":   datetime.now().strftime("%Y-%m-%d"),
@@ -168,8 +197,16 @@ def fetch_ticker_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
             except Exception:
                 pass
 
-    # ── OPTION C: Sector Relative Strength ────────────────────────────────────
+    # ── Sector Relative Strength ──────────────────────────────────────────────
     sector_rs = get_sector_relative_strength(ticker, sector, hist)
+
+    # ── OHLCV fields from best available source ───────────────────────────────
+    open_px    = (massive_q or {}).get("open",       (fh_quote or {}).get("o",  price))
+    day_high   = (massive_q or {}).get("high",       (fh_quote or {}).get("h",  price))
+    day_low    = (massive_q or {}).get("low",        (fh_quote or {}).get("l",  price))
+    prev_close = (massive_q or {}).get("prev_close", (fh_quote or {}).get("pc", price))
+
+    print(f"  [snapshot/{quote_source}] {ticker}: ${price:.2f}  mcap=${market_cap/1e6:.0f}M")
 
     return {
         "ticker":              ticker,
@@ -177,10 +214,10 @@ def fetch_ticker_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
         "sector":              sector,
         "industry":            industry,
         "price":               round(price, 4),
-        "open":                (fh_quote or {}).get("o", price),
-        "day_high":            (fh_quote or {}).get("h", price),
-        "day_low":             (fh_quote or {}).get("l", price),
-        "prev_close":          (fh_quote or {}).get("pc", price),
+        "open":                open_px,
+        "day_high":            day_high,
+        "day_low":             day_low,
+        "prev_close":          prev_close,
         "week_52_high":        week52_high,
         "week_52_low":         week52_low,
         "market_cap":          market_cap,
@@ -205,19 +242,17 @@ def fetch_ticker_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
         "analyst_recommendation": analyst_rec,
         "analyst_mean_target":    analyst_target,
         "analyst_count":          analyst_count,
-        # Option A
-        "earnings_date":       earnings_date,
-        "earnings_warning":    earnings_warning,
-        "days_to_earnings":    days_to_earnings,
-        # Option C
-        "sector_etf":          sector_rs.get("etf"),
-        "sector_return_20d":   sector_rs.get("sector_return_20d"),
-        "stock_vs_sector":     sector_rs.get("stock_vs_sector"),
-        "sector_rs_label":     sector_rs.get("label"),
-        "_history":            hist,
-        "_info":               yf_info,
-        "data_sources":        ["Finnhub (real-time)", "Yahoo Finance (history/fundamentals)"],
-        "data_fetched_at":     datetime.now().isoformat(),
+        "earnings_date":          earnings_date,
+        "earnings_warning":       earnings_warning,
+        "days_to_earnings":       days_to_earnings,
+        "sector_etf":             sector_rs.get("etf"),
+        "sector_return_20d":      sector_rs.get("sector_return_20d"),
+        "stock_vs_sector":        sector_rs.get("stock_vs_sector"),
+        "sector_rs_label":        sector_rs.get("label"),
+        "_history":               hist,
+        "_info":                  yf_info,
+        "data_sources":           [quote_source, "yfinance (history/fundamentals)"],
+        "data_fetched_at":        datetime.now().isoformat(),
     }
 
 
@@ -291,15 +326,40 @@ def get_price_history(ticker: str, days: int = 90) -> pd.DataFrame:
 
 
 def get_intraday_candles(ticker: str, resolution: str = "1") -> pd.DataFrame:
-    """Fetch today's intraday candles from Finnhub (4 AM ET → now)."""
+    """
+    Fetch today's intraday candles (4 AM ET → now).
+    Primary: Massive/Polygon minute aggregates.
+    Fallback: Finnhub /stock/candle.
+    """
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+
+    # ── 1. Massive/Polygon minute aggs ────────────────────────────────────────
+    try:
+        res_min = int(resolution) if resolution.isdigit() else 1
+        bars    = _massive_intraday_aggs(ticker, resolution_min=res_min)
+        if bars:
+            df = pd.DataFrame({
+                "Open":   [b["o"] for b in bars],
+                "High":   [b["h"] for b in bars],
+                "Low":    [b["l"] for b in bars],
+                "Close":  [b["c"] for b in bars],
+                "Volume": [b["v"] for b in bars],
+            }, index=pd.to_datetime([b["t"] for b in bars], unit="ms", utc=True).tz_convert(et))
+            print(f"  [candles/massive] {ticker}: {len(df)} bars")
+            return df
+    except Exception as e:
+        print(f"  [candles/massive] {ticker} failed: {e}")
+
+    # ── 2. Finnhub fallback ───────────────────────────────────────────────────
     try:
         import pytz
         key = _fh_key()
         if not key:
             return pd.DataFrame()
-        et     = pytz.timezone("America/New_York")
-        now_et = datetime.now(et)
-        from_et = now_et.replace(hour=4, minute=0, second=0, microsecond=0)
+        et_pytz  = pytz.timezone("America/New_York")
+        now_et   = datetime.now(et_pytz)
+        from_et  = now_et.replace(hour=4, minute=0, second=0, microsecond=0)
         resp = requests.get(
             f"{FINNHUB_BASE}/stock/candle",
             params={"symbol": ticker.upper(), "resolution": resolution,
@@ -313,10 +373,11 @@ def get_intraday_candles(ticker: str, resolution: str = "1") -> pd.DataFrame:
         df = pd.DataFrame({
             "Open": data["o"], "High": data["h"],
             "Low":  data["l"], "Close": data["c"], "Volume": data["v"],
-        }, index=pd.to_datetime(data["t"], unit="s", utc=True).tz_convert(et))
+        }, index=pd.to_datetime(data["t"], unit="s", utc=True).tz_convert(et_pytz))
+        print(f"  [candles/finnhub] {ticker}: {len(df)} bars (Massive unavailable)")
         return df
     except Exception as e:
-        print(f"  [finnhub] intraday candle failed: {e}")
+        print(f"  [candles/finnhub] {ticker} failed: {e}")
         return pd.DataFrame()
 
 

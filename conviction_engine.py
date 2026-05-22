@@ -689,21 +689,20 @@ def _is_market_hours() -> bool:
 
 
 def _fetch_live_ticker(ticker: str) -> dict:
-    """Calls Finnhub /quote. Returns price and pct_change_today."""
-    api_key = os.environ.get("FINNHUB_API_KEY", "")
-    if not api_key:
-        return {"price": 0.0, "pct_change_today": 0.0}
+    """
+    Live price + today's pct change.
+    Waterfall: Massive/Polygon → yfinance → Finnhub (via resilient_fetcher).
+    """
     try:
-        import urllib.request, json as _json
-        url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={api_key}"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            data = _json.loads(resp.read())
-        c  = float(data.get("c") or 0)
-        pc = float(data.get("pc") or 0)
-        pct = (c - pc) / pc * 100 if pc and pc != 0 else 0.0
-        return {"price": c, "pct_change_today": round(pct, 2)}
+        from resilient_fetcher import fetch_quote
+        qr = fetch_quote(ticker)
+        if qr and qr.price > 0:
+            pc  = qr.prev_close
+            pct = (qr.price - pc) / pc * 100 if pc and pc != 0 else 0.0
+            return {"price": qr.price, "pct_change_today": round(pct, 2)}
     except Exception:
-        return {"price": 0.0, "pct_change_today": 0.0}
+        pass
+    return {"price": 0.0, "pct_change_today": 0.0}
 
 
 def _run_ai_analysis(ticker: str, data: dict) -> dict:

@@ -83,20 +83,53 @@ def _get_curated_universe() -> List[str]:
 def quick_screen_ticker(ticker: str) -> Optional[Dict]:
     """
     Quick screen a single ticker for today's activity score.
-    Uses Finnhub quote only (1 API call) for speed.
+    Primary: Massive/Polygon snapshot.  Fallback: yfinance.  Last: Finnhub.
     Returns a dict with activity score or None if not interesting.
     """
     try:
-        # Finnhub quote
-        quote = _fh_get("quote", {"symbol": ticker})
-        if not quote or not quote.get("c") or quote["c"] <= 0:
-            return None
+        # 1. Massive/Polygon (fastest, most reliable)
+        price = prev_close = high = low = volume = 0.0
+        src   = "unknown"
+        try:
+            from data.massive_client import get_quote as _mq
+            mdata = _mq(ticker)
+            if mdata and mdata["price"] > 0:
+                price      = mdata["price"]
+                prev_close = mdata["prev_close"]
+                high       = mdata["high"]
+                low        = mdata["low"]
+                volume     = mdata["volume"]
+                src        = "massive"
+        except Exception:
+            pass
 
-        price      = quote["c"]
-        prev_close = quote["pc"]
-        high       = quote["h"]
-        low        = quote["l"]
-        volume     = quote.get("v", 0)
+        # 2. yfinance fallback
+        if not price:
+            try:
+                fi         = yf.Ticker(ticker).fast_info
+                price      = float(getattr(fi, "last_price", None) or 0)
+                prev_close = float(getattr(fi, "previous_close", None) or price)
+                high       = float(getattr(fi, "day_high", None) or price)
+                low        = float(getattr(fi, "day_low", None) or price)
+                volume     = float(getattr(fi, "last_volume", None) or 0)
+                src        = "yfinance"
+            except Exception:
+                pass
+
+        # 3. Finnhub last resort
+        if not price:
+            quote = _fh_get("quote", {"symbol": ticker})
+            if not quote or not quote.get("c") or quote["c"] <= 0:
+                return None
+            price      = quote["c"]
+            prev_close = quote.get("pc", price)
+            high       = quote.get("h", price)
+            low        = quote.get("l", price)
+            volume     = quote.get("v", 0)
+            src        = "finnhub"
+
+        if not price or price <= 0:
+            return None
 
         if prev_close <= 0:
             return None
@@ -125,6 +158,7 @@ def quick_screen_ticker(ticker: str) -> Optional[Dict]:
             "change_pct":  round(change_pct, 2),
             "volume":      volume,
             "activity":    activity,
+            "data_source": src,
         }
 
     except Exception:

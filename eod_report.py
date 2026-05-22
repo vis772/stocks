@@ -126,35 +126,57 @@ def _fh_get(endpoint: str, params: dict) -> Optional[dict]:
 
 
 def _get_stock_summary(ticker: str) -> Dict:
-    quote   = _fh_get("quote", {"symbol": ticker})
-    profile = _fh_get("stock/profile2", {"symbol": ticker}) or {}
+    # ── Quote: Massive → yfinance → Finnhub (via resilient_fetcher) ───────────
+    price      = 0.0
+    prev_close = 0.0
+    volume     = 0
+    src        = "none"
+    try:
+        from resilient_fetcher import fetch_quote
+        qr         = fetch_quote(ticker)
+        price      = qr.price
+        prev_close = qr.prev_close
+        volume     = qr.volume
+        src        = qr.source
+    except Exception:
+        pass
 
-    if not quote or not quote.get("c"):
+    if not price or price <= 0:
         return {"ticker": ticker, "_failed": True}
 
-    price      = quote.get("c", 0)
-    prev_close = quote.get("pc", 0)
     change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
-    volume     = quote.get("v", 0)
 
-    avg_vol = 0
+    # Company name + sector — Massive details then yfinance
+    company_name = ticker
+    sector       = ""
+    avg_vol      = 0
     try:
-        info    = yf.Ticker(ticker).info
-        avg_vol = info.get("averageVolume", 0) or 0
+        from data.massive_client import get_ticker_details
+        detail = get_ticker_details(ticker)
+        if detail:
+            company_name = detail.get("name", ticker)
+    except Exception:
+        pass
+    try:
+        info         = yf.Ticker(ticker).info
+        company_name = company_name if company_name != ticker else (info.get("longName") or ticker)
+        sector       = info.get("sector") or info.get("industry") or ""
+        avg_vol      = info.get("averageVolume", 0) or 0
     except Exception:
         pass
 
     rel_vol = round(volume / avg_vol, 2) if avg_vol > 0 else 0
+    print(f"  [eod_summary/{src}] {ticker}: ${price:.2f}  {change_pct:+.1f}%")
     return {
         "ticker":       ticker,
-        "company_name": profile.get("name", ticker),
+        "company_name": company_name,
         "price":        round(price, 4),
         "prev_close":   round(prev_close, 4),
         "change_pct":   round(change_pct, 2),
         "volume":       int(volume),
         "avg_volume":   int(avg_vol),
         "rel_volume":   rel_vol,
-        "sector":       profile.get("finnhubIndustry", ""),
+        "sector":       sector,
         "_failed":      False,
     }
 
@@ -186,32 +208,17 @@ def _get_sec_filings(tickers: List[str]) -> List[Dict]:
 
 
 def _get_current_price(ticker: str) -> float:
-    """Fetch current price with fallbacks: Finnhub → Tiingo → yfinance. Never returns 0."""
-    # 1. Finnhub
-    quote = _fh_get("quote", {"symbol": ticker})
-    if quote:
-        price = quote.get("c") or 0
-        if price > 0:
-            return float(price)
-    # 2. Tiingo IEX
+    """Fetch current price. Waterfall: Massive → yfinance → Finnhub → Tiingo. Never returns 0."""
+    # 1. resilient_fetcher — Massive → yfinance → Finnhub → Tiingo internally
     try:
-        tiingo_key = os.environ.get("TIINGO_API_KEY", "")
-        if tiingo_key:
-            resp = requests.get(
-                f"https://api.tiingo.com/iex/{ticker}",
-                headers={"Authorization": f"Token {tiingo_key}",
-                         "Content-Type": "application/json"},
-                timeout=8,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if data and isinstance(data, list) and data[0]:
-                    p = data[0].get("last") or 0
-                    if p > 0:
-                        return float(p)
+        from resilient_fetcher import fetch_quote
+        qr = fetch_quote(ticker)
+        if qr and qr.price > 0:
+            print(f"  [eod_price/{qr.source}] {ticker}: ${qr.price:.2f}")
+            return float(qr.price)
     except Exception:
         pass
-    # 3. yfinance
+    # 2. yfinance direct last-resort
     try:
         hist = yf.Ticker(ticker).history(period="1d")
         if not hist.empty:

@@ -2,11 +2,12 @@
 # Multi-source cascading quote fetcher. Never returns None.
 #
 # Waterfall order (regular session):
-#   1. Tiingo REST /iex  — batch-capable, free tier, reads TIINGO_API_KEY
+#   1. Massive/Polygon REST snapshot — primary, reads MASSIVE_API_KEY
 #   2. yfinance fast_info.last_price — no key, low overhead
-#   3. Finnhub REST /quote — free, 60 req/min
-#   4. AlphaVantage GLOBAL_QUOTE — free, 5 req/min
-#   5. PostgreSQL quote_cache — stale fallback, never fails
+#   3. Finnhub REST /quote — third fallback, 60 req/min, reads FINNHUB_API_KEY
+#   4. Tiingo REST /iex   — fourth fallback, reads TIINGO_API_KEY
+#   5. AlphaVantage GLOBAL_QUOTE — last resort, 5 req/min
+#   6. PostgreSQL quote_cache — stale fallback, never fails
 #
 # After-hours: fetch_afterhours() puts yfinance prepost=True first,
 # then falls through the normal waterfall.
@@ -60,6 +61,7 @@ class _RateLimiter:
 
 
 _RL = {
+    "massive":      _RateLimiter(200,    60),    # Polygon paid tier — conservative cap
     "tiingo":       _RateLimiter(500,    3600),
     "yfinance":     _RateLimiter(10_000, 3600),
     "finnhub":      _RateLimiter(60,     60),
@@ -153,7 +155,38 @@ def _load_stale(ticker: str) -> Optional[QuoteResult]:
         return None
 
 
-# ─── Source 1: Tiingo REST /iex ───────────────────────────────────────────────
+# ─── Source 1: Massive / Polygon.io snapshot ─────────────────────────────────
+
+def _massive(ticker: str) -> Optional[QuoteResult]:
+    if not os.environ.get("MASSIVE_API_KEY") or not _RL["massive"].check("massive"):
+        return None
+    t0 = time.time()
+    try:
+        from data.massive_client import get_quote as _mc_quote
+        q  = _mc_quote(ticker)
+        ms = (time.time() - t0) * 1000
+        if not q or q["price"] <= 0:
+            _log_quality(ticker, "massive", "empty", ms)
+            return None
+        _log_quality(ticker, "massive", "ok", ms)
+        return QuoteResult(
+            ticker=ticker,
+            price=q["price"],
+            prev_close=q["prev_close"],
+            volume=q["volume"],
+            high=q["high"],
+            low=q["low"],
+            source="massive",
+            source_quality="live",
+            latency_ms=ms,
+        )
+    except Exception as e:
+        ms = (time.time() - t0) * 1000
+        _log_quality(ticker, "massive", "error", ms, str(e))
+        return None
+
+
+# ─── Source 2: Tiingo REST /iex ───────────────────────────────────────────────
 
 def _tiingo(ticker: str) -> Optional[QuoteResult]:
     token = os.environ.get("TIINGO_API_KEY", "")
@@ -195,7 +228,7 @@ def _tiingo(ticker: str) -> Optional[QuoteResult]:
         return None
 
 
-# ─── Source 2: yfinance fast_info ─────────────────────────────────────────────
+# ─── Source 3: yfinance fast_info ────────────────────────────────────────────
 
 def _yfinance(ticker: str) -> Optional[QuoteResult]:
     if not _RL["yfinance"].check("yfinance"):
@@ -227,7 +260,7 @@ def _yfinance(ticker: str) -> Optional[QuoteResult]:
         return None
 
 
-# ─── Source 2-AH: yfinance prepost=True (afterhours primary) ─────────────────
+# ─── Source 3-AH: yfinance prepost=True (afterhours primary) ────────────────
 
 def _yfinance_afterhours(ticker: str) -> Optional[QuoteResult]:
     """yfinance with prepost=True — used as the first source after hours."""
@@ -260,7 +293,7 @@ def _yfinance_afterhours(ticker: str) -> Optional[QuoteResult]:
         return None
 
 
-# ─── Source 3: Finnhub REST /quote ────────────────────────────────────────────
+# ─── Source 4: Finnhub REST /quote (third fallback) ─────────────────────────
 
 def _finnhub(ticker: str) -> Optional[QuoteResult]:
     key = os.environ.get("FINNHUB_API_KEY", "")
@@ -295,7 +328,7 @@ def _finnhub(ticker: str) -> Optional[QuoteResult]:
         return None
 
 
-# ─── Source 4: AlphaVantage ───────────────────────────────────────────────────
+# ─── Source 5: AlphaVantage ──────────────────────────────────────────────────
 
 def _alphavantage(ticker: str) -> Optional[QuoteResult]:
     key = os.environ.get("ALPHAVANTAGE_API_KEY", "")
@@ -333,9 +366,11 @@ def _alphavantage(ticker: str) -> Optional[QuoteResult]:
 
 
 # ─── Waterfall lists ──────────────────────────────────────────────────────────
+# Regular session : Massive → yfinance → Finnhub → Tiingo → AlphaVantage
+# After-hours     : yfinance_ah → Massive → Finnhub → Tiingo → AlphaVantage
 
-_SOURCES          = [_tiingo, _yfinance, _finnhub, _alphavantage]
-_SOURCES_AH       = [_yfinance_afterhours, _tiingo, _finnhub, _alphavantage]
+_SOURCES    = [_massive, _yfinance, _finnhub, _tiingo, _alphavantage]
+_SOURCES_AH = [_yfinance_afterhours, _massive, _finnhub, _tiingo, _alphavantage]
 
 
 # ─── Fetcher class ────────────────────────────────────────────────────────────
@@ -368,6 +403,9 @@ class ResilientQuoteFetcher:
                     with self._lock:
                         self._mem_cache[ticker] = (result, time.time() + self.TTL)
                     _store_quote(result)
+                    print(f"  [quote/{result.source}] {ticker}: ${result.price:.2f}  "
+                          f"prev={result.prev_close:.2f}  vol={result.volume:,.0f}  "
+                          f"lat={result.latency_ms:.0f}ms")
                     return result
                 if attempt < 2:
                     time.sleep(0.5 * (2 ** attempt))  # 0.5 s, 1.0 s
@@ -391,8 +429,12 @@ _fetcher = ResilientQuoteFetcher()
 
 
 def fetch_quote(ticker: str) -> QuoteResult:
-    """Regular-session quote. Waterfall: tiingo → yfinance → finnhub → alphavantage → db."""
+    """Regular-session quote. Waterfall: massive → yfinance → finnhub → tiingo → alphavantage → db."""
     return _fetcher.fetch(ticker, afterhours=False)
+
+
+# Alias kept for any legacy callers that used get_quote()
+get_quote = fetch_quote
 
 
 def fetch_quote_afterhours(ticker: str) -> QuoteResult:

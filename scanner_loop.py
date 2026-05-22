@@ -620,33 +620,16 @@ def _check_vwap_alerts(ticker, price, vwap, change_pct, state, et) -> List[str]:
 def scan_one_ticker(ticker: str, state: ScannerState) -> List[str]:
     fired = []
     try:
-        if _FINNHUB_DEGRADED_MODE:
-            # Finnhub is degraded — fall back to resilient_fetcher for real-time quote
-            try:
-                from resilient_fetcher import get_quote as _rf_get_quote
-                _qr = _rf_get_quote(ticker)
-                if not _qr or _qr.price <= 0:
-                    return fired
-                quote = {"c": _qr.price, "pc": _qr.prev_close,
-                         "v": _qr.volume, "h": _qr.high, "l": _qr.low}
-            except Exception:
+        # Always use resilient_fetcher — waterfall: Massive → yfinance → Finnhub
+        try:
+            from resilient_fetcher import fetch_quote as _rf_fetch
+            _qr = _rf_fetch(ticker)
+            if not _qr or _qr.price <= 0:
                 return fired
-        else:
-            quote = _fh_get("quote", {"symbol": ticker})
-        if not quote or not quote.get("c") or quote["c"] <= 0:
-            try:
-                import yfinance as yf
-                _fi = yf.Ticker(ticker).fast_info
-                _p  = getattr(_fi, "last_price", None) or getattr(_fi, "regular_market_price", None)
-                _pc = getattr(_fi, "previous_close", None)
-                if _p and float(_p) > 0:
-                    _p = float(_p); _pc = float(_pc or _p)
-                    quote = {"c": _p, "pc": _pc, "o": _pc, "h": _p, "l": _p, "v": 0}
-                    print(f"  [scan] {ticker} Finnhub failed — yfinance fallback ${_p:.2f}")
-                else:
-                    return fired
-            except Exception:
-                return fired
+            quote = {"c": _qr.price, "pc": _qr.prev_close,
+                     "v": _qr.volume, "h": _qr.high, "l": _qr.low}
+        except Exception:
+            return fired
 
         prev_close = quote["pc"]
         volume     = quote.get("v", 0)
@@ -875,8 +858,11 @@ def run_news_monitor(watchlist: List[str], state: ScannerState):
                                     continue
                                 sentiment    = analysis.get("sentiment", "neutral")
                                 significance = analysis.get("significance", "medium")
-                                quote = _fh_get("quote", {"symbol": ticker})
-                                price = quote.get("c", 0) if quote else 0
+                                try:
+                                    from resilient_fetcher import fetch_quote as _rf_fetch
+                                    price = _rf_fetch(ticker).price
+                                except Exception:
+                                    price = 0
                                 msg_body = format_news_alert(ticker, headline, analysis, price)
                                 priority = PRIORITY_HIGH if significance == "high" else PRIORITY_NORMAL
                                 send_alert(
