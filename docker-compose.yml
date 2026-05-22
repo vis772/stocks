@@ -42,6 +42,21 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # ── Telegram bot (Claude agent, no exposed port) ────────────────────────────
+  telegram-bot:
+    build:
+      context: ./axiom-telegram-bot
+      dockerfile: Dockerfile
+    image: axiom-telegram-bot:latest
+    container_name: axiom-telegram-bot
+    restart: unless-stopped
+    env_file: .env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   axiom-data:
     name: axiom-data
