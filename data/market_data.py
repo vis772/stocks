@@ -382,18 +382,22 @@ def get_intraday_candles(ticker: str, resolution: str = "1") -> pd.DataFrame:
 
 
 def get_chart_data(ticker: str, timeframe: str) -> pd.DataFrame:
-    """Return OHLCV DataFrame for the requested timeframe."""
+    """Return OHLCV DataFrame with lowercase column names for the requested timeframe."""
     if timeframe == "1D":
-        return get_intraday_candles(ticker, resolution="1")
+        df = get_intraday_candles(ticker, resolution="1")
     elif timeframe == "5D":
         try:
             df = yf.Ticker(ticker.upper()).history(period="5d", interval="15m", auto_adjust=True)
-            if not df.empty:
-                return df
+            if df.empty:
+                df = get_intraday_candles(ticker, resolution="15")
         except Exception:
-            pass
-        return get_intraday_candles(ticker, resolution="15")
+            df = get_intraday_candles(ticker, resolution="15")
     elif timeframe == "1M":
-        return get_price_history(ticker, 30)
+        df = get_price_history(ticker, 30)
     else:
-        return get_price_history(ticker, 90)
+        df = get_price_history(ticker, 90)
+
+    # Normalize to lowercase column names so callers don't need to handle both cases
+    if not df.empty:
+        df.columns = df.columns.str.lower()
+    return df
