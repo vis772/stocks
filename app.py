@@ -785,17 +785,21 @@ def _build_live_chart(hist, chart_type, tf, r):
         row_heights=[0.78, 0.22], vertical_spacing=0.02,
     )
 
+    # Normalize columns to lowercase (get_chart_data guarantees lowercase)
+    hist = hist.copy()
+    hist.columns = hist.columns.str.lower()
+
     # ── Price trace ──────────────────────────────────────────────────────────
     if chart_type == "Candle":
         fig.add_trace(go.Candlestick(
-            x=hist.index, open=hist["Open"], high=hist["High"],
-            low=hist["Low"], close=hist["Close"], name="Price",
+            x=hist.index, open=hist["open"], high=hist["high"],
+            low=hist["low"], close=hist["close"], name="Price",
             increasing_line_color="#16a34a", increasing_fillcolor="rgba(22,163,74,0.08)",
             decreasing_line_color="#dc2626", decreasing_fillcolor="rgba(220,38,38,0.08)",
             line=dict(width=1),
         ), row=1, col=1)
     else:
-        close_vals = hist["Close"]
+        close_vals = hist["close"]
         area_color = "#f59e0b"
         fig.add_trace(go.Scatter(
             x=hist.index, y=close_vals, name="Price",
@@ -805,11 +809,11 @@ def _build_live_chart(hist, chart_type, tf, r):
         ), row=1, col=1)
 
     # ── Overlays ─────────────────────────────────────────────────────────────
-    if tf == "1D" and "Volume" in hist.columns:
+    if tf == "1D" and "volume" in hist.columns:
         # VWAP
-        tp = (hist["High"] + hist["Low"] + hist["Close"]) / 3
-        cum_tpv = (tp * hist["Volume"]).cumsum()
-        cum_vol = hist["Volume"].cumsum()
+        tp = (hist["high"] + hist["low"] + hist["close"]) / 3
+        cum_tpv = (tp * hist["volume"]).cumsum()
+        cum_vol = hist["volume"].cumsum()
         vwap = cum_tpv / cum_vol.replace(0, float("nan"))
         fig.add_trace(go.Scatter(
             x=hist.index, y=vwap, name="VWAP",
@@ -818,14 +822,14 @@ def _build_live_chart(hist, chart_type, tf, r):
         ), row=1, col=1)
     elif len(hist) >= 20:
         # SMA20
-        sma20 = hist["Close"].rolling(20).mean()
+        sma20 = hist["close"].rolling(20).mean()
         fig.add_trace(go.Scatter(
             x=hist.index, y=sma20, name="SMA20",
             line=dict(color="#2563eb", width=1, dash="dot"),
             opacity=0.6,
         ), row=1, col=1)
     if len(hist) >= 9:
-        ema9 = hist["Close"].ewm(span=9).mean()
+        ema9 = hist["close"].ewm(span=9).mean()
         fig.add_trace(go.Scatter(
             x=hist.index, y=ema9, name="EMA9",
             line=dict(color="#6d28d9", width=1),
@@ -851,13 +855,13 @@ def _build_live_chart(hist, chart_type, tf, r):
                       annotation_font_size=10, row=1, col=1)
 
     # ── Volume bars ──────────────────────────────────────────────────────────
-    if "Volume" in hist.columns:
+    if "volume" in hist.columns:
         vol_colors = [
             "rgba(22,163,74,0.3)" if c >= o else "rgba(220,38,38,0.3)"
-            for c, o in zip(hist["Close"], hist["Open"])
+            for c, o in zip(hist["close"], hist["open"])
         ]
         fig.add_trace(go.Bar(
-            x=hist.index, y=hist["Volume"],
+            x=hist.index, y=hist["volume"],
             marker_color=vol_colors, name="Vol", showlegend=False,
         ), row=2, col=1)
 
