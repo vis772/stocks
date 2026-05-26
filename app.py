@@ -2236,7 +2236,7 @@ def _terminal_dashboard():
 
             try:
                 from data.market_data import get_chart_data as _gcd
-                _cdf = _gcd(_pick_ticker, period="1d", interval="5m")
+                _cdf = _gcd(_pick_ticker, "1D")
                 if _cdf is not None and not _cdf.empty and "close" in _cdf.columns:
                     _opens  = _cdf.get("open",  _cdf["close"])
                     _highs  = _cdf.get("high",  _cdf["close"])
