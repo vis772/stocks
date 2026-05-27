@@ -76,6 +76,35 @@ def _lock(user_id: int) -> None:
     _pending.pop(user_id, None)
 
 
+def _trim_history(history: list, max_turns: int) -> list:
+    """Trim history to max_turns without splitting tool_use / tool_result pairs.
+
+    A naive front-trim can leave a tool_result block with no preceding tool_use,
+    which the Anthropic API rejects with a 400 invalid_request_error.
+    After trimming, walk forward until the first message is a clean user turn.
+    """
+    if len(history) <= max_turns:
+        return history
+    trimmed = history[-max_turns:]
+    # Skip any leading messages that would cause API errors:
+    #   - assistant message at position 0 (must start with user)
+    #   - user message whose content is tool_result blocks (no paired tool_use)
+    while trimmed:
+        first = trimmed[0]
+        role    = first.get("role", "")
+        content = first.get("content", "")
+        is_tool_result_turn = (
+            role == "user"
+            and isinstance(content, list)
+            and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+        )
+        if role == "assistant" or is_tool_result_turn:
+            trimmed = trimmed[1:]
+        else:
+            break
+    return trimmed
+
+
 # ── Telegram helpers ──────────────────────────────────────────────────────────
 
 async def _send(update: Update, text: str) -> None:
@@ -602,10 +631,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         reply, new_history = _agent_module.chat(text, history)
-        # Trim history to stay within MAX_HISTORY turns
-        if len(new_history) > MAX_HISTORY:
-            new_history = new_history[-MAX_HISTORY:]
-        sess["history"] = new_history
+        sess["history"] = _trim_history(new_history, MAX_HISTORY)
         await _send_chunked(update, reply)
     except Exception as e:
         logger.exception(f"Agent error for user={uid}")
