@@ -21,6 +21,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 import tools
+import agent as _agent_module
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -29,13 +30,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ALLOWED_USER_ID = int(os.environ["TELEGRAM_ALLOWED_USER_ID"])
-SESSION_PIN     = "8000"
-SESSION_TIMEOUT = 4 * 3600   # 4 hours of inactivity → auto-lock
+ALLOWED_USER_ID  = int(os.environ["TELEGRAM_ALLOWED_USER_ID"])
+SESSION_PIN      = "8000"
+SESSION_TIMEOUT  = 4 * 3600   # 4 hours of inactivity → auto-lock
+MAX_HISTORY      = 30         # max message turns kept in memory per session
 
 # ── In-memory session state (resets on every container restart) ───────────────
-# _sessions: user_id → UNIX timestamp of last activity (only present if authenticated)
-_sessions: dict[int, float] = {}
+# _sessions: user_id → {"ts": float, "history": list}
+#   ts      — UNIX timestamp of last activity
+#   history — Claude message history for this session
+_sessions: dict[int, dict] = {}
 
 # _pending: user_id → {"type": "sql"|"restart"|"edit", ...extra data}
 _pending: dict[int, dict] = {}
@@ -44,10 +48,10 @@ _pending: dict[int, dict] = {}
 # ── Session helpers ───────────────────────────────────────────────────────────
 
 def _is_auth(user_id: int) -> bool:
-    ts = _sessions.get(user_id)
-    if ts is None:
+    sess = _sessions.get(user_id)
+    if sess is None:
         return False
-    if time.time() - ts > SESSION_TIMEOUT:
+    if time.time() - sess["ts"] > SESSION_TIMEOUT:
         _sessions.pop(user_id, None)
         _pending.pop(user_id, None)
         return False
@@ -55,8 +59,11 @@ def _is_auth(user_id: int) -> bool:
 
 
 def _touch(user_id: int) -> None:
-    """Refresh session timestamp."""
-    _sessions[user_id] = time.time()
+    """Refresh session timestamp. Creates a blank session if one doesn't exist."""
+    if user_id in _sessions:
+        _sessions[user_id]["ts"] = time.time()
+    else:
+        _sessions[user_id] = {"ts": time.time(), "history": []}
 
 
 def _lock(user_id: int) -> None:
@@ -388,11 +395,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # ── Layer 2: PIN gate ─────────────────────────────────────────────────────
     if not _is_auth(uid):
         if text == SESSION_PIN:
-            _touch(uid)
+            _sessions[uid] = {"ts": time.time(), "history": []}
             logger.info(f"[AUDIT] user={uid} authenticated via PIN")
             await _send(update, (
-                "✅ <b>PIN accepted.</b> Session active (auto-locks after 4h idle).\n\n"
-                + _help_text()
+                "✅ <b>PIN accepted.</b> Session active for 4 hours.\n\n"
+                "Just talk to me normally — ask about signals, scanner health, "
+                "logs, anything. Slash commands still work too.\n\n"
+                "Examples:\n"
+                "• <i>any signals today?</i>\n"
+                "• <i>show me scanner logs</i>\n"
+                "• <i>what's the win rate this week?</i>\n"
+                "• <i>restart the scanner</i>"
             ))
         else:
             logger.warning(f"[AUDIT] user={uid} bad PIN attempt")
@@ -437,8 +450,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _send(update, f"⏳ Waiting for <b>confirm</b> or <b>cancel</b>.")
         return
 
-    # ── No pending action — unknown free text ─────────────────────────────────
-    await _send(update, "Use /help to see available commands.")
+    # ── No pending action — route to Claude Haiku agent ─────────────────────
+    _audit(uid, "agent", text[:80])
+    sess    = _sessions[uid]
+    history = sess.get("history", [])
+
+    # Show typing indicator for longer responses
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action="typing"
+    )
+
+    try:
+        reply, new_history = _agent_module.chat(text, history)
+        # Trim history to stay within MAX_HISTORY turns
+        if len(new_history) > MAX_HISTORY:
+            new_history = new_history[-MAX_HISTORY:]
+        sess["history"] = new_history
+        await _send_chunked(update, reply)
+    except Exception as e:
+        logger.exception(f"Agent error for user={uid}")
+        await _send(update, f"❌ Agent error: {e}")
 
 
 # ── Document handler (file upload for /edit) ──────────────────────────────────
@@ -523,7 +554,7 @@ def main() -> None:
     # Document uploads for /edit
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    logger.info("Axiom Admin Bot starting — slash command mode with PIN auth")
+    logger.info("Axiom Admin Bot starting — Claude Haiku agent + slash commands, PIN auth")
     app.run_polling(drop_pending_updates=True)
 
 
