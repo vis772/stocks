@@ -6,9 +6,11 @@ services:
     build: .
     image: axiom-terminal:latest
     container_name: axiom-scanner
-    command: python scanner_loop.py
+    command: python -u scanner_loop.py
     restart: always                          # hard restart (not unless-stopped)
     env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
     volumes:
       - ./data:/app/data
       - axiom-data:/app/data/persistent
