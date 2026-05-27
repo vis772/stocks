@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 from typing import List
 
 # ─── Market Cap Filters ────────────────────────────────────────────────────────
-# Small-cap: $20M–$2B | Mid-cap: $2B–$20B
-MIN_MARKET_CAP = 20_000_000       # $20M floor
-MAX_MARKET_CAP = 20_000_000_000   # $20B ceiling — matches universe_manager.CRITERIA
+# Small-cap: $20M–$2B | Mid-cap: $2B–$20B | Large-cap: $20B–$200B
+MIN_MARKET_CAP = 20_000_000         # $20M floor
+MAX_MARKET_CAP = 200_000_000_000    # $200B ceiling — includes large-cap names
 
 # ─── Volume Filters ────────────────────────────────────────────────────────────
 MIN_AVG_VOLUME = 500_000           # Minimum average daily volume (liquidity floor)
@@ -19,7 +19,7 @@ UNUSUAL_VOLUME_MULTIPLIER = 2.0    # Flag if today's volume > 2x the 20-day aver
 RSI_OVERSOLD = 35                  # Below this = potentially oversold (not a buy signal alone)
 RSI_OVERBOUGHT = 72                # Above this = extended, caution on new entries
 PRICE_MIN = 0.50                   # Minimum price — below this is near-OTC territory
-PRICE_MAX = 50.00                  # Maximum price — keep focus on speculative names
+PRICE_MAX = 1000.00                # Maximum price — raised to include large-cap names
 
 # ─── Scoring Weights ───────────────────────────────────────────────────────────
 # Derived from 600-signal component-correlation audit (2026-05-22):

@@ -26,6 +26,29 @@ def _safe(v, fb=0.0):
         return fb
 
 
+def _is_ah_signal(created_at) -> bool:
+    """
+    Returns True if the signal was created during after-hours (4 PM – midnight ET).
+    Used to set afterhours_trending_up so the OVERNIGHT hold type can fire.
+    """
+    if created_at is None:
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+        _et = ZoneInfo("America/New_York")
+        from datetime import datetime, timezone
+        if isinstance(created_at, str):
+            dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        else:
+            dt = created_at
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        et_hour = dt.astimezone(_et).hour
+        return et_hour >= 16  # 4 PM ET or later = after-hours
+    except Exception:
+        return False
+
+
 def now_et():
     try:
         from zoneinfo import ZoneInfo
@@ -324,7 +347,7 @@ class ConvictionEngine:
                 cur.execute("""
                     SELECT sl.ticker, sl.score, sl.price_at_signal,
                            sl.quant_adj, sl.source_quality, sl.volume_at_signal,
-                           sl.score_breakdown, sl.catalyst_mult
+                           sl.score_breakdown, sl.catalyst_mult, sl.created_at
                     FROM signal_log sl
                     WHERE DATE(sl.created_at AT TIME ZONE 'America/New_York') = CURRENT_DATE AT TIME ZONE 'America/New_York'
                       AND sl.score >= 65
@@ -339,7 +362,7 @@ class ConvictionEngine:
                 cur.execute("""
                     SELECT sl.ticker, sl.score, sl.price_at_signal,
                            sl.quant_adj, sl.source_quality, sl.volume_at_signal,
-                           sl.score_breakdown, sl.catalyst_mult
+                           sl.score_breakdown, sl.catalyst_mult, sl.created_at
                     FROM signal_log sl
                     WHERE DATE(sl.created_at) = DATE('now')
                       AND sl.score >= 65
@@ -499,7 +522,7 @@ class ConvictionEngine:
                     "short_percent_float":  _short_pct,
                     "earnings_within_2d":   earnings_2d,
                     "earnings_within_3d":   earnings_2d,
-                    "afterhours_trending_up": False,
+                    "afterhours_trending_up": _is_ah_signal(d.get("created_at")),
                     "claude_sentiment":  "",
                     "bucket_win_rate":   bm.get("win_rate"),
                     "bucket_avg_win":    bm.get("avg_win"),

@@ -21,11 +21,11 @@ from typing import List, Dict, Optional
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 
 CRITERIA = {
-    "min_market_cap": 100_000_000,     # $100M floor — filters out micro-cap noise
-    "max_market_cap": 20_000_000_000,  # $20B ceiling (small + mid-cap universe)
+    "min_market_cap": 100_000_000,      # $100M floor — filters out micro-cap noise
+    "max_market_cap": 200_000_000_000,  # $200B ceiling — includes large-cap names
     "min_adv":        200_000,          # 200K shares/day — broad enough to capture emerging movers
-    "min_price":      2.00,            # $2+ minimum — eliminates most penny/OTC noise
-    "max_price":      300.0,           # $300 cap — focus on actionable price range
+    "min_price":      2.00,             # $2+ minimum — eliminates most penny/OTC noise
+    "max_price":      2000.0,           # raised to allow large-caps (NVDA, MSFT, AVGO etc.)
 }
 
 # Symbols containing these patterns are almost certainly not common stock
