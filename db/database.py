@@ -11,6 +11,7 @@
 
 import os
 import json
+import queue as _queue
 import sqlite3
 import threading
 import pandas as pd
@@ -2259,38 +2260,75 @@ def change_user_password(user_id: int, new_hash: str) -> bool:
 
 
 # ─── Scanner Logs ──────────────────────────────────────────────────────────────
+# log_scanner_event is called from 50 concurrent scan threads via _log().
+# To avoid each thread grabbing a pool connection, we use a background queue:
+# callers enqueue instantly (non-blocking) and one daemon thread does all writes.
+
+_log_queue: _queue.Queue = _queue.Queue(maxsize=2000)
+_log_trim_counter = 0
+
+
+def _log_writer_daemon() -> None:
+    """Single background thread: drains _log_queue and batch-writes to scanner_logs."""
+    global _log_trim_counter
+    while True:
+        batch = []
+        try:
+            item = _log_queue.get(timeout=2.0)
+            batch.append(item)
+            while len(batch) < 100:
+                try:
+                    batch.append(_log_queue.get_nowait())
+                except _queue.Empty:
+                    break
+        except _queue.Empty:
+            continue
+
+        if not batch:
+            continue
+
+        if _is_postgres():
+            try:
+                with _pg_conn_ctx() as conn:
+                    cur = conn.cursor()
+                    cur.executemany(
+                        "INSERT INTO scanner_logs (level, message) VALUES (%s, %s)",
+                        batch,
+                    )
+                    _log_trim_counter += len(batch)
+                    if _log_trim_counter >= 200:
+                        cur.execute("""
+                            DELETE FROM scanner_logs WHERE id NOT IN (
+                                SELECT id FROM scanner_logs ORDER BY created_at DESC LIMIT 500
+                            )
+                        """)
+                        _log_trim_counter = 0
+                    conn.commit(); cur.close()
+            except Exception as e:
+                print(f"  [db] log_writer_daemon error: {e}")
+        else:
+            try:
+                conn = _get_sqlite_conn()
+                conn.executemany(
+                    "INSERT INTO scanner_logs (level, message) VALUES (?, ?)", batch
+                )
+                conn.commit(); conn.close()
+            except Exception as e:
+                print(f"  [db] log_writer_daemon (sqlite) error: {e}")
+
+
+_log_writer_thread = threading.Thread(
+    target=_log_writer_daemon, daemon=True, name="db-log-writer"
+)
+_log_writer_thread.start()
+
 
 def log_scanner_event(level: str, message: str) -> None:
-    """Write a structured log line to scanner_logs. Trims table to 500 rows."""
-    level = level.lower().strip()
+    """Enqueue a log event for background write. Non-blocking — never touches the pool."""
     try:
-        if _is_postgres():
-            with _pg_conn_ctx() as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "INSERT INTO scanner_logs (level, message) VALUES (%s, %s)",
-                    (level, message[:500])
-                )
-                cur.execute("""
-                    DELETE FROM scanner_logs WHERE id NOT IN (
-                        SELECT id FROM scanner_logs ORDER BY created_at DESC LIMIT 500
-                    )
-                """)
-                conn.commit(); cur.close()
-        else:
-            conn = _get_sqlite_conn()
-            conn.execute(
-                "INSERT INTO scanner_logs (level, message) VALUES (?, ?)",
-                (level, message[:500])
-            )
-            conn.execute("""
-                DELETE FROM scanner_logs WHERE id NOT IN (
-                    SELECT id FROM scanner_logs ORDER BY created_at DESC LIMIT 500
-                )
-            """)
-            conn.commit(); conn.close()
-    except Exception as e:
-        print(f"  [db] log_scanner_event failed: {e}")
+        _log_queue.put_nowait((level.lower().strip(), message[:500]))
+    except _queue.Full:
+        pass  # drop if queue is full — logging is best-effort
 
 
 def get_scanner_logs(limit: int = 50) -> List[dict]:
