@@ -435,13 +435,6 @@ def _stream_subscription_set(watchlist: List[str]) -> List[str]:
     from config import DEFAULT_UNIVERSE
     tickers = set(t.upper() for t in watchlist if t)
     tickers.update(DEFAULT_UNIVERSE)
-    try:
-        from db.database import get_portfolio
-        pf = get_portfolio()
-        if not pf.empty:
-            tickers.update(t.upper() for t in pf["ticker"].tolist())
-    except Exception:
-        pass
     return sorted(tickers)
 
 

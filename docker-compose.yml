@@ -1,12 +1,13 @@
 services:
 
-  # ── Background scanner (runs forever, no exposed port) ──────────────────────
+  # ── Background scanner — all available CPU/memory ───────────────────────────
+  # dashboard service removed; scanner now owns all resources
   scanner:
     build: .
     image: axiom-terminal:latest
     container_name: axiom-scanner
     command: python scanner_loop.py
-    restart: unless-stopped
+    restart: always                          # hard restart (not unless-stopped)
     env_file: .env
     volumes:
       - ./data:/app/data
@@ -17,38 +18,20 @@ services:
         max-size: "20m"
         max-file: "5"
 
-  # ── Streamlit dashboard (port 8501) ─────────────────────────────────────────
-  dashboard:
-    build: .
-    image: axiom-terminal:latest
-    container_name: axiom-dashboard
-    command: >
-      streamlit run app.py
-      --server.port=8501
-      --server.address=0.0.0.0
-      --server.headless=true
-    restart: unless-stopped
-    env_file: .env
-    ports:
-      - "8501:8501"
-    volumes:
-      - ./data:/app/data
-      - axiom-data:/app/data/persistent
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "20m"
-        max-file: "5"
-
-  # ── Telegram bot (Claude agent, no exposed port) ────────────────────────────
+  # ── Telegram admin terminal ──────────────────────────────────────────────────
   telegram-bot:
     build:
       context: ./axiom-telegram-bot
       dockerfile: Dockerfile
     image: axiom-telegram-bot:latest
     container_name: axiom-telegram-bot
-    restart: unless-stopped
+    restart: always
     env_file: .env
+    environment:
+      PROJECT_DIR: /project               # host project root inside container
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # docker CLI access for /logs /restart /status
+      - /home/ubuntu/axiom:/project:rw              # project filesystem for /files /read /edit
     logging:
       driver: "json-file"
       options:

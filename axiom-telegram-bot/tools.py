@@ -1,778 +1,342 @@
 """
-Axiom Terminal — Tool Implementations
-All database and system tools available to the Claude agent.
+Axiom Admin Bot — Tool implementations.
+DB queries, shell execution, Docker management, filesystem access.
+All functions return plain strings suitable for Telegram messages.
 """
 
 import os
-import json
+import subprocess
 import logging
 import psycopg2
 import psycopg2.extras
-from datetime import datetime, timedelta, timezone
+from datetime import date, timedelta
 
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+PROJECT_DIR  = os.environ.get("PROJECT_DIR", "/project")
 
-READONLY_KEYWORDS = ["drop", "delete", "truncate", "insert", "update", "alter", "create", "grant", "revoke"]
+# Map short service names to Docker container names
+CONTAINERS = {
+    "scanner": "axiom-scanner",
+    "bot":     "axiom-telegram-bot",
+}
 
 
-def _get_conn():
+# ── DB ────────────────────────────────────────────────────────────────────────
+
+def _conn():
     return psycopg2.connect(DATABASE_URL)
 
 
-def _safe_sql(sql: str) -> bool:
-    """Reject any SQL that isn't a SELECT."""
-    cleaned = sql.strip().lower()
-    if not cleaned.startswith("select"):
-        return False
-    for kw in READONLY_KEYWORDS:
-        if f" {kw} " in f" {cleaned} ":
-            return False
-    return True
+def is_write_sql(sql: str) -> bool:
+    """True if the SQL is not a read-only statement."""
+    first = sql.strip().lower().split()[0] if sql.strip() else ""
+    return first not in ("select", "with", "explain", "show")
 
 
-# ── READ TOOLS ───────────────────────────────────────────────────────────────
-
-def query_database(sql: str, description: str = "") -> dict:
-    """Run a read-only SQL query."""
-    if not _safe_sql(sql):
-        return {"error": "Only SELECT queries are allowed via this tool."}
+def run_sql(sql: str) -> str:
+    """
+    Execute any SQL query.
+    SELECTs return formatted rows (max 50).
+    Writes commit and return rows-affected.
+    Returns a plain string — caller wraps in <pre> for Telegram.
+    """
     try:
-        with _get_conn() as conn:
+        with psycopg2.connect(DATABASE_URL) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(sql)
-                rows = cur.fetchmany(100)
-                return {
-                    "rows": [dict(r) for r in rows],
-                    "count": len(rows),
-                    "description": description
-                }
-    except Exception as e:
-        logger.error(f"query_database error: {e}")
-        return {"error": str(e)}
-
-
-def get_scanner_status() -> dict:
-    """Check scanner health — last run time, today's signal count, universe size, current mode."""
-    try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT created_at, ticker, signal_label, score
-                    FROM signal_log
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                """)
-                last_signal = cur.fetchone()
-
-                cur.execute("SELECT COUNT(*) as count FROM signal_log WHERE created_at >= CURRENT_DATE")
-                today_count = cur.fetchone()["count"]
-
-                cur.execute("SELECT COUNT(*) as count FROM signal_log")
-                total_count = cur.fetchone()["count"]
-
-                cur.execute("SELECT COUNT(*) as count FROM stock_universe WHERE active = TRUE")
-                try:
-                    universe_size = cur.fetchone()["count"]
-                except Exception:
-                    universe_size = None
-
-                cur.execute("""
-                    SELECT paused, force_scan, current_mode, scanner_started_at, updated_at
-                    FROM scanner_control WHERE id = 1
-                """)
-                ctrl = cur.fetchone()
-
-                cur.execute("""
-                    SELECT scan_count FROM scanner_state
-                    WHERE date = CURRENT_DATE::TEXT
-                    LIMIT 1
-                """)
-                try:
-                    state_row = cur.fetchone()
-                    scan_cycles_today = state_row["scan_count"] if state_row else 0
-                except Exception:
-                    scan_cycles_today = None
-
-                # Top signals today for quick overview
-                cur.execute("""
-                    SELECT ticker, signal_label, score
-                    FROM signal_log
-                    WHERE created_at >= CURRENT_DATE
-                    ORDER BY score DESC
-                    LIMIT 5
-                """)
-                top_today = [dict(r) for r in cur.fetchall()]
-
-                now = datetime.now(timezone.utc)
-                if last_signal and last_signal["created_at"]:
-                    last_run = last_signal["created_at"]
-                    if last_run.tzinfo is None:
-                        last_run = last_run.replace(tzinfo=timezone.utc)
-                    minutes_since = (now - last_run).total_seconds() / 60
-                    status = "ACTIVE" if minutes_since < 45 else "IDLE"
+                if cur.description:
+                    rows = cur.fetchmany(50)
+                    if not rows:
+                        return "(0 rows)"
+                    cols = [d.name for d in cur.description]
+                    # Column widths
+                    widths = [
+                        max(len(c), max((len(str(r.get(c, "") or "")) for r in rows), default=0))
+                        for c in cols
+                    ]
+                    sep    = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+                    header = "|" + "|".join(f" {c.ljust(w)} " for c, w in zip(cols, widths)) + "|"
+                    lines  = [sep, header, sep]
+                    for row in rows:
+                        lines.append(
+                            "|" + "|".join(
+                                f" {str(row.get(c) if row.get(c) is not None else 'NULL').ljust(w)} "
+                                for c, w in zip(cols, widths)
+                            ) + "|"
+                        )
+                    lines.append(sep)
+                    if len(rows) == 50:
+                        lines.append("(showing first 50 rows)")
+                    return "\n".join(lines)
                 else:
-                    minutes_since = None
-                    status = "NO DATA"
-
-                return {
-                    "status": status,
-                    "current_mode": ctrl["current_mode"] if ctrl else "UNKNOWN",
-                    "paused": ctrl["paused"] if ctrl else False,
-                    "last_signal": {
-                        "ticker": last_signal["ticker"] if last_signal else None,
-                        "signal_label": last_signal["signal_label"] if last_signal else None,
-                        "score": last_signal["score"] if last_signal else None,
-                        "created_at": str(last_signal["created_at"]) if last_signal else None,
-                    },
-                    "minutes_since_last_signal": round(minutes_since, 1) if minutes_since else None,
-                    "signals_today": today_count,
-                    "scan_cycles_today": scan_cycles_today,
-                    "total_signals_all_time": total_count,
-                    "universe_size": universe_size,
-                    "top_signals_today": top_today,
-                    "scanner_started_at": str(ctrl["scanner_started_at"]) if ctrl and ctrl["scanner_started_at"] else None,
-                }
+                    # Write query — context manager commits on success
+                    rowcount = cur.rowcount
+                    return f"OK — {rowcount} row(s) affected."
     except Exception as e:
-        logger.error(f"get_scanner_status error: {e}")
-        return {"error": str(e)}
+        return f"ERROR: {e}"
 
 
-def get_accuracy_summary(window: str = "5day") -> dict:
-    """Summarize accuracy test progress and win rates."""
-    price_col_map = {
-        "1hr": "price_1hr",
-        "1day": "price_1day",
-        "5day": "price_5day",
-        "15day": "price_15day"
-    }
-    price_col = price_col_map.get(window, "price_5day")
+# ── Shell / Docker ────────────────────────────────────────────────────────────
 
+def _sh(cmd: str, timeout: int = 20) -> str:
+    """Run a shell command; return combined stdout+stderr."""
     try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT COUNT(*) as total FROM signal_log")
-                total = cur.fetchone()["total"]
+        r = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=timeout
+        )
+        out = (r.stdout + r.stderr).strip()
+        return out if out else "(no output)"
+    except subprocess.TimeoutExpired:
+        return f"Timed out after {timeout}s"
+    except Exception as e:
+        return f"Error: {e}"
 
-                cur.execute(f"""
-                    SELECT
-                        sl.signal_label,
-                        COUNT(*) as total,
-                        COUNT(so.{price_col}) as resolved,
-                        SUM(CASE
-                            WHEN so.{price_col} IS NOT NULL
-                            AND so.{price_col} > sl.price_at_signal * 1.05
-                            AND sl.signal_label ILIKE '%buy%'
-                            THEN 1
-                            WHEN so.{price_col} IS NOT NULL
-                            AND so.{price_col} < sl.price_at_signal * 0.95
-                            AND sl.signal_label ILIKE '%short%'
-                            THEN 1
-                            ELSE 0
-                        END) as wins
+
+def docker_logs(service: str = "scanner", lines: int = 50) -> str:
+    container = CONTAINERS.get(service.lower(), f"axiom-{service}")
+    return _sh(f"docker logs --tail {lines} --timestamps {container} 2>&1")
+
+
+def docker_restart(service: str) -> str:
+    container = CONTAINERS.get(service.lower(), f"axiom-{service}")
+    out = _sh(f"docker restart {container}", timeout=40)
+    return f"Restarted {container}\n{out}"
+
+
+def docker_status() -> str:
+    ps     = _sh("docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.RunningFor}}'")
+    cpu    = _sh("grep 'cpu ' /proc/stat | awk '{u=$2+$4; t=$2+$4+$5} END {printf \"%.1f%%\", u/t*100}'")
+    mem    = _sh("free -h | awk '/^Mem:/{print $3\"/\"$2\" (\"int($3/$2*100)\"%)\"}'")
+    disk   = _sh("df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'")
+    uptime = _sh("uptime -p")
+    return (
+        f"<b>Containers</b>\n<pre>{ps}</pre>\n\n"
+        f"<b>CPU:</b>    {cpu}\n"
+        f"<b>Memory:</b> {mem}\n"
+        f"<b>Disk:</b>   {disk}\n"
+        f"<b>Uptime:</b> {uptime}"
+    )
+
+
+def run_command(cmd: str) -> str:
+    return _sh(cmd, timeout=30)
+
+
+# ── Filesystem ────────────────────────────────────────────────────────────────
+
+def _resolve(path: str) -> str:
+    """
+    Resolve user path to an absolute path inside the container.
+    Relative paths → under PROJECT_DIR.
+    Absolute paths → used as-is (allows /etc, /proc, etc. for sysadmin use).
+    """
+    if not path or path in (".", ""):
+        return PROJECT_DIR
+    if os.path.isabs(path):
+        return path
+    return os.path.join(PROJECT_DIR, path.lstrip("/"))
+
+
+def list_files(path: str = "") -> str:
+    resolved = _resolve(path)
+    try:
+        entries = []
+        with os.scandir(resolved) as it:
+            for e in sorted(it, key=lambda x: (not x.is_dir(), x.name.lower())):
+                if e.name.startswith("."):
+                    continue
+                icon = "📁" if e.is_dir() else "📄"
+                sz   = ""
+                if e.is_file():
+                    b = e.stat().st_size
+                    sz = f"  {b // 1024}KB" if b >= 1024 else f"  {b}B"
+                entries.append(f"{icon} {e.name}{sz}")
+        return f"{resolved}\n" + ("\n".join(entries) if entries else "(empty)")
+    except PermissionError:
+        return f"Permission denied: {resolved}"
+    except FileNotFoundError:
+        return f"Not found: {resolved}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def read_file(path: str) -> str:
+    resolved = _resolve(path)
+    try:
+        if os.path.isdir(resolved):
+            return f"{resolved} is a directory — use /files instead."
+        size = os.path.getsize(resolved)
+        with open(resolved, "r", errors="replace") as f:
+            content = f.read(8000)
+        if size > 8000:
+            content += f"\n\n[...truncated — {size:,} bytes total, showing first 8000]"
+        return content
+    except FileNotFoundError:
+        return f"Not found: {resolved}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def write_file(path: str, content: str) -> str:
+    resolved = _resolve(path)
+    try:
+        parent = os.path.dirname(resolved)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(resolved, "w") as f:
+            f.write(content)
+        return f"✅ Written — {len(content):,} chars → {resolved}"
+    except Exception as e:
+        return f"❌ Write failed: {e}"
+
+
+# ── Scanner data ──────────────────────────────────────────────────────────────
+
+def get_stats() -> str:
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+
+                cur.execute("SELECT COUNT(*) AS n FROM signal_log")
+                total = cur.fetchone()["n"]
+
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM signal_log WHERE created_at >= CURRENT_DATE"
+                )
+                today = cur.fetchone()["n"]
+
+                cur.execute("""
+                    SELECT COUNT(*) AS n
                     FROM signal_log sl
-                    LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
-                    GROUP BY sl.signal_label
-                    ORDER BY total DESC
+                    JOIN signal_outcomes so ON so.signal_id = sl.id
+                    WHERE so.ret_5d IS NOT NULL
                 """)
-                by_label = cur.fetchall()
+                graded = cur.fetchone()["n"]
 
-                breakdown = []
-                for row in by_label:
-                    resolved = row["resolved"] or 0
-                    wins = row["wins"] or 0
-                    win_rate = round(wins / resolved * 100, 1) if resolved > 0 else None
-                    breakdown.append({
-                        "signal_label": row["signal_label"],
-                        "total": row["total"],
-                        "resolved": resolved,
-                        "wins": wins,
-                        "win_rate_pct": win_rate
-                    })
+                cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM signal_log sl
+                    JOIN signal_outcomes so ON so.signal_id = sl.id
+                    WHERE so.ret_5d > 0
+                """)
+                wins = cur.fetchone()["n"]
 
-                # Checkpoints: 150 / 350 / 600
-                checkpoints = {
-                    "checkpoint_1": {"target": 150, "label": "Sanity Check", "reached": total >= 150},
-                    "checkpoint_2": {"target": 350, "label": "Preliminary Assessment", "reached": total >= 350},
-                    "checkpoint_3": {"target": 600, "label": "Final Verdict", "reached": total >= 600},
-                }
-                next_checkpoint = None
-                for cp, info in checkpoints.items():
-                    if not info["reached"]:
-                        next_checkpoint = info["target"]
-                        break
+                try:
+                    cur.execute(
+                        "SELECT COUNT(*) AS n FROM stock_universe WHERE active = TRUE"
+                    )
+                    univ = cur.fetchone()["n"]
+                except Exception:
+                    univ = "?"
 
-                return {
-                    "total_signals": total,
-                    "outcome_window": window,
-                    "next_checkpoint": next_checkpoint,
-                    "signals_to_next_checkpoint": (next_checkpoint - total) if next_checkpoint else 0,
-                    "checkpoints": checkpoints,
-                    "by_signal_label": breakdown
-                }
+                cur.execute("""
+                    SELECT ticker, signal_label, score, created_at
+                    FROM signal_log ORDER BY created_at DESC LIMIT 1
+                """)
+                last = cur.fetchone()
+
+        win_rate = f"{wins / graded * 100:.1f}%" if graded > 0 else "N/A"
+
+        cp_label = "All checkpoints reached"
+        for target in (150, 350, 600):
+            if total < target:
+                cp_label = f"{total}/{target}  ({target - total} to go)"
+                break
+
+        last_str = (
+            f"{last['ticker']} {last['signal_label']} "
+            f"score={last['score']}  {str(last['created_at'])[:16]}"
+        ) if last else "none"
+
+        return (
+            f"<b>📊 Axiom Stats</b>\n\n"
+            f"Signals:     <code>{total}</code> total  |  <code>{today}</code> today\n"
+            f"Win rate:    <code>{win_rate}</code>  ({graded} graded)\n"
+            f"Universe:    <code>{univ}</code> active tickers\n"
+            f"Checkpoint:  <code>{cp_label}</code>\n"
+            f"Last signal: <code>{last_str}</code>"
+        )
     except Exception as e:
-        logger.error(f"get_accuracy_summary error: {e}")
-        return {"error": str(e)}
+        return f"❌ Stats error: {e}"
 
 
-def get_signal_log(limit: int = 10, signal_label: str = None, ticker: str = None) -> dict:
-    """Get recent signals with optional filters."""
-    limit = min(limit, 50)
+def get_signals(n: int = 10) -> str:
+    n = max(1, min(n, 50))
     try:
-        with _get_conn() as conn:
+        with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                conditions = []
-                params = []
-
-                if signal_label:
-                    conditions.append("signal_label ILIKE %s")
-                    params.append(f"%{signal_label}%")
-                if ticker:
-                    conditions.append("ticker ILIKE %s")
-                    params.append(ticker.upper())
-
-                where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-                params.append(limit)
-
-                cur.execute(f"""
+                cur.execute("""
                     SELECT sl.ticker, sl.signal_label, sl.score,
                            sl.price_at_signal, sl.entry_price, sl.stop_loss,
-                           sl.target_1, sl.target_2, sl.risk_reward,
-                           sl.created_at, so.direction, so.ret_1d
+                           sl.target_1, sl.created_at,
+                           so.ret_5d
                     FROM signal_log sl
                     LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
-                    {where}
                     ORDER BY sl.created_at DESC
                     LIMIT %s
-                """, params)
-
-                rows = cur.fetchall()
-                return {
-                    "signals": [dict(r) for r in rows],
-                    "count": len(rows)
-                }
-    except Exception as e:
-        logger.error(f"get_signal_log error: {e}")
-        return {"error": str(e)}
-
-
-# ── WRITE TOOLS (all require confirmation, called only after user confirms) ──
-
-def update_weights(weights: dict) -> dict:
-    """Update scoring component weights."""
-    required_keys = {"technical", "catalyst", "fundamental", "risk", "sentiment"}
-    provided_keys = set(weights.keys())
-
-    if not provided_keys.issubset(required_keys):
-        return {"error": f"Unknown weight keys: {provided_keys - required_keys}"}
-
-    total = sum(weights.values())
-    if abs(total - 100) > 0.1:
-        return {"error": f"Weights must sum to 100, got {total}"}
-
-    try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE scanner_control SET updated_at = NOW() WHERE id = 1")
-            conn.commit()
-        return {
-            "success": True,
-            "weights_updated": weights,
-            "note": "Update the WEIGHT constants in your scanner config and redeploy Service 2 to apply."
-        }
-    except Exception as e:
-        logger.error(f"update_weights error: {e}")
-        return {"error": str(e)}
-
-
-def adjust_thresholds(thresholds: dict) -> dict:
-    """Adjust score thresholds."""
-    valid_keys = {"strong_buy", "buy", "short", "strong_short"}
-    if not set(thresholds.keys()).issubset(valid_keys):
-        return {"error": f"Unknown threshold keys. Valid: {valid_keys}"}
-
-    try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE scanner_control SET updated_at = NOW() WHERE id = 1")
-            conn.commit()
-        return {
-            "success": True,
-            "thresholds_updated": thresholds,
-            "note": "Update PREDICTION_BUY_THRESHOLD / PREDICTION_SELL_THRESHOLD in scanner_loop.py and redeploy Service 2."
-        }
-    except Exception as e:
-        logger.error(f"adjust_thresholds error: {e}")
-        return {"error": str(e)}
-
-
-def modify_watchlist(action: str, tickers: list) -> dict:
-    """Add or remove tickers from the watchlist."""
-    tickers = [t.upper().strip() for t in tickers]
-
-    try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                if action == "add":
-                    for ticker in tickers:
-                        cur.execute("""
-                            INSERT INTO watchlist (ticker)
-                            VALUES (%s)
-                            ON CONFLICT DO NOTHING
-                        """, (ticker,))
-                elif action == "remove":
-                    cur.execute("DELETE FROM watchlist WHERE ticker = ANY(%s)", (tickers,))
-                else:
-                    return {"error": f"Unknown action: {action}"}
-            conn.commit()
-        return {"success": True, "action": action, "tickers": tickers}
-    except Exception as e:
-        logger.error(f"modify_watchlist error: {e}")
-        return {"error": str(e)}
-
-
-def restart_scanner(reason: str) -> dict:
-    """
-    Signal the scanner to restart by setting restart_requested = TRUE
-    in scanner_control. The scanner checks this at the top of every loop cycle
-    and calls sys.exit(0) which triggers Railway to restart Service 2.
-    """
-    try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE scanner_control
-                    SET restart_requested = TRUE, updated_at = NOW()
-                    WHERE id = 1
-                """)
-            conn.commit()
-        return {
-            "success": True,
-            "message": "Restart flag set. Scanner will restart at the start of its next cycle.",
-            "reason": reason
-        }
-    except Exception as e:
-        logger.error(f"restart_scanner error: {e}")
-        return {"error": str(e)}
-
-
-# ── NEW TOOLS ────────────────────────────────────────────────────────────────
-
-def get_conviction_list(session: str = "", limit: int = 5) -> dict:
-    """
-    Fetch today's conviction buy list from conviction_buys table.
-    Returns ranked picks with entry, stop, targets, hold type, and reasoning.
-    Falls back to yesterday if today has no entries.
-    """
-    try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                today = datetime.now(timezone.utc).date().isoformat()
-                yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
-
-                where_session = "AND session = %s" if session else ""
-                params_today = [today, session] if session else [today]
-                params_yest  = [yesterday, session] if session else [yesterday]
-
-                cur.execute(f"""
-                    SELECT rank, ticker, conviction, hold_type, entry, stop_loss,
-                           target_1, target_2, session, date, reasoning,
-                           ai_key_reason, ai_conviction, ai_catalyst_quality,
-                           ai_risk, ai_time_sensitivity, created_at
-                    FROM conviction_buys
-                    WHERE date = %s {where_session}
-                    ORDER BY rank ASC
-                    LIMIT %s
-                """, params_today + [limit])
-                rows = cur.fetchall()
-                is_yesterday = False
-
-                if not rows:
-                    cur.execute(f"""
-                        SELECT rank, ticker, conviction, hold_type, entry, stop_loss,
-                               target_1, target_2, session, date, reasoning,
-                               ai_key_reason, ai_conviction, ai_catalyst_quality,
-                               ai_risk, ai_time_sensitivity, created_at
-                        FROM conviction_buys
-                        WHERE date = %s {where_session}
-                        ORDER BY rank ASC
-                        LIMIT %s
-                    """, params_yest + [limit])
-                    rows = cur.fetchall()
-                    is_yesterday = True
-
-                picks = [dict(r) for r in rows]
-                return {
-                    "picks": picks,
-                    "count": len(picks),
-                    "date": today if not is_yesterday else yesterday,
-                    "is_yesterday": is_yesterday,
-                    "session_filter": session or "all",
-                }
-    except Exception as e:
-        logger.error(f"get_conviction_list error: {e}")
-        return {"error": str(e)}
-
-
-def get_portfolio() -> dict:
-    """Get current portfolio holdings with P&L."""
-    try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT ticker, shares, avg_cost, current_price,
-                           ROUND(((current_price - avg_cost) / avg_cost * 100)::numeric, 2) AS pnl_pct,
-                           ROUND(((current_price - avg_cost) * shares)::numeric, 2) AS pnl_dollars,
-                           notes, updated_at
-                    FROM portfolio
-                    ORDER BY pnl_pct DESC NULLS LAST
-                """)
-                rows = cur.fetchall()
-                holdings = [dict(r) for r in rows]
-
-                total_pnl = sum(float(h.get("pnl_dollars") or 0) for h in holdings)
-                return {
-                    "holdings": holdings,
-                    "count": len(holdings),
-                    "total_unrealized_pnl": round(total_pnl, 2),
-                }
-    except Exception as e:
-        logger.error(f"get_portfolio error: {e}")
-        return {"error": str(e)}
-
-
-def get_todays_graded_signals() -> dict:
-    """
-    Show today's signals that have been graded by AccuracyValidator.
-    Joins signal_log with signal_outcomes to show which picks were right/wrong.
-    """
-    try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Today's signals with any resolved outcome
-                cur.execute("""
-                    SELECT
-                        sl.ticker,
-                        sl.signal_label,
-                        sl.score,
-                        sl.price_at_signal,
-                        so.ret_1d,
-                        so.ret_3d,
-                        so.ret_5d,
-                        so.ret_10d,
-                        so.outcome_1d,
-                        so.outcome_5d,
-                        sl.created_at
-                    FROM signal_log sl
-                    LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
-                    WHERE DATE(sl.created_at AT TIME ZONE 'America/New_York') = CURRENT_DATE AT TIME ZONE 'America/New_York'
-                    ORDER BY sl.score DESC
-                    LIMIT 50
-                """)
-                today_rows = cur.fetchall()
-
-                # All-time summary for context
-                cur.execute("""
-                    SELECT
-                        COUNT(*) FILTER (WHERE so.ret_5d IS NOT NULL) AS graded_5d,
-                        COUNT(*) FILTER (WHERE so.ret_5d > 0)          AS wins_5d,
-                        COUNT(*) FILTER (WHERE so.ret_1d IS NOT NULL)  AS graded_1d,
-                        COUNT(*) FILTER (WHERE so.ret_1d > 0)          AS wins_1d,
-                        ROUND(AVG(so.ret_5d)::numeric * 100, 2)        AS avg_ret_5d_pct,
-                        COUNT(sl.id)                                   AS total_signals
-                    FROM signal_log sl
-                    LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
-                """)
-                summary = dict(cur.fetchone())
-
-                graded_today = [dict(r) for r in today_rows if r.get("ret_1d") or r.get("ret_5d")]
-                ungraded_today = [dict(r) for r in today_rows if not r.get("ret_1d") and not r.get("ret_5d")]
-
-                return {
-                    "today_total": len(today_rows),
-                    "today_graded": graded_today,
-                    "today_ungraded_count": len(ungraded_today),
-                    "all_time_summary": summary,
-                }
-    except Exception as e:
-        logger.error(f"get_todays_graded_signals error: {e}")
-        return {"error": str(e)}
-
-
-def get_regime() -> dict:
-    """Get current market regime (TRENDING_UP, TRENDING_DOWN, MEAN_REVERSION, HIGH_VOL, NEUTRAL)."""
-    try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT regime, iwm_price, iwm_ma20, iwm_ma50, adx_14,
-                           volatility_20d, computed_at
-                    FROM regime_log
-                    ORDER BY computed_at DESC
-                    LIMIT 1
-                """)
-                row = cur.fetchone()
-                if not row:
-                    # Fall back to scanner_control state
-                    cur.execute("SELECT current_regime FROM scanner_control WHERE id = 1")
-                    ctrl = cur.fetchone()
-                    return {"regime": ctrl["current_regime"] if ctrl else "UNKNOWN",
-                            "source": "scanner_control"}
-                return dict(row)
-    except Exception as e:
-        logger.error(f"get_regime error: {e}")
-        return {"error": str(e)}
-
-
-def pause_scanner() -> dict:
-    """Pause the scanner loop (it will sleep without scanning until resumed)."""
-    try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE scanner_control SET paused = TRUE, updated_at = NOW() WHERE id = 1")
-            conn.commit()
-        return {"success": True, "message": "Scanner paused. Send resume_scanner to restart scanning."}
-    except Exception as e:
-        logger.error(f"pause_scanner error: {e}")
-        return {"error": str(e)}
-
-
-def resume_scanner() -> dict:
-    """Resume a paused scanner loop."""
-    try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE scanner_control SET paused = FALSE, updated_at = NOW() WHERE id = 1")
-            conn.commit()
-        return {"success": True, "message": "Scanner resumed. It will begin scanning on its next cycle."}
-    except Exception as e:
-        logger.error(f"resume_scanner error: {e}")
-        return {"error": str(e)}
-
-
-def force_scan() -> dict:
-    """Trigger an immediate scan cycle (scanner picks this up within 60 seconds)."""
-    try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE scanner_control SET force_scan = TRUE, updated_at = NOW() WHERE id = 1")
-            conn.commit()
-        return {"success": True, "message": "Force scan flag set. Scanner will run an immediate cycle within ~60s."}
-    except Exception as e:
-        logger.error(f"force_scan error: {e}")
-        return {"error": str(e)}
-
-
-def trigger_conviction_scan(session: str = "market") -> dict:
-    """
-    Run the conviction engine right now and return the top picks.
-    Valid sessions: preopen | market | close | afterhours.
-    REQUIRES USER CONFIRMATION.
-    """
-    valid = {"preopen", "market", "close", "afterhours", "market_open"}
-    if session not in valid:
-        return {"error": f"Invalid session. Choose from: {valid}"}
-    try:
-        # Import from the main service codebase (same Railway env or local)
-        import sys, os as _os
-        _base = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-        if _base not in sys.path:
-            sys.path.insert(0, _base)
-        from conviction_engine import generate_live_conviction_list
-        results = generate_live_conviction_list(session=session)
-        picks = [
-            {
-                "rank": r.get("rank"),
-                "ticker": r.get("ticker"),
-                "score": r.get("score") or r.get("conviction"),
-                "hold": r.get("hold_type"),
-                "entry": r.get("entry"),
-                "stop": r.get("stop_loss"),
-                "reason": (r.get("ai_key_reason") or r.get("reasoning", ""))[:120],
-            }
-            for r in results
-        ]
-        return {
-            "success": True,
-            "session": session,
-            "picks": picks,
-            "count": len(picks),
-        }
-    except Exception as e:
-        logger.error(f"trigger_conviction_scan error: {e}")
-        return {"error": str(e)}
-
-
-def add_to_portfolio(ticker: str, shares: float, avg_cost: float, notes: str = "") -> dict:
-    """
-    Add or update a holding in the portfolio table.
-    REQUIRES USER CONFIRMATION.
-    """
-    ticker = ticker.upper().strip()
-    try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO portfolio (ticker, shares, avg_cost, notes, updated_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                    ON CONFLICT (ticker) DO UPDATE
-                      SET shares = EXCLUDED.shares,
-                          avg_cost = EXCLUDED.avg_cost,
-                          notes = EXCLUDED.notes,
-                          updated_at = NOW()
-                """, (ticker, shares, avg_cost, notes))
-            conn.commit()
-        return {
-            "success": True,
-            "ticker": ticker,
-            "shares": shares,
-            "avg_cost": avg_cost,
-        }
-    except Exception as e:
-        logger.error(f"add_to_portfolio error: {e}")
-        return {"error": str(e)}
-
-
-# ── REAL-TIME TOOLS ──────────────────────────────────────────────────────────
-
-def get_live_quote(ticker: str) -> dict:
-    """Fetch live price, change%, volume, and 52-week range for any ticker via yfinance."""
-    ticker = ticker.upper().strip()
-    try:
-        import yfinance as yf
-        fi = yf.Ticker(ticker).fast_info
-        price = getattr(fi, "last_price", None) or getattr(fi, "regular_market_price", None)
-        if not price:
-            return {"error": f"No live price available for {ticker}"}
-        price = float(price)
-        prev  = getattr(fi, "previous_close", None)
-        vol   = getattr(fi, "last_volume", None)
-        hi52  = getattr(fi, "year_high", None)
-        lo52  = getattr(fi, "year_low", None)
-        mcap  = getattr(fi, "market_cap", None)
-        change_pct = round((price - float(prev)) / float(prev) * 100, 2) if prev and float(prev) > 0 else None
-        return {
-            "ticker": ticker,
-            "price": round(price, 2),
-            "change_pct": change_pct,
-            "prev_close": round(float(prev), 2) if prev else None,
-            "volume": int(vol) if vol else None,
-            "52w_high": round(float(hi52), 2) if hi52 else None,
-            "52w_low": round(float(lo52), 2) if lo52 else None,
-            "market_cap_M": round(float(mcap) / 1_000_000, 1) if mcap else None,
-        }
-    except Exception as e:
-        logger.error(f"get_live_quote {ticker}: {e}")
-        return {"error": str(e)}
-
-
-def get_todays_signal_performance() -> dict:
-    """Today's signals with live intraday price vs price_at_signal — shows which picks are working."""
-    try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT sl.ticker, sl.signal_label, sl.score,
-                           sl.price_at_signal, sl.entry_price, sl.stop_loss,
-                           sl.target_1, sl.target_2, sl.risk_reward,
-                           sl.created_at, so.direction, so.ret_1d
-                    FROM signal_log sl
-                    LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
-                    WHERE sl.created_at >= CURRENT_DATE
-                    ORDER BY sl.score DESC
-                    LIMIT 20
-                """)
+                """, (n,))
                 rows = cur.fetchall()
 
         if not rows:
-            return {"signals": [], "count": 0, "message": "No signals today yet."}
+            return "No signals found."
 
-        import yfinance as yf
-        live_prices = {}
+        lines = [f"<b>Last {len(rows)} signals:</b>"]
         for r in rows:
-            t = r["ticker"]
-            if t in live_prices:
-                continue
-            try:
-                fi = yf.Ticker(t).fast_info
-                p = getattr(fi, "last_price", None) or getattr(fi, "regular_market_price", None)
-                if p:
-                    live_prices[t] = round(float(p), 2)
-            except Exception:
-                pass
+            ret = ""
+            if r.get("ret_5d") is not None:
+                pct = float(r["ret_5d"]) * 100
+                ret = f"  →<code>{pct:+.1f}%</code>"
+            e_str = f" e=${float(r['entry_price']):.3f}" if r.get("entry_price") else ""
+            s_str = f" s=${float(r['stop_loss']):.3f}"   if r.get("stop_loss")   else ""
+            t     = str(r["created_at"])[:16]
+            lines.append(
+                f"<b>{r['ticker']}</b> {r['signal_label']} "
+                f"<code>{r['score']}</code>{e_str}{s_str}{ret}  <i>{t}</i>"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ Error: {e}"
 
-        results = []
+
+def get_convictions() -> str:
+    try:
+        today     = date.today().isoformat()
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                rows, label, d_str = [], "", today
+                for d_str, label in [(today, "Today"), (yesterday, "Yesterday")]:
+                    cur.execute("""
+                        SELECT rank, ticker, conviction, hold_type,
+                               entry, stop_loss, target_1, target_2,
+                               session, ai_key_reason
+                        FROM conviction_buys
+                        WHERE date = %s
+                        ORDER BY rank ASC
+                        LIMIT 10
+                    """, (d_str,))
+                    rows = cur.fetchall()
+                    if rows:
+                        break
+
+        if not rows:
+            return "No conviction buys found for today or yesterday."
+
+        lines = [f"<b>🎯 Conviction Buys — {label} ({d_str})</b>"]
         for r in rows:
-            t = r["ticker"]
-            live = live_prices.get(t)
-            signal_price = float(r["price_at_signal"]) if r["price_at_signal"] else None
-            move_pct = None
-            if live and signal_price and signal_price > 0:
-                move_pct = round((live - signal_price) / signal_price * 100, 2)
-            results.append({
-                "ticker": t,
-                "signal_label": r["signal_label"],
-                "score": r["score"],
-                "price_at_signal": signal_price,
-                "entry_price": r.get("entry_price"),
-                "stop_loss": r.get("stop_loss"),
-                "target_1": r.get("target_1"),
-                "target_2": r.get("target_2"),
-                "risk_reward": r.get("risk_reward"),
-                "live_price": live,
-                "move_pct": move_pct,
-                "direction": r.get("direction"),
-                "ret_1d": r.get("ret_1d"),
-                "signal_time": str(r["created_at"]),
-            })
-
-        winners = sum(1 for r in results if (r["move_pct"] or 0) > 2)
-        losers  = sum(1 for r in results if (r["move_pct"] or 0) < -2)
-        return {
-            "signals": results,
-            "count": len(results),
-            "up_2pct_plus": winners,
-            "down_2pct_plus": losers,
-        }
+            entry  = f"${float(r['entry']):.3f}"      if r.get("entry")     else "—"
+            stop   = f"${float(r['stop_loss']):.3f}"  if r.get("stop_loss") else "—"
+            t1     = f"${float(r['target_1']):.3f}"   if r.get("target_1")  else "—"
+            reason = (r.get("ai_key_reason") or "")[:120]
+            lines.append(
+                f"\n<b>#{r['rank']} {r['ticker']}</b>  "
+                f"<code>{r.get('hold_type','')}</code>  {r.get('session','')}\n"
+                f"Entry {entry} | Stop {stop} | T1 {t1}\n"
+                f"<i>{reason}</i>"
+            )
+        return "\n".join(lines)
     except Exception as e:
-        logger.error(f"get_todays_signal_performance: {e}")
-        return {"error": str(e)}
-
-
-def get_recent_alerts(limit: int = 10) -> dict:
-    """Get the most recent scanner alerts — every Pushover notification that was sent."""
-    limit = min(limit, 30)
-    try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT alert_time, message, ticker, alert_type, created_at
-                    FROM alert_log
-                    ORDER BY created_at DESC
-                    LIMIT %s
-                """, (limit,))
-                rows = cur.fetchall()
-                return {"alerts": [dict(r) for r in rows], "count": len(rows)}
-    except Exception as e:
-        logger.error(f"get_recent_alerts: {e}")
-        return {"error": str(e)}
-
-
-def get_scanner_logs(limit: int = 30) -> dict:
-    """Get recent scanner log messages (INFO/WARN/ERROR from the scanner loop)."""
-    limit = min(limit, 100)
-    try:
-        with _get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT level, message, created_at
-                    FROM scanner_logs
-                    ORDER BY created_at DESC
-                    LIMIT %s
-                """, (limit,))
-                rows = cur.fetchall()
-                return {"logs": [dict(r) for r in rows], "count": len(rows)}
-    except Exception as e:
-        logger.error(f"get_scanner_logs: {e}")
-        return {"error": str(e)}
+        return f"❌ Error: {e}"

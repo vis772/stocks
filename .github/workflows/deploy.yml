@@ -49,13 +49,13 @@ jobs:
             docker compose --project-directory /home/ubuntu/axiom up -d --build
             echo "    Build complete."
 
-            # ── 3. Health check — all 3 services must be running ────────────
+            # ── 3. Health check — both services must be running ─────────────
             echo ""
             echo "==> [3/3] Verifying services (waiting 12s for containers to stabilise)"
             sleep 12
 
             FAILED=0
-            for container in axiom-scanner axiom-dashboard axiom-telegram-bot; do
+            for container in axiom-scanner axiom-telegram-bot; do
               STATUS=$(docker inspect --format='{{.State.Status}}' "$container" 2>/dev/null || echo "missing")
               RUNNING=$(docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null || echo "false")
               if [ "$RUNNING" = "true" ]; then
@@ -71,7 +71,7 @@ jobs:
             if [ "$FAILED" -ne 0 ]; then
               echo ""
               echo "==> One or more services failed. Dumping logs:"
-              for container in axiom-scanner axiom-dashboard axiom-telegram-bot; do
+              for container in axiom-scanner axiom-telegram-bot; do
                 echo ""
                 echo "-------- $container (last 30 lines) --------"
                 docker logs --tail=30 "$container" 2>&1 || echo "(no logs available)"
@@ -81,5 +81,5 @@ jobs:
 
             echo ""
             echo "========================================"
-            echo " All 3 services running. Deploy done."
+            echo " Both services running. Deploy done."
             echo "========================================"
