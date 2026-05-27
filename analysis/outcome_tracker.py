@@ -235,23 +235,21 @@ def run_post_close_sweep():
     ~50% (signals aged <24h) to 90%+ by the first checkpoint.
     """
     try:
-        from db.database import update_signal_outcome
+        from db.database import update_signal_outcome, _is_postgres, _pg_conn_ctx, _get_sqlite_conn
         if _is_postgres():
-            from db.database import _get_pg_conn
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                SELECT sl.id, sl.ticker, sl.price_at_signal
-                FROM signal_log sl
-                JOIN signal_outcomes so ON so.signal_id = sl.id
-                WHERE DATE(sl.created_at) = CURRENT_DATE
-                  AND so.price_1day IS NULL
-                  AND sl.price_at_signal IS NOT NULL AND sl.price_at_signal > 0
-            """)
-            rows = cur.fetchall()
-            cur.close(); conn.close()
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT sl.id, sl.ticker, sl.price_at_signal
+                    FROM signal_log sl
+                    JOIN signal_outcomes so ON so.signal_id = sl.id
+                    WHERE DATE(sl.created_at) = CURRENT_DATE
+                      AND so.price_1day IS NULL
+                      AND sl.price_at_signal IS NOT NULL AND sl.price_at_signal > 0
+                """)
+                rows = cur.fetchall()
+                cur.close()
         else:
-            from db.database import _get_sqlite_conn
             conn = _get_sqlite_conn()
             cur  = conn.cursor()
             cur.execute("""
