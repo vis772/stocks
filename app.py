@@ -649,7 +649,6 @@ def render_result_card(r):
             st.markdown('<div class="sh">Score Breakdown</div>', unsafe_allow_html=True)
             comps = [
                 ("Technical",   r.get("technical_score",0),   SCORING_WEIGHTS["technical"]),
-                ("Catalyst",    r.get("catalyst_score",0),    SCORING_WEIGHTS["catalyst"]),
                 ("Fundamental", r.get("fundamental_score",0), SCORING_WEIGHTS["fundamental"]),
                 ("Risk inv.",   100-r.get("risk_score",50),   SCORING_WEIGHTS["risk"]),
                 ("Sentiment",   r.get("sentiment_score",50),  SCORING_WEIGHTS["sentiment"]),
@@ -1029,7 +1028,6 @@ def render_deep_dive(r):
         st.markdown('<div class="sh">Score Breakdown</div>', unsafe_allow_html=True)
         comps = [
             ("Technical",   r.get("technical_score",0),   SCORING_WEIGHTS["technical"]),
-            ("Catalyst",    r.get("catalyst_score",0),    SCORING_WEIGHTS["catalyst"]),
             ("Fundamental", r.get("fundamental_score",0), SCORING_WEIGHTS["fundamental"]),
             ("Risk adj.",   100-r.get("risk_score",50),   SCORING_WEIGHTS["risk"]),
             ("Sentiment",   r.get("sentiment_score",50),  SCORING_WEIGHTS["sentiment"]),
