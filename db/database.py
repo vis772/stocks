@@ -647,6 +647,16 @@ def _init_postgres():
         END $$
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bot_audit (
+            id         BIGSERIAL PRIMARY KEY,
+            user_id    BIGINT       NOT NULL,
+            command    VARCHAR(100) NOT NULL,
+            args       TEXT         DEFAULT '',
+            created_at TIMESTAMPTZ  DEFAULT NOW()
+        )
+    """)
+
     conn.commit()
     cur.close()
     _put_pg_conn(conn)
@@ -1051,6 +1061,16 @@ def _init_sqlite():
             pass
 
     cur.execute("UPDATE portfolio SET user_id = 1 WHERE user_id IS NULL")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bot_audit (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER      NOT NULL,
+            command    TEXT         NOT NULL,
+            args       TEXT         DEFAULT '',
+            created_at DATETIME     DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
     conn.commit()
     conn.close()
@@ -2452,6 +2472,36 @@ def log_health_event(subsystem: str, status: str,
             conn.commit(); conn.close()
     except Exception as e:
         print(f"  [db] log_health_event failed: {e}")
+
+
+def log_bot_command(user_id: int, command: str, args: str = "") -> None:
+    """
+    Persistently log an authenticated Telegram bot command.
+    Called by bot.py after every authenticated slash command or agent query.
+    Silently ignores all errors — never raises.
+    """
+    try:
+        if _is_postgres():
+            conn = _get_pg_conn()
+            cur  = conn.cursor()
+            cur.execute(
+                "INSERT INTO bot_audit (user_id, command, args) VALUES (%s, %s, %s)",
+                (user_id, command[:100], (args or "")[:500]),
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+        else:
+            conn = _get_sqlite_conn()
+            cur  = conn.cursor()
+            cur.execute(
+                "INSERT INTO bot_audit (user_id, command, args) VALUES (?, ?, ?)",
+                (user_id, command[:100], (args or "")[:500]),
+            )
+            conn.commit()
+            conn.close()
+    except Exception:
+        pass   # audit logging must never crash the caller
 
 
 def get_health_events(limit: int = 50, hours_back: int = 24) -> list:

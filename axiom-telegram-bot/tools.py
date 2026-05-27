@@ -7,6 +7,8 @@ All functions return plain strings suitable for Telegram messages.
 import os
 import subprocess
 import logging
+import re as _re
+import shlex as _shlex
 import psycopg2
 import psycopg2.extras
 from datetime import date, timedelta
@@ -22,6 +24,21 @@ CONTAINERS = {
     "bot":     "axiom-telegram-bot",
 }
 
+# Env var names whose values should never appear in bot output
+_SECRET_ENV_KEYS = [
+    "DATABASE_URL", "PUSHOVER_USER_KEY", "PUSHOVER_API_TOKEN",
+    "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "FINNHUB_API_KEY",
+    "TIINGO_API_KEY", "MASSIVE_API_KEY", "SECRET_KEY",
+]
+
+def _mask_secrets(text: str) -> str:
+    """Replace actual secret values with [REDACTED] in any string."""
+    for key in _SECRET_ENV_KEYS:
+        val = os.environ.get(key, "")
+        if val and len(val) > 4:   # don't mask empty or trivially short values
+            text = text.replace(val, f"[REDACTED:{key}]")
+    return text
+
 
 # ── DB ────────────────────────────────────────────────────────────────────────
 
@@ -35,6 +52,29 @@ def is_write_sql(sql: str) -> bool:
     return first not in ("select", "with", "explain", "show")
 
 
+_DANGEROUS_SQL = [
+    (_re.compile(r'\b(drop)\s+(table|database|schema|index)\b', _re.IGNORECASE),
+     "DROP is not allowed through the bot"),
+    (_re.compile(r'\btruncate\s+table\b', _re.IGNORECASE),
+     "TRUNCATE is not allowed through the bot"),
+    (_re.compile(r'\bdelete\s+from\s+\w[\w.]*\s*(?:;|\Z)', _re.IGNORECASE),
+     "DELETE without a WHERE clause is not allowed"),
+    (_re.compile(r'\balter\s+table\b.*\bdrop\s+column\b', _re.IGNORECASE),
+     "ALTER TABLE DROP COLUMN is not allowed through the bot"),
+]
+
+def is_dangerous_sql(sql: str) -> tuple[bool, str]:
+    """
+    Returns (True, reason) if the SQL matches a known destructive pattern.
+    Returns (False, "") if the SQL is safe to execute.
+    """
+    stripped = sql.strip()
+    for pattern, reason in _DANGEROUS_SQL:
+        if pattern.search(stripped):
+            return True, reason
+    return False, ""
+
+
 def run_sql(sql: str) -> str:
     """
     Execute any SQL query.
@@ -42,6 +82,9 @@ def run_sql(sql: str) -> str:
     Writes commit and return rows-affected.
     Returns a plain string — caller wraps in <pre> for Telegram.
     """
+    dangerous, reason = is_dangerous_sql(sql)
+    if dangerous:
+        return f"🚫 Blocked: {reason}"
     try:
         with psycopg2.connect(DATABASE_URL) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -87,7 +130,9 @@ def _sh(cmd: str, timeout: int = 20) -> str:
             cmd, shell=True, capture_output=True, text=True, timeout=timeout
         )
         out = (r.stdout + r.stderr).strip()
-        return out if out else "(no output)"
+        out = out if out else "(no output)"
+        out = _mask_secrets(out)
+        return out
     except subprocess.TimeoutExpired:
         return f"Timed out after {timeout}s"
     except Exception as e:
@@ -120,27 +165,84 @@ def docker_status() -> str:
     )
 
 
+_BLOCKED_COMMANDS = [
+    (_re.compile(r'\brm\s+-[a-z]*r[a-z]*f\b.*(/|~|\*)', _re.IGNORECASE),
+     "rm -rf on root/home/wildcards is blocked"),
+    (_re.compile(r'curl\b.*\|\s*(ba)?sh', _re.IGNORECASE),
+     "piping curl to shell is blocked"),
+    (_re.compile(r'wget\b.*\|\s*(ba)?sh', _re.IGNORECASE),
+     "piping wget to shell is blocked"),
+    (_re.compile(r'\bchmod\s+777\b', _re.IGNORECASE),
+     "chmod 777 is blocked"),
+    (_re.compile(r'>\s*/dev/sd', _re.IGNORECASE),
+     "writing to raw block devices is blocked"),
+    (_re.compile(r'\bdd\b.*\bof=/dev/', _re.IGNORECASE),
+     "dd to block device is blocked"),
+    (_re.compile(r'\bmkfs\b', _re.IGNORECASE),
+     "mkfs is blocked"),
+    (_re.compile(r':\(\)\{.*\}.*;.*:', _re.IGNORECASE),
+     "fork bomb pattern is blocked"),
+]
+
+def _is_blocked_cmd(cmd: str) -> tuple[bool, str]:
+    """Returns (True, reason) if the command matches a blocklist pattern."""
+    for pattern, reason in _BLOCKED_COMMANDS:
+        if pattern.search(cmd):
+            return True, reason
+    return False, ""
+
+
 def run_command(cmd: str) -> str:
-    return _sh(cmd, timeout=30)
+    blocked, reason = _is_blocked_cmd(cmd)
+    if blocked:
+        return f"🚫 Blocked: {reason}"
+    result = _sh(cmd, timeout=30)
+    return _mask_secrets(result)
 
 
 # ── Filesystem ────────────────────────────────────────────────────────────────
 
-def _resolve(path: str) -> str:
+_ALLOWED_OUTSIDE_PROJECT = (
+    "/var/log",
+    "/tmp",
+    "/proc/meminfo",
+    "/proc/cpuinfo",
+)
+
+def _resolve(path: str) -> str | None:
     """
-    Resolve user path to an absolute path inside the container.
-    Relative paths → under PROJECT_DIR.
-    Absolute paths → used as-is (allows /etc, /proc, etc. for sysadmin use).
+    Resolve a user-supplied path to an absolute path.
+    Returns None if the path is outside the jail.
+
+    Relative paths → PROJECT_DIR/path.
+    Absolute paths are allowed only if they are under PROJECT_DIR or
+    in _ALLOWED_OUTSIDE_PROJECT.
+    Returns None for jailbreak attempts.
     """
     if not path or path in (".", ""):
         return PROJECT_DIR
     if os.path.isabs(path):
-        return path
-    return os.path.join(PROJECT_DIR, path.lstrip("/"))
+        resolved = os.path.normpath(path)
+    else:
+        resolved = os.path.normpath(os.path.join(PROJECT_DIR, path.lstrip("/")))
+
+    # Allow if inside project dir
+    if resolved.startswith(PROJECT_DIR):
+        return resolved
+
+    # Allow specific read-only system paths
+    for allowed in _ALLOWED_OUTSIDE_PROJECT:
+        if resolved.startswith(allowed):
+            return resolved
+
+    # Reject everything else
+    return None
 
 
 def list_files(path: str = "") -> str:
     resolved = _resolve(path)
+    if resolved is None:
+        return f"🚫 Access denied: path is outside the allowed directory."
     try:
         entries = []
         with os.scandir(resolved) as it:
@@ -164,6 +266,8 @@ def list_files(path: str = "") -> str:
 
 def read_file(path: str) -> str:
     resolved = _resolve(path)
+    if resolved is None:
+        return f"🚫 Access denied: path is outside the allowed directory."
     try:
         if os.path.isdir(resolved):
             return f"{resolved} is a directory — use /files instead."
@@ -181,6 +285,8 @@ def read_file(path: str) -> str:
 
 def write_file(path: str, content: str) -> str:
     resolved = _resolve(path)
+    if resolved is None or not resolved.startswith(PROJECT_DIR):
+        return "🚫 Write denied: writes are only allowed inside /project."
     try:
         parent = os.path.dirname(resolved)
         if parent:

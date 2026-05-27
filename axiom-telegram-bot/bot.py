@@ -44,6 +44,11 @@ _sessions: dict[int, dict] = {}
 # _pending: user_id → {"type": "sql"|"restart"|"edit", ...extra data}
 _pending: dict[int, dict] = {}
 
+_failed_pins:   dict[int, int]   = {}   # uid → consecutive bad PIN count
+_lockout_until: dict[int, float] = {}   # uid → lockout expiry epoch
+PIN_LOCKOUT_SECS    = 1800   # 30 minutes
+PIN_MAX_ATTEMPTS    = 3
+
 
 # ── Session helpers ───────────────────────────────────────────────────────────
 
@@ -95,6 +100,59 @@ async def _send_chunked(update: Update, text: str) -> None:
 def _audit(user_id: int, cmd: str, args: str = "") -> None:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     logger.info(f"[AUDIT] {ts}  user={user_id}  /{cmd}  {args}".strip())
+
+
+def _notify_session_opened(user_id: int) -> None:
+    """Send a Pushover ping whenever someone successfully authenticates."""
+    import requests as _req
+    from datetime import datetime, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        _et = ZoneInfo("America/New_York")
+    except ImportError:
+        import pytz; _et = pytz.timezone("America/New_York")
+    token    = os.environ.get("PUSHOVER_API_TOKEN", "")
+    user_key = os.environ.get("PUSHOVER_USER_KEY", "")
+    if not token or not user_key:
+        return
+    ts = datetime.now(_et).strftime("%Y-%m-%d %H:%M ET")
+    try:
+        _req.post(
+            "https://api.pushover.net/1/messages.json",
+            data={"token": token, "user": user_key,
+                  "title": "Axiom — Session Opened",
+                  "message": f"Admin session authenticated at {ts}.",
+                  "priority": 0},
+            timeout=8,
+        )
+    except Exception:
+        pass
+
+def _notify_lockout(user_id: int) -> None:
+    """Send a Pushover alert when an account is locked due to bad PINs."""
+    import requests as _req
+    from datetime import datetime, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        _et = ZoneInfo("America/New_York")
+    except ImportError:
+        import pytz; _et = pytz.timezone("America/New_York")
+    token    = os.environ.get("PUSHOVER_API_TOKEN", "")
+    user_key = os.environ.get("PUSHOVER_USER_KEY", "")
+    if not token or not user_key:
+        return
+    ts = datetime.now(_et).strftime("%Y-%m-%d %H:%M ET")
+    try:
+        _req.post(
+            "https://api.pushover.net/1/messages.json",
+            data={"token": token, "user": user_key,
+                  "title": "⚠️ Axiom — PIN Lockout",
+                  "message": f"3 failed PIN attempts at {ts}. Bot locked 30 min.",
+                  "priority": 1},
+            timeout=8,
+        )
+    except Exception:
+        pass
 
 
 # ── Guard helper ──────────────────────────────────────────────────────────────
@@ -162,6 +220,11 @@ async def cmd_sql(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     sql = " ".join(context.args)
     _touch(uid)
     _audit(uid, "sql", sql[:120])
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "sql", " ".join(context.args or []))
+    except Exception:
+        pass
 
     if tools.is_write_sql(sql):
         _pending[uid] = {"type": "sql", "sql": sql}
@@ -190,6 +253,11 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     service = (context.args[0] if context.args else "scanner").lower()
     _touch(uid)
     _audit(uid, "logs", service)
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "logs", " ".join(context.args or []))
+    except Exception:
+        pass
 
     result = tools.docker_logs(service)
     # Telegram prefers the most-recent lines; trim from the top if long
@@ -209,6 +277,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     _touch(uid)
     _audit(uid, "status")
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "status", " ".join(context.args or []))
+    except Exception:
+        pass
     await _send(update, tools.docker_status())
 
 
@@ -227,6 +300,11 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     container = tools.CONTAINERS.get(service, f"axiom-{service}")
     _touch(uid)
     _audit(uid, "restart", service)
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "restart", " ".join(context.args or []))
+    except Exception:
+        pass
 
     _pending[uid] = {"type": "restart", "service": service, "container": container}
     await _send(update, (
@@ -253,6 +331,11 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cmd = " ".join(context.args)
     _touch(uid)
     _audit(uid, "run", cmd)
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "run", " ".join(context.args or []))
+    except Exception:
+        pass
 
     result = tools.run_command(cmd)
     trimmed = result[-3600:] if len(result) > 3600 else result
@@ -273,6 +356,11 @@ async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     path = context.args[0] if context.args else ""
     _touch(uid)
     _audit(uid, "files", path)
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "files", " ".join(context.args or []))
+    except Exception:
+        pass
     result = tools.list_files(path)
     await _send(update, f"<pre>{result}</pre>")
 
@@ -295,6 +383,11 @@ async def cmd_read(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     path = context.args[0]
     _touch(uid)
     _audit(uid, "read", path)
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "read", " ".join(context.args or []))
+    except Exception:
+        pass
     content = tools.read_file(path)
     await _send_chunked(update, f"<b>{path}</b>\n<pre>{content}</pre>")
 
@@ -318,6 +411,11 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     resolved = tools._resolve(path)
     _touch(uid)
     _audit(uid, "edit", path)
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "edit", " ".join(context.args or []))
+    except Exception:
+        pass
 
     current = tools.read_file(path)
     _pending[uid] = {"type": "edit", "path": resolved}
@@ -343,6 +441,11 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _touch(uid)
     _audit(uid, "stats")
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "stats", " ".join(context.args or []))
+    except Exception:
+        pass
     await _send(update, tools.get_stats())
 
 
@@ -365,6 +468,11 @@ async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pass
     _touch(uid)
     _audit(uid, "signals", str(n))
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "signals", " ".join(context.args or []))
+    except Exception:
+        pass
     await _send_chunked(update, tools.get_signals(n))
 
 
@@ -380,6 +488,11 @@ async def cmd_convictions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     _touch(uid)
     _audit(uid, "convictions")
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "convictions", " ".join(context.args or []))
+    except Exception:
+        pass
     await _send_chunked(update, tools.get_convictions())
 
 
@@ -394,9 +507,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # ── Layer 2: PIN gate ─────────────────────────────────────────────────────
     if not _is_auth(uid):
+        # Check lockout
+        if uid in _lockout_until:
+            remaining = int(_lockout_until[uid] - time.time())
+            if remaining > 0:
+                mins = (remaining + 59) // 60
+                await _send(update, f"🔒 Too many failed attempts. Try again in {mins} min.")
+                return
+            else:
+                _lockout_until.pop(uid, None)
+                _failed_pins.pop(uid, None)
+
         if text == SESSION_PIN:
             _sessions[uid] = {"ts": time.time(), "history": []}
+            _failed_pins.pop(uid, None)
+            _lockout_until.pop(uid, None)
             logger.info(f"[AUDIT] user={uid} authenticated via PIN")
+            _notify_session_opened(uid)
             await _send(update, (
                 "✅ <b>PIN accepted.</b> Session active for 4 hours.\n\n"
                 "Just talk to me normally — ask about signals, scanner health, "
@@ -408,8 +535,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "• <i>restart the scanner</i>"
             ))
         else:
-            logger.warning(f"[AUDIT] user={uid} bad PIN attempt")
-            await _send(update, "🔒 Incorrect PIN. Try again.")
+            _failed_pins[uid] = _failed_pins.get(uid, 0) + 1
+            attempts_left = PIN_MAX_ATTEMPTS - _failed_pins[uid]
+            logger.warning(f"[AUDIT] user={uid} bad PIN attempt #{_failed_pins[uid]}")
+            if _failed_pins[uid] >= PIN_MAX_ATTEMPTS:
+                _lockout_until[uid] = time.time() + PIN_LOCKOUT_SECS
+                _failed_pins.pop(uid, None)
+                _notify_lockout(uid)
+                await _send(update, "🔒 Too many failed attempts. Account locked for 30 minutes.")
+            else:
+                await _send(update, f"🔒 Incorrect PIN. {attempts_left} attempt(s) remaining.")
         return
 
     # Authenticated — refresh session
@@ -452,6 +587,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # ── No pending action — route to Claude Haiku agent ─────────────────────
     _audit(uid, "agent", text[:80])
+    try:
+        from db.database import log_bot_command
+        log_bot_command(uid, "agent", text[:80])
+    except Exception:
+        pass
     sess    = _sessions[uid]
     history = sess.get("history", [])
 
@@ -533,6 +673,14 @@ def main() -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
 
     app = Application.builder().token(token).build()
+
+    # Start container crash monitor
+    try:
+        from health_monitor import start_health_monitor
+        start_health_monitor()
+        logger.info("Health monitor started")
+    except Exception as _hm_e:
+        logger.warning(f"Health monitor failed to start: {_hm_e}")
 
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("help",        cmd_help))
