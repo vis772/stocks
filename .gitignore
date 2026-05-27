@@ -6,3 +6,6 @@ __pycache__/
 .env
 *.log
 .claude/
+.DS_Store
+reports/*.pdf
+stocks/
