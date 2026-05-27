@@ -196,7 +196,16 @@ def run_command(cmd: str) -> str:
     blocked, reason = _is_blocked_cmd(cmd)
     if blocked:
         return f"🚫 Blocked: {reason}"
-    result = _sh(cmd, timeout=30)
+    result = _sh(cmd, timeout=60)
+    return _mask_secrets(result)
+
+
+def run_long_command(cmd: str) -> str:
+    """Run a command that may take up to 5 minutes (e.g. docker exec python3 scripts)."""
+    blocked, reason = _is_blocked_cmd(cmd)
+    if blocked:
+        return f"🚫 Blocked: {reason}"
+    result = _sh(cmd, timeout=300)
     return _mask_secrets(result)
 
 

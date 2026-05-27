@@ -154,11 +154,35 @@ TOOL_DEFS = [
     },
     {
         "name": "run_command",
-        "description": "Run a shell command on the server and return its output.",
+        "description": (
+            "Run a shell command on the server and return its output. "
+            "Timeout: 60 seconds. Use for quick commands (ls, cat, docker ps, short queries). "
+            "For anything that takes more than a few seconds (grading signals, running reports, "
+            "docker exec into the scanner) use run_long_command instead."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "cmd": {"type": "string", "description": "Shell command to run"},
+            },
+            "required": ["cmd"],
+        },
+    },
+    {
+        "name": "run_long_command",
+        "description": (
+            "Run a long-running shell command (up to 5 minutes) and return its full output. "
+            "Use this for: docker exec python3 scripts, grading signals, generating reports, "
+            "running the accuracy validator, conviction engine, or any command that takes >10s. "
+            "Blocks until the command finishes and returns all stdout+stderr."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "cmd": {
+                    "type": "string",
+                    "description": "Shell command to run (may take up to 5 minutes)",
+                },
             },
             "required": ["cmd"],
         },
@@ -230,6 +254,8 @@ def _run_tool(name: str, inputs: dict) -> str:
             return _tools.docker_restart(inputs["service"])
         if name == "run_command":
             return _tools.run_command(inputs["cmd"])
+        if name == "run_long_command":
+            return _tools.run_long_command(inputs["cmd"])
         if name == "list_files":
             return _tools.list_files(inputs.get("path", ""))
         if name == "read_file":
@@ -264,11 +290,11 @@ def chat(message: str, history: list) -> tuple[str, list]:
     client  = anthropic.Anthropic(api_key=api_key)
     history = list(history) + [{"role": "user", "content": message}]
 
-    MAX_TURNS = 6   # prevent runaway tool loops
+    MAX_TURNS = 15  # enough for complex multi-step tasks
     for _ in range(MAX_TURNS):
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
+            max_tokens=2048,
             system=SYSTEM,
             tools=TOOL_DEFS,
             messages=history,
