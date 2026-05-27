@@ -15,7 +15,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-MONITOR_INTERVAL = 60          # seconds between checks
+MONITOR_INTERVAL = 60          # seconds between checks  (v2)
 WATCHED_CONTAINER = "axiom-scanner"
 PUSHOVER_API = "https://api.pushover.net/1/messages.json"
 
