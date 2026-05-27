@@ -1187,30 +1187,28 @@ def save_scan_result(result: dict):
     ticker    = result.get("ticker", "")
 
     if _is_postgres():
-        conn = _get_pg_conn()
-        cur  = conn.cursor()
-        cur.execute("""
-            INSERT INTO scan_results (
-                scan_date, ticker, company_name, price, market_cap,
-                volume, avg_volume, technical_score, catalyst_score,
-                fundamental_score, risk_score, sentiment_score,
-                final_score, signal, risk_flags, summary, data_sources
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (
-            scan_date, ticker,
-            result.get("company_name"), result.get("price"), result.get("market_cap"),
-            result.get("volume"), result.get("avg_volume"),
-            result.get("technical_score"), result.get("catalyst_score"),
-            result.get("fundamental_score"), result.get("risk_score"),
-            result.get("sentiment_score"), result.get("final_score"),
-            result.get("signal"),
-            json.dumps(result.get("risk_flags", [])),
-            result.get("summary"),
-            json.dumps(result.get("data_sources", [])),
-        ))
-        conn.commit()
-        cur.close()
-        _put_pg_conn(conn)
+        with _pg_conn_ctx() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO scan_results (
+                    scan_date, ticker, company_name, price, market_cap,
+                    volume, avg_volume, technical_score, catalyst_score,
+                    fundamental_score, risk_score, sentiment_score,
+                    final_score, signal, risk_flags, summary, data_sources
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                scan_date, ticker,
+                result.get("company_name"), result.get("price"), result.get("market_cap"),
+                result.get("volume"), result.get("avg_volume"),
+                result.get("technical_score"), result.get("catalyst_score"),
+                result.get("fundamental_score"), result.get("risk_score"),
+                result.get("sentiment_score"), result.get("final_score"),
+                result.get("signal"),
+                json.dumps(result.get("risk_flags", [])),
+                result.get("summary"),
+                json.dumps(result.get("data_sources", [])),
+            ))
+            conn.commit(); cur.close()
     else:
         conn = _get_sqlite_conn()
         conn.execute("""
