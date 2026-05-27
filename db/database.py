@@ -1104,19 +1104,17 @@ def _init_sqlite():
 def upsert_holding(ticker: str, shares: float, avg_cost: float, notes: str = "", user_id: int = 1):
     ticker = ticker.upper()
     if _is_postgres():
-        conn = _get_pg_conn()
-        cur  = conn.cursor()
-        cur.execute("""
-            INSERT INTO portfolio (ticker, shares, avg_cost, notes, user_id)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (ticker, user_id) DO UPDATE SET
-                shares   = EXCLUDED.shares,
-                avg_cost = EXCLUDED.avg_cost,
-                notes    = EXCLUDED.notes
-        """, (ticker, shares, avg_cost, notes, user_id))
-        conn.commit()
-        cur.close()
-        _put_pg_conn(conn)
+        with _pg_conn_ctx() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO portfolio (ticker, shares, avg_cost, notes, user_id)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (ticker, user_id) DO UPDATE SET
+                    shares   = EXCLUDED.shares,
+                    avg_cost = EXCLUDED.avg_cost,
+                    notes    = EXCLUDED.notes
+            """, (ticker, shares, avg_cost, notes, user_id))
+            conn.commit(); cur.close()
     else:
         conn = _get_sqlite_conn()
         exists = conn.execute(
@@ -1139,12 +1137,10 @@ def upsert_holding(ticker: str, shares: float, avg_cost: float, notes: str = "",
 def delete_holding(ticker: str, user_id: int = 1):
     ticker = ticker.upper()
     if _is_postgres():
-        conn = _get_pg_conn()
-        cur  = conn.cursor()
-        cur.execute("DELETE FROM portfolio WHERE ticker = %s AND user_id = %s", (ticker, user_id))
-        conn.commit()
-        cur.close()
-        _put_pg_conn(conn)
+        with _pg_conn_ctx() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM portfolio WHERE ticker = %s AND user_id = %s", (ticker, user_id))
+            conn.commit(); cur.close()
     else:
         conn = _get_sqlite_conn()
         conn.execute("DELETE FROM portfolio WHERE ticker = ? AND user_id = ?", (ticker, user_id))
@@ -1154,15 +1150,14 @@ def delete_holding(ticker: str, user_id: int = 1):
 
 def get_portfolio(user_id: int = 1) -> pd.DataFrame:
     if _is_postgres():
-        conn = _get_pg_conn()
-        cur  = conn.cursor()
-        cur.execute(
-            "SELECT ticker, shares, avg_cost, notes, added_at FROM portfolio WHERE user_id = %s ORDER BY ticker",
-            (user_id,)
-        )
-        rows = cur.fetchall()
-        cur.close()
-        _put_pg_conn(conn)
+        with _pg_conn_ctx() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT ticker, shares, avg_cost, notes, added_at FROM portfolio WHERE user_id = %s ORDER BY ticker",
+                (user_id,)
+            )
+            rows = cur.fetchall()
+            cur.close()
         if not rows:
             return pd.DataFrame(columns=["ticker","shares","avg_cost","notes","added_at"])
         return pd.DataFrame(rows, columns=["ticker","shares","avg_cost","notes","added_at"])
@@ -1236,17 +1231,16 @@ def save_scan_result(result: dict):
 
 def get_latest_scan() -> pd.DataFrame:
     if _is_postgres():
-        conn = _get_pg_conn()
-        cur  = conn.cursor()
-        cur.execute("""
-            SELECT * FROM scan_results
-            WHERE scan_date = (SELECT MAX(scan_date) FROM scan_results)
-            ORDER BY final_score DESC
-        """)
-        rows = cur.fetchall()
-        cols = [d[0] for d in cur.description]
-        cur.close()
-        _put_pg_conn(conn)
+        with _pg_conn_ctx() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT * FROM scan_results
+                WHERE scan_date = (SELECT MAX(scan_date) FROM scan_results)
+                ORDER BY final_score DESC
+            """)
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            cur.close()
         df = pd.DataFrame(rows, columns=cols)
     else:
         conn = _get_sqlite_conn()
@@ -1272,17 +1266,14 @@ def save_watchlist(tickers: List[str], stats: dict = {}):
     stats_json   = json.dumps(stats)
 
     if _is_postgres():
-        conn = _get_pg_conn()
-        cur  = conn.cursor()
-        # Delete today's entry and reinsert
-        cur.execute("DELETE FROM watchlist WHERE date = %s", (date_str,))
-        cur.execute(
-            "INSERT INTO watchlist (date, tickers, stats) VALUES (%s, %s, %s)",
-            (date_str, tickers_json, stats_json)
-        )
-        conn.commit()
-        cur.close()
-        _put_pg_conn(conn)
+        with _pg_conn_ctx() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM watchlist WHERE date = %s", (date_str,))
+            cur.execute(
+                "INSERT INTO watchlist (date, tickers, stats) VALUES (%s, %s, %s)",
+                (date_str, tickers_json, stats_json)
+            )
+            conn.commit(); cur.close()
     else:
         conn = _get_sqlite_conn()
         conn.execute("DELETE FROM watchlist WHERE date = ?", (date_str,))
@@ -1364,17 +1355,16 @@ def load_alerts(limit: int = 100) -> List[str]:
 
     if _is_postgres():
         try:
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                SELECT alert_time, message FROM alert_log
-                WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s
-                ORDER BY created_at DESC
-                LIMIT %s
-            """, (date_str, limit))
-            rows = cur.fetchall()
-            cur.close()
-            _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT alert_time, message FROM alert_log
+                    WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (date_str, limit))
+                rows = cur.fetchall()
+                cur.close()
             return [f"{r[0]} {r[1]}" for r in reversed(rows)]
         except Exception as e:
             print(f"  [db] Alert load failed: {e}")
@@ -1393,18 +1383,17 @@ def load_scanner_state() -> dict:
     date_str = _et_date()
     if _is_postgres():
         try:
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                SELECT alerted_today, known_filings, scan_count, last_updated,
-                       vwap_snapshot, momentum_ranking,
-                       signals_suppressed_today, universe_size, open_positions,
-                       last_conviction_run, last_accuracy_run
-                FROM scanner_state WHERE date = %s
-            """, (date_str,))
-            row = cur.fetchone()
-            cur.close()
-            _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT alerted_today, known_filings, scan_count, last_updated,
+                           vwap_snapshot, momentum_ranking,
+                           signals_suppressed_today, universe_size, open_positions,
+                           last_conviction_run, last_accuracy_run
+                    FROM scanner_state WHERE date = %s
+                """, (date_str,))
+                row = cur.fetchone()
+                cur.close()
             if row:
                 return {
                     "date":                     date_str,
@@ -1488,14 +1477,14 @@ def get_scanner_control() -> dict:
                "updated_at": None, "current_mode": "UNKNOWN"}
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                SELECT paused, force_scan, scanner_started_at, updated_at, current_mode
-                FROM scanner_control WHERE id = 1
-            """)
-            row = cur.fetchone()
-            cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT paused, force_scan, scanner_started_at, updated_at, current_mode
+                    FROM scanner_control WHERE id = 1
+                """)
+                row = cur.fetchone()
+                cur.close()
             if row:
                 return {"paused": bool(row[0]), "force_scan": bool(row[1]),
                         "scanner_started_at": row[2], "updated_at": row[3],
@@ -1543,10 +1532,10 @@ def set_scanner_control(paused: bool = None, force_scan: bool = None,
     sql = f"UPDATE scanner_control SET {', '.join(sets)} WHERE id = 1"
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute(sql, vals)
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute(sql, vals)
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute(sql, vals)
@@ -1562,25 +1551,25 @@ def get_control_stats() -> dict:
     date_str = _et_date()
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM signal_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,))
-            stats["signals_today"] = cur.fetchone()[0] or 0
-            cur.execute("SELECT COUNT(*) FROM alert_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,))
-            stats["alerts_today"] = cur.fetchone()[0] or 0
-            cur.execute("""
-                SELECT ticker, signal_label, score FROM signal_log
-                WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s ORDER BY score DESC LIMIT 1
-            """, (date_str,))
-            row = cur.fetchone()
-            if row:
-                stats["top_signal"] = {"ticker": row[0], "label": row[1], "score": row[2]}
-            cur.execute("SELECT scan_count, last_updated FROM scanner_state WHERE date = %s", (date_str,))
-            row = cur.fetchone()
-            if row:
-                stats["scan_count"] = row[0] or 0
-                stats["last_updated"] = row[1]
-            cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM signal_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,))
+                stats["signals_today"] = cur.fetchone()[0] or 0
+                cur.execute("SELECT COUNT(*) FROM alert_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,))
+                stats["alerts_today"] = cur.fetchone()[0] or 0
+                cur.execute("""
+                    SELECT ticker, signal_label, score FROM signal_log
+                    WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s ORDER BY score DESC LIMIT 1
+                """, (date_str,))
+                row = cur.fetchone()
+                if row:
+                    stats["top_signal"] = {"ticker": row[0], "label": row[1], "score": row[2]}
+                cur.execute("SELECT scan_count, last_updated FROM scanner_state WHERE date = %s", (date_str,))
+                row = cur.fetchone()
+                if row:
+                    stats["scan_count"] = row[0] or 0
+                    stats["last_updated"] = row[1]
+                cur.close()
         else:
             conn = _get_sqlite_conn()
             cur  = conn.cursor()
@@ -1621,13 +1610,14 @@ def should_suppress(ticker: str, signal_label: str, window_minutes: int = 5) -> 
     """Return True if the same ticker+signal_label fired within the last window_minutes."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT MAX(created_at) FROM signal_log
-                WHERE ticker = %s AND signal_label = %s
-                  AND created_at > NOW() - INTERVAL '%s minutes'
-            """, (ticker, signal_label, window_minutes))
-            row = cur.fetchone(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT MAX(created_at) FROM signal_log
+                    WHERE ticker = %s AND signal_label = %s
+                      AND created_at > NOW() - INTERVAL '%s minutes'
+                """, (ticker, signal_label, window_minutes))
+                row = cur.fetchone(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -1704,19 +1694,19 @@ def get_pending_signals(max_age_days: int = 20) -> List[dict]:
     """Return signal_log rows whose outcomes are still incomplete (missing 15-day price)."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                SELECT sl.id, sl.ticker, sl.price_at_signal, sl.created_at,
-                       so.price_1hr, so.price_1day, so.price_5day, so.price_15day
-                FROM signal_log sl
-                JOIN signal_outcomes so ON so.signal_id = sl.id
-                WHERE so.price_15day IS NULL
-                  AND sl.created_at >= NOW() - INTERVAL '%s days'
-                ORDER BY sl.created_at ASC
-            """, (max_age_days,))
-            rows = cur.fetchall()
-            cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT sl.id, sl.ticker, sl.price_at_signal, sl.created_at,
+                           so.price_1hr, so.price_1day, so.price_5day, so.price_15day
+                    FROM signal_log sl
+                    JOIN signal_outcomes so ON so.signal_id = sl.id
+                    WHERE so.price_15day IS NULL
+                      AND sl.created_at >= NOW() - INTERVAL '%s days'
+                    ORDER BY sl.created_at ASC
+                """, (max_age_days,))
+                rows = cur.fetchall()
+                cur.close()
             return [{"id": r[0], "ticker": r[1], "price_at_signal": r[2],
                      "created_at": r[3], "price_1hr": r[4],
                      "price_1day": r[5], "price_5day": r[6], "price_15day": r[7]} for r in rows]
@@ -1768,24 +1758,24 @@ def update_signal_outcome(signal_id: int, price_1hr: Optional[float] = None,
             label = "pending"
 
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                UPDATE signal_outcomes SET
-                    price_1hr          = COALESCE(%s, price_1hr),
-                    price_1day         = COALESCE(%s, price_1day),
-                    price_5day         = COALESCE(%s, price_5day),
-                    price_15day        = COALESCE(%s, price_15day),
-                    pct_change_1hr     = COALESCE(%s, pct_change_1hr),
-                    pct_change_1day    = COALESCE(%s, pct_change_1day),
-                    pct_change_5day    = COALESCE(%s, pct_change_5day),
-                    pct_change_15day   = COALESCE(%s, pct_change_15day),
-                    outcome_label      = %s,
-                    outcome_updated_at = NOW()
-                WHERE signal_id = %s
-            """, (price_1hr, price_1day, price_5day, price_15day,
-                  pct_1hr, pct_1day, pct_5day, pct_15day, label, signal_id))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    UPDATE signal_outcomes SET
+                        price_1hr          = COALESCE(%s, price_1hr),
+                        price_1day         = COALESCE(%s, price_1day),
+                        price_5day         = COALESCE(%s, price_5day),
+                        price_15day        = COALESCE(%s, price_15day),
+                        pct_change_1hr     = COALESCE(%s, pct_change_1hr),
+                        pct_change_1day    = COALESCE(%s, pct_change_1day),
+                        pct_change_5day    = COALESCE(%s, pct_change_5day),
+                        pct_change_15day   = COALESCE(%s, pct_change_15day),
+                        outcome_label      = %s,
+                        outcome_updated_at = NOW()
+                    WHERE signal_id = %s
+                """, (price_1hr, price_1day, price_5day, price_15day,
+                      pct_1hr, pct_1day, pct_5day, pct_15day, label, signal_id))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("""
@@ -1812,9 +1802,10 @@ def count_total_signals() -> int:
     """Return all-time count of signal_log rows (no date filter). Used for checkpoint thresholds."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM signal_log")
-            n = cur.fetchone()[0]; cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM signal_log")
+                n = cur.fetchone()[0]; cur.close()
         else:
             conn = _get_sqlite_conn()
             n = conn.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
@@ -1829,23 +1820,23 @@ def get_signal_log(days: int = 30) -> pd.DataFrame:
     """Return recent signal_log rows joined with outcomes for the dashboard."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                SELECT sl.id, sl.ticker, sl.signal_label, sl.score,
-                       sl.score_breakdown, sl.price_at_signal, sl.alert_type,
-                       sl.created_at,
-                       so.pct_change_1hr, so.pct_change_1day, so.pct_change_5day,
-                       so.pct_change_15day, so.outcome_label,
-                       so.outcome_1d, so.ret_1d
-                FROM signal_log sl
-                LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
-                WHERE sl.created_at >= NOW() - INTERVAL '%s days'
-                ORDER BY sl.created_at DESC
-            """, (days,))
-            rows = cur.fetchall()
-            cols = [d[0] for d in cur.description]
-            cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT sl.id, sl.ticker, sl.signal_label, sl.score,
+                           sl.score_breakdown, sl.price_at_signal, sl.alert_type,
+                           sl.created_at,
+                           so.pct_change_1hr, so.pct_change_1day, so.pct_change_5day,
+                           so.pct_change_15day, so.outcome_label,
+                           so.outcome_1d, so.ret_1d
+                    FROM signal_log sl
+                    LEFT JOIN signal_outcomes so ON so.signal_id = sl.id
+                    WHERE sl.created_at >= NOW() - INTERVAL '%s days'
+                    ORDER BY sl.created_at DESC
+                """, (days,))
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                cur.close()
             df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
         else:
             conn = _get_sqlite_conn()
@@ -1937,12 +1928,13 @@ def save_accuracy_report(report_type: str, checkpoint: int, filename: str,
                           download_url: str, status_label: str) -> None:
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO accuracy_reports (report_type, checkpoint, filename, download_url, status_label)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (report_type, checkpoint, filename, download_url, status_label))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO accuracy_reports (report_type, checkpoint, filename, download_url, status_label)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (report_type, checkpoint, filename, download_url, status_label))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("""
@@ -1959,12 +1951,13 @@ def get_accuracy_reports() -> Optional[List[dict]]:
     """Returns list of accuracy report records, or None if the DB read fails."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT report_type, checkpoint, filename, download_url, status_label, generated_at
-                FROM accuracy_reports ORDER BY generated_at DESC
-            """)
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT report_type, checkpoint, filename, download_url, status_label, generated_at
+                    FROM accuracy_reports ORDER BY generated_at DESC
+                """)
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -2048,14 +2041,14 @@ def create_user(username: str, email: str, password_hash: str,
     umail = email.strip().lower()
     dname = (display_name or uname).strip()
     if _is_postgres():
-        conn = _get_pg_conn()
-        cur  = conn.cursor()
-        cur.execute("""
-            INSERT INTO users (username, email, password_hash, role, display_name)
-            VALUES (%s, %s, %s, %s, %s) RETURNING id
-        """, (uname, umail, password_hash, role, dname))
-        uid = cur.fetchone()[0]
-        conn.commit(); cur.close(); _put_pg_conn(conn)
+        with _pg_conn_ctx() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO users (username, email, password_hash, role, display_name)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+            """, (uname, umail, password_hash, role, dname))
+            uid = cur.fetchone()[0]
+            conn.commit(); cur.close()
         return uid
     else:
         conn = _get_sqlite_conn()
@@ -2071,14 +2064,14 @@ def create_user(username: str, email: str, password_hash: str,
 
 def get_user_by_username(username: str) -> Optional[dict]:
     if _is_postgres():
-        conn = _get_pg_conn()
-        cur  = conn.cursor()
-        cur.execute(
-            "SELECT id, username, email, password_hash, role, last_login, display_name FROM users WHERE username = %s",
-            (username.strip(),)
-        )
-        row = cur.fetchone()
-        cur.close(); _put_pg_conn(conn)
+        with _pg_conn_ctx() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, username, email, password_hash, role, last_login, display_name FROM users WHERE username = %s",
+                (username.strip(),)
+            )
+            row = cur.fetchone()
+            cur.close()
         if not row:
             return None
         return {"id": row[0], "username": row[1], "email": row[2],
@@ -2103,10 +2096,10 @@ def get_user_by_username(username: str) -> Optional[dict]:
 def update_last_login(user_id: int):
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("UPDATE users SET last_login = NOW() WHERE id = %s", (user_id,))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("UPDATE users SET last_login = NOW() WHERE id = %s", (user_id,))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("UPDATE users SET last_login = datetime('now') WHERE id = ?", (user_id,))
@@ -2123,13 +2116,13 @@ def create_session(user_id: int) -> str:
     expires_at = datetime.now(timezone.utc) + __import__("datetime").timedelta(hours=SESSION_EXPIRY_HOURS)
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                INSERT INTO user_sessions (session_token, user_id, expires_at)
-                VALUES (%s, %s, %s)
-            """, (token, user_id, expires_at))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO user_sessions (session_token, user_id, expires_at)
+                    VALUES (%s, %s, %s)
+                """, (token, user_id, expires_at))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("""
@@ -2148,18 +2141,18 @@ def validate_session(token: str) -> Optional[dict]:
         return None
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                SELECT u.id, u.username, u.email, u.role
-                FROM user_sessions s
-                JOIN users u ON u.id = s.user_id
-                WHERE s.session_token = %s
-                  AND s.is_active = TRUE
-                  AND s.expires_at > NOW()
-            """, (token,))
-            row = cur.fetchone()
-            cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT u.id, u.username, u.email, u.role
+                    FROM user_sessions s
+                    JOIN users u ON u.id = s.user_id
+                    WHERE s.session_token = %s
+                      AND s.is_active = TRUE
+                      AND s.expires_at > NOW()
+                """, (token,))
+                row = cur.fetchone()
+                cur.close()
         else:
             conn = _get_sqlite_conn()
             cur  = conn.cursor()
@@ -2185,10 +2178,10 @@ def invalidate_session(token: str):
     """Mark a session as inactive (logout)."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("UPDATE user_sessions SET is_active = FALSE WHERE session_token = %s", (token,))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("UPDATE user_sessions SET is_active = FALSE WHERE session_token = %s", (token,))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("UPDATE user_sessions SET is_active = 0 WHERE session_token = ?", (token,))
@@ -2201,12 +2194,13 @@ def get_all_users() -> list:
     """Admin-only: return all users (no password hashes)."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT id, username, email, role, display_name, created_at, last_login
-                FROM users ORDER BY created_at
-            """)
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT id, username, email, role, display_name, created_at, last_login
+                    FROM users ORDER BY created_at
+                """)
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -2225,10 +2219,11 @@ def delete_user(user_id: int) -> bool:
     """Delete a user and their sessions. Returns True on success."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("DELETE FROM user_sessions WHERE user_id = %s", (user_id,))
-            cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM user_sessions WHERE user_id = %s", (user_id,))
+                cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
@@ -2244,9 +2239,10 @@ def change_user_password(user_id: int, new_hash: str) -> bool:
     """Update password hash for a user. Returns True on success."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (new_hash, user_id))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (new_hash, user_id))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user_id))
@@ -2333,14 +2329,14 @@ def get_scanner_logs(limit: int = 50) -> List[dict]:
     """Return the most recent scanner log entries, newest first."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                SELECT id, level, message, created_at
-                FROM scanner_logs ORDER BY created_at DESC LIMIT %s
-            """, (limit,))
-            rows = cur.fetchall()
-            cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT id, level, message, created_at
+                    FROM scanner_logs ORDER BY created_at DESC LIMIT %s
+                """, (limit,))
+                rows = cur.fetchall()
+                cur.close()
         else:
             conn = _get_sqlite_conn()
             cur  = conn.cursor()
@@ -2413,45 +2409,46 @@ def get_scanner_state() -> dict:
     }
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT paused, current_mode, scanner_started_at, updated_at
-                FROM scanner_control WHERE id = 1
-            """)
-            row = cur.fetchone()
-            if row:
-                result["paused"]            = bool(row[0])
-                result["current_mode"]      = row[1] or "UNKNOWN"
-                result["scanner_started_at"] = row[2]
-                result["last_heartbeat"]    = row[3]
-            cur.execute("""
-                SELECT scan_count, last_updated,
-                       signals_suppressed_today, universe_size, open_positions,
-                       data_quality_tiingo, data_quality_yfinance, data_quality_stale,
-                       last_conviction_run, last_accuracy_run
-                FROM scanner_state WHERE date = %s
-            """, (date_str,))
-            row = cur.fetchone()
-            if row:
-                result["scan_count"]               = row[0] or 0
-                if row[1]: result["last_heartbeat"] = row[1]
-                result["signals_suppressed_today"] = row[2] or 0
-                result["universe_size"]            = row[3] or 0
-                result["open_positions"]           = row[4] or 0
-                result["data_quality_tiingo"]      = float(row[5] or 0)
-                result["data_quality_yfinance"]    = float(row[6] or 0)
-                result["data_quality_stale"]       = float(row[7] or 0)
-                result["last_conviction_run"]      = row[8]
-                result["last_accuracy_run"]        = row[9]
-            cur.execute(
-                "SELECT COUNT(*) FROM signal_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,)
-            )
-            result["signals_today"] = cur.fetchone()[0] or 0
-            cur.execute(
-                "SELECT COUNT(*) FROM alert_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,)
-            )
-            result["alerts_today"] = cur.fetchone()[0] or 0
-            cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT paused, current_mode, scanner_started_at, updated_at
+                    FROM scanner_control WHERE id = 1
+                """)
+                row = cur.fetchone()
+                if row:
+                    result["paused"]            = bool(row[0])
+                    result["current_mode"]      = row[1] or "UNKNOWN"
+                    result["scanner_started_at"] = row[2]
+                    result["last_heartbeat"]    = row[3]
+                cur.execute("""
+                    SELECT scan_count, last_updated,
+                           signals_suppressed_today, universe_size, open_positions,
+                           data_quality_tiingo, data_quality_yfinance, data_quality_stale,
+                           last_conviction_run, last_accuracy_run
+                    FROM scanner_state WHERE date = %s
+                """, (date_str,))
+                row = cur.fetchone()
+                if row:
+                    result["scan_count"]               = row[0] or 0
+                    if row[1]: result["last_heartbeat"] = row[1]
+                    result["signals_suppressed_today"] = row[2] or 0
+                    result["universe_size"]            = row[3] or 0
+                    result["open_positions"]           = row[4] or 0
+                    result["data_quality_tiingo"]      = float(row[5] or 0)
+                    result["data_quality_yfinance"]    = float(row[6] or 0)
+                    result["data_quality_stale"]       = float(row[7] or 0)
+                    result["last_conviction_run"]      = row[8]
+                    result["last_accuracy_run"]        = row[9]
+                cur.execute(
+                    "SELECT COUNT(*) FROM signal_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,)
+                )
+                result["signals_today"] = cur.fetchone()[0] or 0
+                cur.execute(
+                    "SELECT COUNT(*) FROM alert_log WHERE DATE(created_at AT TIME ZONE 'America/New_York') = %s", (date_str,)
+                )
+                result["alerts_today"] = cur.fetchone()[0] or 0
+                cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute(
@@ -2494,18 +2491,19 @@ def log_health_event(subsystem: str, status: str,
     """Insert a row into health_log; trim to 2000 rows to prevent unbounded growth."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO health_log (subsystem, status, detail, action) VALUES (%s,%s,%s,%s)",
-                (subsystem, status, detail[:500], action[:200]),
-            )
-            cur.execute("""
-                DELETE FROM health_log
-                WHERE id NOT IN (
-                    SELECT id FROM health_log ORDER BY created_at DESC LIMIT 2000
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO health_log (subsystem, status, detail, action) VALUES (%s,%s,%s,%s)",
+                    (subsystem, status, detail[:500], action[:200]),
                 )
-            """)
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+                cur.execute("""
+                    DELETE FROM health_log
+                    WHERE id NOT IN (
+                        SELECT id FROM health_log ORDER BY created_at DESC LIMIT 2000
+                    )
+                """)
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute(
@@ -2531,15 +2529,14 @@ def log_bot_command(user_id: int, command: str, args: str = "") -> None:
     """
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute(
-                "INSERT INTO bot_audit (user_id, command, args) VALUES (%s, %s, %s)",
-                (user_id, command[:100], (args or "")[:500]),
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO bot_audit (user_id, command, args) VALUES (%s, %s, %s)",
+                    (user_id, command[:100], (args or "")[:500]),
+                )
+                conn.commit()
+                cur.close()
         else:
             conn = _get_sqlite_conn()
             cur  = conn.cursor()
@@ -2557,15 +2554,16 @@ def get_health_events(limit: int = 50, hours_back: int = 24) -> list:
     """Return recent health_log rows newest-first."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT subsystem, status, detail, action, created_at
-                FROM health_log
-                WHERE created_at > NOW() - INTERVAL '1 hour' * %s
-                ORDER BY created_at DESC
-                LIMIT %s
-            """, (hours_back, limit))
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT subsystem, status, detail, action, created_at
+                    FROM health_log
+                    WHERE created_at > NOW() - INTERVAL '1 hour' * %s
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (hours_back, limit))
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -2593,18 +2591,19 @@ def get_data_quality_summary(hours_back: int = 24) -> list:
     """
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT source,
-                       COUNT(*)  AS total,
-                       SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok_count,
-                       AVG(latency_ms) AS avg_ms
-                FROM data_quality
-                WHERE created_at > NOW() - INTERVAL '1 hour' * %s
-                GROUP BY source
-                ORDER BY source
-            """, (hours_back,))
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT source,
+                           COUNT(*)  AS total,
+                           SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok_count,
+                           AVG(latency_ms) AS avg_ms
+                    FROM data_quality
+                    WHERE created_at > NOW() - INTERVAL '1 hour' * %s
+                    GROUP BY source
+                    ORDER BY source
+                """, (hours_back,))
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -2633,13 +2632,14 @@ def get_accuracy_metrics() -> list:
     """Return per-bucket rows from accuracy_metrics table."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT bucket, sample_n, win_rate, profit_factor, ev_per_trade,
-                       sharpe, t_stat, p_value, disabled, updated_at
-                FROM accuracy_metrics ORDER BY bucket
-            """)
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT bucket, sample_n, win_rate, profit_factor, ev_per_trade,
+                           sharpe, t_stat, p_value, disabled, updated_at
+                    FROM accuracy_metrics ORDER BY bucket
+                """)
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -2668,12 +2668,13 @@ def get_validator_health() -> dict:
     }
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT signals_graded, signals_pending, oldest_pending, error_msg, check_time
-                FROM validator_health ORDER BY id DESC LIMIT 1
-            """)
-            row = cur.fetchone(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT signals_graded, signals_pending, oldest_pending, error_msg, check_time
+                    FROM validator_health ORDER BY id DESC LIMIT 1
+                """)
+                row = cur.fetchone(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -2704,9 +2705,10 @@ def get_account_summary() -> dict:
     try:
         q = _safe_cols(cols, _ALLOWED_PT_ACCOUNT_COLS)
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute(f"SELECT {q} FROM pt_account WHERE id = 1")
-            row = cur.fetchone(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute(f"SELECT {q} FROM pt_account WHERE id = 1")
+                row = cur.fetchone(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute(f"SELECT {q} FROM pt_account WHERE id = 1")
@@ -2726,9 +2728,10 @@ def get_open_positions() -> list:
     try:
         q = _safe_cols(cols, _ALLOWED_PT_POSITION_COLS)
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute(f"SELECT {q} FROM pt_positions ORDER BY market_value DESC NULLS LAST")
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute(f"SELECT {q} FROM pt_positions ORDER BY market_value DESC NULLS LAST")
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute(f"SELECT {q} FROM pt_positions ORDER BY market_value DESC")
@@ -2743,9 +2746,10 @@ def get_open_position_count() -> int:
     """Return count of open pt_positions rows."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM pt_positions")
-            n = cur.fetchone()[0]; cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM pt_positions")
+                n = cur.fetchone()[0]; cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM pt_positions")
@@ -2762,9 +2766,10 @@ def get_recent_trades(n: int = 10) -> list:
     try:
         q = _safe_cols(cols, _ALLOWED_PT_TRADE_COLS)
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute(f"SELECT {q} FROM pt_trades ORDER BY exit_at DESC LIMIT %s", (n,))
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute(f"SELECT {q} FROM pt_trades ORDER BY exit_at DESC LIMIT %s", (n,))
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute(f"SELECT {q} FROM pt_trades ORDER BY exit_at DESC LIMIT ?", (n,))
@@ -2779,14 +2784,15 @@ def get_equity_curve(n: int = 200) -> list:
     """Return last n pt_equity_curve rows, oldest-first for charting."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT recorded_at, equity FROM (
-                    SELECT recorded_at, equity FROM pt_equity_curve
-                    ORDER BY recorded_at DESC LIMIT %s
-                ) sub ORDER BY recorded_at ASC
-            """, (n,))
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT recorded_at, equity FROM (
+                        SELECT recorded_at, equity FROM pt_equity_curve
+                        ORDER BY recorded_at DESC LIMIT %s
+                    ) sub ORDER BY recorded_at ASC
+                """, (n,))
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -2808,15 +2814,16 @@ def get_graded_signals(n: int = 20) -> list:
             "ret_1d", "ret_3d", "ret_5d"]
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT ticker, score, signal_label, price_at_signal, created_at,
-                       outcome_1d, outcome_3d, outcome_5d
-                FROM signal_log
-                WHERE outcome_5d IS NOT NULL
-                ORDER BY created_at DESC LIMIT %s
-            """, (n,))
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT ticker, score, signal_label, price_at_signal, created_at,
+                           outcome_1d, outcome_3d, outcome_5d
+                    FROM signal_log
+                    WHERE outcome_5d IS NOT NULL
+                    ORDER BY created_at DESC LIMIT %s
+                """, (n,))
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -2837,19 +2844,20 @@ def get_rolling_win_rate() -> list:
     """Return daily win rate over last 37 days from signal_log.outcome_5d."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT DATE(created_at) AS signal_date,
-                       SUM(CASE WHEN outcome_5d > 2.0 THEN 1 ELSE 0 END)::float
-                           / NULLIF(COUNT(*), 0) AS win_rate,
-                       COUNT(*) AS n
-                FROM signal_log
-                WHERE outcome_5d IS NOT NULL
-                  AND created_at >= NOW() - INTERVAL '37 days'
-                GROUP BY DATE(created_at)
-                ORDER BY signal_date
-            """)
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT DATE(created_at) AS signal_date,
+                           SUM(CASE WHEN outcome_5d > 2.0 THEN 1 ELSE 0 END)::float
+                               / NULLIF(COUNT(*), 0) AS win_rate,
+                           COUNT(*) AS n
+                    FROM signal_log
+                    WHERE outcome_5d IS NOT NULL
+                      AND created_at >= NOW() - INTERVAL '37 days'
+                    GROUP BY DATE(created_at)
+                    ORDER BY signal_date
+                """)
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -2879,22 +2887,23 @@ def get_overall_accuracy() -> dict:
     }
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT
-                    COUNT(*) AS n,
-                    SUM(CASE WHEN outcome_1d > 2.0 THEN 1 ELSE 0 END)::float
-                        / NULLIF(SUM(CASE WHEN outcome_1d IS NOT NULL THEN 1 ELSE 0 END), 0) AS wr1,
-                    SUM(CASE WHEN outcome_3d > 2.0 THEN 1 ELSE 0 END)::float
-                        / NULLIF(SUM(CASE WHEN outcome_3d IS NOT NULL THEN 1 ELSE 0 END), 0) AS wr3,
-                    SUM(CASE WHEN outcome_5d > 2.0 THEN 1 ELSE 0 END)::float
-                        / NULLIF(SUM(CASE WHEN outcome_5d IS NOT NULL THEN 1 ELSE 0 END), 0) AS wr5,
-                    AVG(outcome_5d) AS avg_ret,
-                    STDDEV(outcome_5d) AS std_ret
-                FROM signal_log
-                WHERE created_at >= NOW() - INTERVAL '90 days'
-            """)
-            row = cur.fetchone(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT
+                        COUNT(*) AS n,
+                        SUM(CASE WHEN outcome_1d > 2.0 THEN 1 ELSE 0 END)::float
+                            / NULLIF(SUM(CASE WHEN outcome_1d IS NOT NULL THEN 1 ELSE 0 END), 0) AS wr1,
+                        SUM(CASE WHEN outcome_3d > 2.0 THEN 1 ELSE 0 END)::float
+                            / NULLIF(SUM(CASE WHEN outcome_3d IS NOT NULL THEN 1 ELSE 0 END), 0) AS wr3,
+                        SUM(CASE WHEN outcome_5d > 2.0 THEN 1 ELSE 0 END)::float
+                            / NULLIF(SUM(CASE WHEN outcome_5d IS NOT NULL THEN 1 ELSE 0 END), 0) AS wr5,
+                        AVG(outcome_5d) AS avg_ret,
+                        STDDEV(outcome_5d) AS std_ret
+                    FROM signal_log
+                    WHERE created_at >= NOW() - INTERVAL '90 days'
+                """)
+                row = cur.fetchone(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -2932,20 +2941,21 @@ def save_factor_scores(scan_date: str, ticker: str, factors: dict) -> None:
         return
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute(
-                "DELETE FROM factor_scores WHERE scan_date = %s AND ticker = %s",
-                (scan_date, ticker)
-            )
-            for name, vals in factors.items():
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
                 cur.execute(
-                    "INSERT INTO factor_scores (scan_date, ticker, factor_name, raw_value, z_score) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (scan_date, ticker, name,
-                     vals.get("raw") if isinstance(vals, dict) else None,
-                     vals.get("z")   if isinstance(vals, dict) else float(vals) if vals is not None else None)
+                    "DELETE FROM factor_scores WHERE scan_date = %s AND ticker = %s",
+                    (scan_date, ticker)
                 )
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+                for name, vals in factors.items():
+                    cur.execute(
+                        "INSERT INTO factor_scores (scan_date, ticker, factor_name, raw_value, z_score) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (scan_date, ticker, name,
+                         vals.get("raw") if isinstance(vals, dict) else None,
+                         vals.get("z")   if isinstance(vals, dict) else float(vals) if vals is not None else None)
+                    )
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute(
@@ -2969,15 +2979,16 @@ def save_ic_history(calc_date: str, factor_name: str, ic_value: float,
                     sample_size: int, horizon_days: int = 5) -> None:
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO factor_ic_history (calc_date, factor_name, ic_value, sample_size, horizon_days)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (calc_date, factor_name, horizon_days) DO UPDATE SET
-                    ic_value    = EXCLUDED.ic_value,
-                    sample_size = EXCLUDED.sample_size
-            """, (calc_date, factor_name, ic_value, sample_size, horizon_days))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO factor_ic_history (calc_date, factor_name, ic_value, sample_size, horizon_days)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (calc_date, factor_name, horizon_days) DO UPDATE SET
+                        ic_value    = EXCLUDED.ic_value,
+                        sample_size = EXCLUDED.sample_size
+                """, (calc_date, factor_name, ic_value, sample_size, horizon_days))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("""
@@ -2994,16 +3005,17 @@ def get_rolling_ic(horizon_days: int = 5, lookback_days: int = 20) -> dict:
     """Return {factor_name: mean_ic} over the last lookback_days days."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT factor_name, AVG(ic_value) AS mean_ic, COUNT(*) AS n
-                FROM factor_ic_history
-                WHERE horizon_days = %s
-                  AND calc_date >= CURRENT_DATE - INTERVAL '%s days'
-                GROUP BY factor_name
-                HAVING COUNT(*) >= 3
-            """, (horizon_days, lookback_days))
-            rows = cur.fetchall(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT factor_name, AVG(ic_value) AS mean_ic, COUNT(*) AS n
+                    FROM factor_ic_history
+                    WHERE horizon_days = %s
+                      AND calc_date >= CURRENT_DATE - INTERVAL '%s days'
+                    GROUP BY factor_name
+                    HAVING COUNT(*) >= 3
+                """, (horizon_days, lookback_days))
+                rows = cur.fetchall(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -3026,21 +3038,22 @@ def save_market_regime(regime_date: str, regime: str, iwm_price: float,
                        adx_14: float, volatility_20d: float) -> None:
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO market_regime
-                    (regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (regime_date) DO UPDATE SET
-                    regime        = EXCLUDED.regime,
-                    iwm_price     = EXCLUDED.iwm_price,
-                    iwm_ma20      = EXCLUDED.iwm_ma20,
-                    iwm_ma50      = EXCLUDED.iwm_ma50,
-                    adx_14        = EXCLUDED.adx_14,
-                    volatility_20d = EXCLUDED.volatility_20d,
-                    created_at    = NOW()
-            """, (regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO market_regime
+                        (regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (regime_date) DO UPDATE SET
+                        regime        = EXCLUDED.regime,
+                        iwm_price     = EXCLUDED.iwm_price,
+                        iwm_ma20      = EXCLUDED.iwm_ma20,
+                        iwm_ma50      = EXCLUDED.iwm_ma50,
+                        adx_14        = EXCLUDED.adx_14,
+                        volatility_20d = EXCLUDED.volatility_20d,
+                        created_at    = NOW()
+                """, (regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("""
@@ -3057,12 +3070,13 @@ def get_latest_regime() -> dict:
     """Return the most recent market_regime row, or empty dict."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d
-                FROM market_regime ORDER BY regime_date DESC LIMIT 1
-            """)
-            row = cur.fetchone(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT regime_date, regime, iwm_price, iwm_ma20, iwm_ma50, adx_14, volatility_20d
+                    FROM market_regime ORDER BY regime_date DESC LIMIT 1
+                """)
+                row = cur.fetchone(); cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -3086,25 +3100,26 @@ def upsert_universe_stock(ticker: str, name: str = "", exchange: str = "",
                            sector: str = "", min_price: float = 0.0) -> None:
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO stock_universe (ticker, name, exchange, market_cap, avg_volume, sector, min_price)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (ticker) DO UPDATE SET
-                    name         = EXCLUDED.name,
-                    exchange     = EXCLUDED.exchange,
-                    market_cap   = CASE WHEN EXCLUDED.market_cap > 0
-                                        THEN EXCLUDED.market_cap
-                                        ELSE stock_universe.market_cap END,
-                    avg_volume   = CASE WHEN EXCLUDED.avg_volume > 0
-                                        THEN EXCLUDED.avg_volume
-                                        ELSE stock_universe.avg_volume END,
-                    sector       = EXCLUDED.sector,
-                    min_price    = EXCLUDED.min_price,
-                    last_updated = NOW(),
-                    active       = TRUE
-            """, (ticker, name, exchange, market_cap, avg_volume, sector, min_price))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO stock_universe (ticker, name, exchange, market_cap, avg_volume, sector, min_price)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (ticker) DO UPDATE SET
+                        name         = EXCLUDED.name,
+                        exchange     = EXCLUDED.exchange,
+                        market_cap   = CASE WHEN EXCLUDED.market_cap > 0
+                                            THEN EXCLUDED.market_cap
+                                            ELSE stock_universe.market_cap END,
+                        avg_volume   = CASE WHEN EXCLUDED.avg_volume > 0
+                                            THEN EXCLUDED.avg_volume
+                                            ELSE stock_universe.avg_volume END,
+                        sector       = EXCLUDED.sector,
+                        min_price    = EXCLUDED.min_price,
+                        last_updated = NOW(),
+                        active       = TRUE
+                """, (ticker, name, exchange, market_cap, avg_volume, sector, min_price))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("""
@@ -3135,26 +3150,27 @@ def bulk_upsert_universe_stocks(stocks: list) -> int:
     ]
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.executemany("""
-                INSERT INTO stock_universe
-                    (ticker, name, exchange, market_cap, avg_volume, sector, min_price)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (ticker) DO UPDATE SET
-                    name         = EXCLUDED.name,
-                    exchange     = EXCLUDED.exchange,
-                    market_cap   = CASE WHEN EXCLUDED.market_cap > 0
-                                        THEN EXCLUDED.market_cap
-                                        ELSE stock_universe.market_cap END,
-                    avg_volume   = CASE WHEN EXCLUDED.avg_volume > 0
-                                        THEN EXCLUDED.avg_volume
-                                        ELSE stock_universe.avg_volume END,
-                    sector       = EXCLUDED.sector,
-                    min_price    = EXCLUDED.min_price,
-                    last_updated = NOW(),
-                    active       = TRUE
-            """, rows)
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.executemany("""
+                    INSERT INTO stock_universe
+                        (ticker, name, exchange, market_cap, avg_volume, sector, min_price)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (ticker) DO UPDATE SET
+                        name         = EXCLUDED.name,
+                        exchange     = EXCLUDED.exchange,
+                        market_cap   = CASE WHEN EXCLUDED.market_cap > 0
+                                            THEN EXCLUDED.market_cap
+                                            ELSE stock_universe.market_cap END,
+                        avg_volume   = CASE WHEN EXCLUDED.avg_volume > 0
+                                            THEN EXCLUDED.avg_volume
+                                            ELSE stock_universe.avg_volume END,
+                        sector       = EXCLUDED.sector,
+                        min_price    = EXCLUDED.min_price,
+                        last_updated = NOW(),
+                        active       = TRUE
+                """, rows)
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.executemany("""
@@ -3179,25 +3195,26 @@ def get_active_universe(min_market_cap: int = 20_000_000,
     _MIN_MEANINGFUL = 100
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT ticker FROM stock_universe
-                WHERE active = TRUE
-                  AND market_cap BETWEEN %s AND %s
-                  AND avg_volume >= %s
-                ORDER BY market_cap DESC
-            """, (min_market_cap, max_market_cap, min_avg_volume))
-            rows = cur.fetchall()
-            if len(rows) < _MIN_MEANINGFUL:
-                # Partial refresh may have zeroed avg_volume — relax to mcap-only
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
                 cur.execute("""
                     SELECT ticker FROM stock_universe
                     WHERE active = TRUE
                       AND market_cap BETWEEN %s AND %s
+                      AND avg_volume >= %s
                     ORDER BY market_cap DESC
-                """, (min_market_cap, max_market_cap))
+                """, (min_market_cap, max_market_cap, min_avg_volume))
                 rows = cur.fetchall()
-            cur.close(); _put_pg_conn(conn)
+                if len(rows) < _MIN_MEANINGFUL:
+                    # Partial refresh may have zeroed avg_volume — relax to mcap-only
+                    cur.execute("""
+                        SELECT ticker FROM stock_universe
+                        WHERE active = TRUE
+                          AND market_cap BETWEEN %s AND %s
+                        ORDER BY market_cap DESC
+                    """, (min_market_cap, max_market_cap))
+                    rows = cur.fetchall()
+                cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -3227,18 +3244,19 @@ def get_ic_table() -> list:
     """Return factor IC history for dashboard display (last 30 days, by factor, last 3 horizons)."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT factor_name, horizon_days, AVG(ic_value) AS mean_ic,
-                       STDDEV(ic_value) AS std_ic, COUNT(*) AS n
-                FROM factor_ic_history
-                WHERE calc_date >= CURRENT_DATE - INTERVAL '30 days'
-                GROUP BY factor_name, horizon_days
-                ORDER BY factor_name, horizon_days
-            """)
-            rows = cur.fetchall()
-            cols = ["factor_name","horizon_days","mean_ic","std_ic","n"]
-            cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT factor_name, horizon_days, AVG(ic_value) AS mean_ic,
+                           STDDEV(ic_value) AS std_ic, COUNT(*) AS n
+                    FROM factor_ic_history
+                    WHERE calc_date >= CURRENT_DATE - INTERVAL '30 days'
+                    GROUP BY factor_name, horizon_days
+                    ORDER BY factor_name, horizon_days
+                """)
+                rows = cur.fetchall()
+                cols = ["factor_name","horizon_days","mean_ic","std_ic","n"]
+                cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -3267,13 +3285,14 @@ def seed_mobile_admin() -> None:
         from auth import hash_password
         ph_hash = hash_password("axiom2026")
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO users (username, email, password_hash, display_name, role)
-                VALUES (%s, %s, %s, %s, 'admin')
-                ON CONFLICT DO NOTHING
-            """, ("admin", "admin@admin.local", ph_hash, "Vishwa"))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO users (username, email, password_hash, display_name, role)
+                    VALUES (%s, %s, %s, %s, 'admin')
+                    ON CONFLICT DO NOTHING
+                """, ("admin", "admin@admin.local", ph_hash, "Vishwa"))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("""
@@ -3293,12 +3312,13 @@ def log_change(title: str, description: str = "", category: str = "update",
     """Insert one row into the changelog table."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO changelog (category, title, description, files, commit_hash, impact)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (category, title, description, files, commit_hash, impact))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO changelog (category, title, description, files, commit_hash, impact)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (category, title, description, files, commit_hash, impact))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("""
@@ -3314,16 +3334,17 @@ def get_changelog(limit: int = 50, days_back: int = 90) -> list:
     """Return recent changelog rows newest-first as list of dicts."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                SELECT id, change_date, category, title, description, files, commit_hash, impact
-                FROM changelog
-                WHERE change_date >= NOW() - INTERVAL '%s days'
-                ORDER BY change_date DESC LIMIT %s
-            """, (days_back, limit))
-            rows = cur.fetchall()
-            cols = [d[0] for d in cur.description]
-            cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT id, change_date, category, title, description, files, commit_hash, impact
+                    FROM changelog
+                    WHERE change_date >= NOW() - INTERVAL '%s days'
+                    ORDER BY change_date DESC LIMIT %s
+                """, (days_back, limit))
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                cur.close()
         else:
             conn = _get_sqlite_conn(); cur = conn.cursor()
             cur.execute("""
@@ -3347,13 +3368,14 @@ def seed_changelog_entry(title: str, description: str, category: str,
     """Insert a changelog entry with a specific timestamp (for backfilling history)."""
     try:
         if _is_postgres():
-            conn = _get_pg_conn(); cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO changelog (change_date, category, title, description, files, commit_hash, impact)
-                VALUES (%s::timestamp, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-            """, (change_date, category, title, description, files, commit_hash, impact))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO changelog (change_date, category, title, description, files, commit_hash, impact)
+                    VALUES (%s::timestamp, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                """, (change_date, category, title, description, files, commit_hash, impact))
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute("""
