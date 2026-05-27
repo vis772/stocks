@@ -805,9 +805,42 @@ def check_sec_filings(watchlist: List[str], state: ScannerState):
                             if ft in title.upper():
                                 form_type = ft
                                 break
-                        alert_sec_filing(ticker, form_type, 0, link, f"New {form_type} for {ticker}. Review immediately.")
+
+                        # ── Deep Claude filing analysis ───────────────────────
+                        verdict_data = {}
+                        try:
+                            from data.sec_data import analyze_filing_verdict
+                            verdict_data = analyze_filing_verdict(ticker, form_type, link)
+                        except Exception as _ve:
+                            print(f"  [sec_data] verdict analysis failed for {ticker}: {_ve}")
+
+                        if verdict_data:
+                            verdict    = verdict_data.get("verdict", "NEUTRAL")
+                            confidence = verdict_data.get("confidence", 0)
+                            headline   = verdict_data.get("headline", f"New {form_type}")
+                            catalysts  = verdict_data.get("catalysts", [])
+                            risks      = verdict_data.get("risks", [])
+                            setup      = verdict_data.get("trade_setup", "")
+                            alert_w    = verdict_data.get("alert_worthy", True)
+
+                            summary_parts = [f"[{verdict} | {confidence}%] {headline}"]
+                            if catalysts:
+                                summary_parts.append("▲ " + " | ".join(catalysts[:2]))
+                            if risks:
+                                summary_parts.append("▼ " + " | ".join(risks[:2]))
+                            if setup:
+                                summary_parts.append(f"Setup: {setup}")
+                            summary = "\n".join(summary_parts)
+
+                            # Only send Pushover if verdict is actionable
+                            if alert_w or form_type in ("8-K", "SC 13D"):
+                                alert_sec_filing(ticker, form_type, 0, link, summary)
+                        else:
+                            alert_sec_filing(ticker, form_type, 0, link,
+                                             f"New {form_type} for {ticker}. Review immediately.")
+
                         state.mark_alerted(filing_key)
-                        state.log_alert(f"{ticker} new {form_type} filing")
+                        state.log_alert(f"{ticker} new {form_type} filing (verdict={verdict_data.get('verdict','?')})")
                     break
         state.last_sec_check = now_et()
     except Exception as e:

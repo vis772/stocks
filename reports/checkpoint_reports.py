@@ -270,7 +270,19 @@ def _send_pushover(title: str, message: str, url: str = "") -> None:
         raise RuntimeError(f"Pushover HTTP {resp.status_code}: {resp.text[:200]}")
 
 
+def _send_via_telegram(filename: str, caption: str) -> None:
+    """Send checkpoint PDF directly to admin Telegram chat."""
+    try:
+        from alerts import send_via_telegram
+        send_via_telegram(caption, pdf_path=filename, caption=caption)
+    except Exception as e:
+        print(f"  [report] Telegram send failed: {e}")
+
+
 def _upload_and_notify(filename: str, title: str, message: str) -> Optional[str]:
+    # Primary: Telegram PDF delivery
+    _send_via_telegram(filename, f"<b>{title}</b>\n{message}")
+    # Backup: Pushover link via filebin
     url = _upload_to_filebin(filename)
     _send_pushover(title, message, url=url or "")
     return url

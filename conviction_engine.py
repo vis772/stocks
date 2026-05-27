@@ -75,20 +75,6 @@ class ConvictionEngine:
         if price < 0.50:
             return False
 
-        # Check portfolio for >10% loss (loosened from 8%)
-        try:
-            from db.database import get_portfolio
-            pf = get_portfolio()
-            if not pf.empty:
-                row = pf[pf["ticker"] == ticker.upper()]
-                if not row.empty:
-                    avg_cost = _safe(row.iloc[0]["avg_cost"])
-                    if avg_cost > 0 and price > 0:
-                        if (price - avg_cost) / avg_cost < -0.10:
-                            return False
-        except Exception:
-            pass
-
         # No earnings within 2 trading days
         if data.get("earnings_within_2d", False):
             return False
@@ -1452,16 +1438,32 @@ def run_conviction_engine(session: str = "afterhours", regime: str = "") -> list
                         "afterhours":   "After-Hours (7:30 PM CST)",
                     }
                     _label = _session_labels.get(session, session)
+                    _conv_title   = f"Axiom Conviction — {_label}"
+                    _conv_message = (
+                        f"{len(buy_list)} pick(s) | Regime: {regime}\n"
+                        + "\n".join(
+                            f"#{b['rank']} {b['ticker']} — Entry ${b['entry']} "
+                            f"Stop ${b['stop_loss']} | {b['hold_type']}"
+                            for b in buy_list[:3]
+                        )
+                    )
+                    # Primary: Telegram PDF
+                    try:
+                        from alerts import send_via_telegram
+                        _tg_caption = (
+                            f"<b>{_conv_title}</b>\n{_conv_message}"
+                        )
+                        send_via_telegram(
+                            _tg_caption,
+                            pdf_bytes=_pdf_bytes,
+                            filename=f"axiom_{session}.pdf",
+                        )
+                    except Exception as _tge:
+                        print(f"  [conviction] Telegram PDF failed: {_tge}")
+                    # Backup: Pushover PDF attachment
                     send_alert_with_pdf(
-                        title=f"Axiom Conviction — {_label}",
-                        message=(
-                            f"{len(buy_list)} pick(s) | Regime: {regime}\n"
-                            + "\n".join(
-                                f"#{b['rank']} {b['ticker']} — Entry ${b['entry']} "
-                                f"Stop ${b['stop_loss']} | {b['hold_type']}"
-                                for b in buy_list[:3]
-                            )
-                        ),
+                        title=_conv_title,
+                        message=_conv_message,
                         pdf_bytes=_pdf_bytes,
                         filename=f"axiom_{session}.pdf",
                         priority=PRIORITY_HIGH,

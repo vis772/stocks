@@ -2,9 +2,18 @@
 # Sends push notifications to your phone via Pushover.
 # Pushover is $5 one-time, works on iPhone and Android.
 # Get keys at pushover.net
+#
+# Throttle rules (in-memory, resets on container restart):
+#   Per-ticker per-type cooldown:  HIGH priority = 15 min | NORMAL/LOW = 60 min
+#   Global Pushover cap:           8 notifications per 30-minute rolling window
+#   Exempt from throttle:          send_alert_with_pdf, alert_morning_brief,
+#                                  alert_digest, send_via_telegram
 
 import os
+import time
+import threading
 import requests
+from collections import deque
 from datetime import datetime
 from typing import Optional
 
@@ -26,6 +35,119 @@ PRIORITY_LOW    = -1   # No sound
 PRIORITY_NORMAL =  0   # Sound + notification
 PRIORITY_HIGH   =  1   # Bypasses quiet hours
 PRIORITY_URGENT =  2   # Repeats until acknowledged
+
+# ── Throttle state (in-memory; resets on container restart) ──────────────────
+_throttle_lock     = threading.Lock()
+_ticker_throttle   : dict  = {}       # "TICKER|alert_type" → last_sent_epoch (float)
+_global_sent_times : deque = deque()  # epoch timestamps of recent Pushover sends
+
+TICKER_COOLDOWN    = 3600   # seconds — 60 min per ticker per alert type (NORMAL/LOW)
+HIGH_PRIO_COOLDOWN = 900    # seconds — 15 min for HIGH / URGENT priority
+GLOBAL_CAP         = 8      # max Pushover notifications per rolling window
+GLOBAL_WINDOW      = 1800   # seconds — 30-minute rolling window
+
+
+def _throttle_check(ticker: str, alert_type: str, priority: int = PRIORITY_NORMAL) -> bool:
+    """
+    Atomically check whether this alert is throttled AND record the send if not.
+    Returns True  → alert is throttled, do NOT send.
+    Returns False → alert is allowed, send is recorded.
+
+    Thread-safe. Does not apply to send_alert_with_pdf / alert_morning_brief /
+    alert_digest / send_via_telegram — those are called once per session.
+    """
+    now = time.time()
+    with _throttle_lock:
+        # Prune expired global-window entries
+        while _global_sent_times and now - _global_sent_times[0] > GLOBAL_WINDOW:
+            _global_sent_times.popleft()
+
+        # Enforce global cap
+        if len(_global_sent_times) >= GLOBAL_CAP:
+            print(f"  [alerts/throttle] global cap {GLOBAL_CAP}/30min hit — suppressing {ticker} {alert_type}")
+            return True
+
+        # Enforce per-ticker per-type cooldown
+        key      = f"{ticker.upper()}|{alert_type}"
+        last     = _ticker_throttle.get(key, 0.0)
+        cooldown = HIGH_PRIO_COOLDOWN if priority >= PRIORITY_HIGH else TICKER_COOLDOWN
+        if now - last < cooldown:
+            remaining = int(cooldown - (now - last))
+            print(f"  [alerts/throttle] {ticker} {alert_type} — cooldown {remaining}s remaining")
+            return True
+
+        # Allow — record now so concurrent calls see the update immediately
+        _ticker_throttle[key] = now
+        _global_sent_times.append(now)
+        return False
+
+
+def send_via_telegram(text: str, pdf_path: Optional[str] = None,
+                      caption: Optional[str] = None,
+                      pdf_bytes: Optional[bytes] = None,
+                      filename: str = "report.pdf") -> bool:
+    """
+    Send a message (and optional PDF document) to the admin Telegram chat.
+    Uses TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_USER_ID env vars.
+    Never throttled — called for reports and critical one-off messages.
+
+    pdf_path  — path to a PDF file on disk (preferred)
+    pdf_bytes — raw PDF bytes (used when no file path is available, e.g. conviction PDFs)
+    filename  — filename to use when sending bytes (default: report.pdf)
+    caption   — overrides text for the document caption (max 1024 chars)
+    """
+    token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_ALLOWED_USER_ID", "")
+    if not token or not chat_id:
+        print("  [alerts/telegram] TELEGRAM_BOT_TOKEN or TELEGRAM_ALLOWED_USER_ID not set — skipping")
+        return False
+
+    base = f"https://api.telegram.org/bot{token}"
+    cap  = (caption or text)[:1024]
+
+    try:
+        # ── Send PDF if we have one ───────────────────────────────────────────
+        if pdf_path and os.path.isfile(pdf_path):
+            with open(pdf_path, "rb") as fh:
+                resp = requests.post(
+                    f"{base}/sendDocument",
+                    data={"chat_id": chat_id, "caption": cap, "parse_mode": "HTML"},
+                    files={"document": (os.path.basename(pdf_path), fh, "application/pdf")},
+                    timeout=60,
+                )
+            if resp.status_code == 200:
+                print(f"  [alerts/telegram] PDF sent: {os.path.basename(pdf_path)}")
+                return True
+            print(f"  [alerts/telegram] PDF send failed ({resp.status_code}): {resp.text[:200]}")
+            # Fall through to text-only
+
+        elif pdf_bytes:
+            resp = requests.post(
+                f"{base}/sendDocument",
+                data={"chat_id": chat_id, "caption": cap, "parse_mode": "HTML"},
+                files={"document": (filename, pdf_bytes, "application/pdf")},
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                print(f"  [alerts/telegram] PDF (bytes) sent: {filename}")
+                return True
+            print(f"  [alerts/telegram] PDF bytes send failed ({resp.status_code}): {resp.text[:200]}")
+            # Fall through to text-only
+
+        # ── Text-only fallback ────────────────────────────────────────────────
+        resp = requests.post(
+            f"{base}/sendMessage",
+            data={"chat_id": chat_id, "text": text[:4096], "parse_mode": "HTML"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            print("  [alerts/telegram] Message sent")
+            return True
+        print(f"  [alerts/telegram] Message failed ({resp.status_code}): {resp.text[:200]}")
+        return False
+    except Exception as e:
+        print(f"  [alerts/telegram] Error: {e}")
+        return False
 
 
 def send_alert(
@@ -127,6 +249,8 @@ def send_alert_with_pdf(
 
 def alert_volume_spike(ticker: str, rvol: float, price: float, change_pct: float):
     """Alert for unusual volume spike."""
+    if _throttle_check(ticker, "volume_spike", PRIORITY_HIGH):
+        return
     arrow = "▲" if change_pct >= 0 else "▼"
     send_alert(
         title=f"⚡ {ticker} — Volume Spike {rvol:.1f}x",
@@ -144,8 +268,10 @@ def alert_volume_spike(ticker: str, rvol: float, price: float, change_pct: float
 
 def alert_price_move(ticker: str, price: float, change_pct: float, timeframe: str = "10min"):
     """Alert for significant price move."""
-    arrow = "▲" if change_pct >= 0 else "▼"
     priority = PRIORITY_HIGH if abs(change_pct) > 10 else PRIORITY_NORMAL
+    if _throttle_check(ticker, "price_move", priority):
+        return
+    arrow = "▲" if change_pct >= 0 else "▼"
     send_alert(
         title=f"{'🟢' if change_pct >= 0 else '🔴'} {ticker} {arrow}{abs(change_pct):.1f}% in {timeframe}",
         message=(
@@ -161,6 +287,8 @@ def alert_price_move(ticker: str, price: float, change_pct: float, timeframe: st
 
 def alert_sec_filing(ticker: str, form_type: str, days_ago: int, filing_url: str, summary: str = ""):
     """Alert for new SEC filing detected."""
+    if _throttle_check(ticker, f"filing_{form_type}", PRIORITY_HIGH):
+        return
     send_alert(
         title=f"📋 {ticker} — New {form_type} Filing",
         message=(
@@ -176,6 +304,8 @@ def alert_sec_filing(ticker: str, form_type: str, days_ago: int, filing_url: str
 
 def alert_news(ticker: str, headline: str, sentiment: str, price: float):
     """Alert for significant news article."""
+    if _throttle_check(ticker, "news", PRIORITY_NORMAL):
+        return
     emoji = "🟢" if sentiment == "positive" else "🔴" if sentiment == "negative" else "📰"
     send_alert(
         title=f"{emoji} {ticker} — News Alert",
@@ -229,6 +359,8 @@ def alert_digest(alerts_summary: list, top_movers: list = None):
 
 def alert_level_break(ticker: str, price: float, level: float, level_name: str, change_pct: float):
     """Alert for break of a key intraday level (session high/low, pre-market high/low)."""
+    if _throttle_check(ticker, "level_break", PRIORITY_HIGH):
+        return
     is_up = price >= level
     emoji  = "🚀" if is_up else "🔻"
     arrow  = "above" if is_up else "below"
@@ -249,6 +381,8 @@ def alert_level_break(ticker: str, price: float, level: float, level_name: str, 
 
 def alert_vwap_cross(ticker: str, price: float, vwap: float, direction: str, change_pct: float):
     """Alert for VWAP cross or extended move above VWAP."""
+    if _throttle_check(ticker, f"vwap_{direction}", PRIORITY_HIGH):
+        return
     if direction == "above":
         title    = f"🟢 {ticker} — Reclaimed VWAP"
         body     = (

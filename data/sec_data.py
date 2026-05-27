@@ -212,48 +212,133 @@ def get_insider_direction(filing_url: str) -> Optional[str]:
         return None
 
 
-def summarize_filing_with_claude(filing_url: str, form_type: str, ticker: str) -> str:
+def analyze_filing_verdict(ticker: str, form_type: str, filing_url: str) -> dict:
     """
-    Fetch the actual text of an SEC filing and summarize it using Claude.
+    Deep AI analysis of an SEC filing. Returns a structured buy/not-buy verdict
+    suitable for use directly in alerts and conviction pipeline.
+
+    Returns dict:
+        verdict       : "BUY" | "WATCH" | "AVOID" | "NEUTRAL"
+        confidence    : int 0-100 (0 = no data)
+        headline      : str — one-sentence punchy summary
+        catalysts     : list[str] — specific bullish catalysts (empty if none)
+        risks         : list[str] — specific risks flagged (empty if none)
+        trade_setup   : str — actionable guidance (entry, timing, sizing)
+        alert_worthy  : bool — should this fire a Pushover alert?
+        raw_text_chars: int — chars of filing text analysed (0 if fetch failed)
+        error         : str | None
     """
     import os
+    import json as _json
+
+    _default = {
+        "verdict": "NEUTRAL", "confidence": 0, "headline": "Filing analysis unavailable",
+        "catalysts": [], "risks": [], "trade_setup": "",
+        "alert_worthy": False, "raw_text_chars": 0, "error": None,
+    }
+
     try:
         import anthropic
     except ImportError:
-        return "Anthropic package not installed."
+        return {**_default, "error": "anthropic package not installed"}
 
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {**_default, "error": "ANTHROPIC_API_KEY not set"}
+
+    # ── 1. Fetch filing text ──────────────────────────────────────────────────
+    filing_text = ""
     try:
         resp = requests.get(filing_url, headers=HEADERS, timeout=15)
-        if resp.status_code != 200:
-            return "Could not fetch filing text."
+        if resp.status_code == 200:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(resp.text, "lxml")
+            filing_text = soup.get_text(separator=" ", strip=True)[:8000]
+    except Exception as fetch_err:
+        print(f"  [sec_data] Filing fetch failed ({ticker}): {fetch_err}")
 
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(resp.text, "lxml")
-        text = soup.get_text(separator=" ", strip=True)[:6000]
+    if not filing_text:
+        return {**_default, "error": "could not fetch filing text", "raw_text_chars": 0}
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            return "No Anthropic API key set — add it to Streamlit secrets."
+    # ── 2. Claude analysis ────────────────────────────────────────────────────
+    prompt = f"""You are a professional equity analyst specialising in small-cap stocks.
+Analyse this SEC {form_type} filing for {ticker} and return ONLY a JSON object — no prose, no markdown fences.
 
+JSON schema (all fields required):
+{{
+  "verdict":      "BUY" | "WATCH" | "AVOID" | "NEUTRAL",
+  "confidence":   <integer 0-100>,
+  "headline":     "<one punchy sentence — what happened and why it matters>",
+  "catalysts":    ["<specific bullish catalyst>", ...],
+  "risks":        ["<specific risk or bearish flag>", ...],
+  "trade_setup":  "<actionable: timing, entry range, key level to watch, or 'No trade — X'>",
+  "alert_worthy": <true | false>
+}}
+
+Verdict guide:
+  BUY   — material positive catalyst (deal, partnership, FDA, revenue beat, insider buy ≥$100K)
+  WATCH — mixed/ambiguous; worth monitoring at open
+  AVOID — dilution offering, equity raise, reverse split vote, going concern, NASDAQ notice
+  NEUTRAL — routine filing with no actionable information
+
+Be specific: include dollar amounts, percentages, dates, and named parties when present.
+alert_worthy = true only for BUY or high-impact AVOID (dilution, reverse split risk).
+
+Filing text ({len(filing_text)} chars):
+{filing_text}"""
+
+    try:
         client  = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=400,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"You are analyzing an SEC {form_type} filing for {ticker}. "
-                    f"Summarize in 3-5 bullet points what this filing says and why it matters "
-                    f"for a retail investor. Be specific about dollar amounts, percentages, "
-                    f"dates, and names. Flag anything bullish or bearish clearly.\n\n"
-                    f"Filing text:\n\n{text}"
-                )
-            }]
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}],
         )
-        return message.content[0].text
+        raw_response = message.content[0].text.strip()
+
+        # Strip any accidental markdown fences
+        if raw_response.startswith("```"):
+            raw_response = raw_response.split("```")[1]
+            if raw_response.startswith("json"):
+                raw_response = raw_response[4:]
+
+        result = _json.loads(raw_response)
+        # Validate and fill missing fields
+        result.setdefault("verdict",      "NEUTRAL")
+        result.setdefault("confidence",   50)
+        result.setdefault("headline",     f"{form_type} filing for {ticker}")
+        result.setdefault("catalysts",    [])
+        result.setdefault("risks",        [])
+        result.setdefault("trade_setup",  "")
+        result.setdefault("alert_worthy", False)
+        result["raw_text_chars"] = len(filing_text)
+        result["error"] = None
+        print(f"  [sec_data] {ticker} {form_type} verdict={result['verdict']} confidence={result['confidence']}")
+        return result
 
     except Exception as e:
-        return f"Filing summary unavailable: {str(e)}"
+        print(f"  [sec_data] Claude analysis failed for {ticker}: {e}")
+        return {**_default, "error": str(e), "raw_text_chars": len(filing_text)}
+
+
+def summarize_filing_with_claude(filing_url: str, form_type: str, ticker: str) -> str:
+    """
+    Backward-compatible wrapper — returns a human-readable string summary.
+    Internally calls analyze_filing_verdict() for full analysis.
+    """
+    result = analyze_filing_verdict(ticker, form_type, filing_url)
+    if result.get("error") and not result.get("headline"):
+        return f"Filing summary unavailable: {result['error']}"
+
+    lines = [f"[{result['verdict']} | {result['confidence']}% confidence]",
+             result["headline"]]
+    if result["catalysts"]:
+        lines.append("Catalysts: " + "; ".join(result["catalysts"]))
+    if result["risks"]:
+        lines.append("Risks: " + "; ".join(result["risks"]))
+    if result["trade_setup"]:
+        lines.append(f"Setup: {result['trade_setup']}")
+    return "\n".join(lines)
 
 
 def get_insider_form4s(ticker: str, days_back: int = 30) -> List[Dict]:

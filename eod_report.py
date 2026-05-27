@@ -257,33 +257,35 @@ def _get_todays_alerts() -> List[str]:
         return []
 
 
-def _get_portfolio_snapshot() -> List[Dict]:
-    try:
-        from db.database import get_portfolio
-        df = get_portfolio(user_id=1)
-        if df.empty:
-            return []
-        rows = []
-        for _, row in df.iterrows():
-            ticker  = row["ticker"]
-            shares  = row.get("shares", 0)
-            avg_c   = row.get("avg_cost", 0)
-            price   = _get_current_price(ticker)
-            pnl_pct = ((price - avg_c) / avg_c * 100) if avg_c > 0 and price > 0 else 0
-            pnl_usd = (price - avg_c) * shares if price > 0 else 0
-            rows.append({
-                "ticker":  ticker,
-                "shares":  shares,
-                "avg_cost": avg_c,
-                "price":   price,
-                "pnl_pct": pnl_pct,
-                "pnl_usd": pnl_usd,
-                "value":   price * shares,
-            })
-        return rows
-    except Exception as e:
-        print(f"  [eod] Portfolio snapshot failed: {e}")
+def _get_conviction_outcomes() -> List[Dict]:
+    """
+    For each conviction buy logged today, fetch the EOD close price and
+    compute P&L vs the entry price that was used at signal time.
+    Returns a list of outcome dicts for Section 5 of the PDF.
+    """
+    buys = _get_conviction_buys()
+    if not buys:
         return []
+    outcomes = []
+    for b in buys:
+        ticker = b.get("ticker", "")
+        entry  = float(b.get("entry", 0) or 0)
+        if not ticker or entry <= 0:
+            continue
+        close = _get_current_price(ticker)
+        pnl_pct = ((close - entry) / entry * 100) if close > 0 and entry > 0 else None
+        outcomes.append({
+            "ticker":     ticker,
+            "session":    b.get("session", ""),
+            "conviction": b.get("conviction", 0),
+            "entry":      entry,
+            "stop":       float(b.get("stop_loss", 0) or 0),
+            "target_1":   float(b.get("target_1", 0) or 0),
+            "close":      close,
+            "pnl_pct":    pnl_pct,
+            "reasoning":  b.get("reasoning", ""),
+        })
+    return outcomes
 
 
 def _get_conviction_buys() -> List[Dict]:
@@ -483,13 +485,13 @@ def generate_eod_report(watchlist: List[str]) -> Optional[str]:
     summaries_ok.sort(key=lambda x: abs(x.get("change_pct", 0)), reverse=True)
 
     print("  Checking SEC filings...")
-    sec_filings    = _get_sec_filings(watchlist)
-    todays_sigs    = _get_todays_signals()
-    todays_alerts  = _get_todays_alerts()
-    portfolio      = _get_portfolio_snapshot()
-    watchpoints    = _make_watchpoints(summaries_ok, sec_filings)
-    conviction_buys = _get_conviction_buys()
-    dq_stats       = _get_data_quality_stats()
+    sec_filings      = _get_sec_filings(watchlist)
+    todays_sigs      = _get_todays_signals()
+    todays_alerts    = _get_todays_alerts()
+    conviction_outcomes = _get_conviction_outcomes()
+    watchpoints      = _make_watchpoints(summaries_ok, sec_filings)
+    conviction_buys  = _get_conviction_buys()
+    dq_stats         = _get_data_quality_stats()
     acc_metrics    = _get_accuracy_metrics()
     quant_stats    = _get_quant_stats()
 
@@ -630,44 +632,51 @@ def generate_eod_report(watchlist: List[str]) -> Optional[str]:
         story.append(Paragraph("No material filings detected today.", ST["body"]))
     story.append(_section_rule())
 
-    # ── 5. PORTFOLIO SNAPSHOT ────────────────────────────────────────────────
-    story.append(Paragraph("PORTFOLIO SNAPSHOT", ST["section"]))
-    if portfolio:
-        port_rows = []
-        total_value = 0
-        total_pnl   = 0
-        for h in portfolio:
-            price   = h.get("price", 0)
-            avg_c   = h.get("avg_cost", 0)
-            pnl_pct = h.get("pnl_pct", 0)
-            pnl_usd = h.get("pnl_usd", 0)
-            value   = h.get("value", 0)
-            total_value += value
-            total_pnl   += pnl_usd
-            p_str   = f"${price:.4f}" if price < 10 else f"${price:.2f}"
-            ac_str  = f"${avg_c:.4f}" if avg_c < 10 else f"${avg_c:.2f}"
-            port_rows.append([
-                h["ticker"],
-                f"{h.get('shares', 0):.0f}",
-                ac_str,
+    # ── 5. TODAY'S CONVICTION OUTCOMES ──────────────────────────────────────
+    story.append(Paragraph("TODAY'S CONVICTION OUTCOMES", ST["section"]))
+    story.append(Paragraph(
+        "Entry prices vs EOD close for conviction buys signalled today. "
+        "P&L is indicative — assumes entry at signal price.",
+        ST["note"],
+    ))
+    if conviction_outcomes:
+        out_rows = []
+        for o in conviction_outcomes:
+            close   = o.get("close", 0)
+            pnl_pct = o.get("pnl_pct")
+            entry   = o.get("entry", 0)
+            t1      = o.get("target_1", 0)
+            conv    = o.get("conviction", 0)
+            sess    = o.get("session", "")
+            e_str   = f"${entry:.4f}" if entry < 10 else f"${entry:.2f}"
+            c_str   = f"${close:.4f}" if close > 0 and close < 10 else (f"${close:.2f}" if close > 0 else "—")
+            t1_str  = f"${t1:.4f}" if t1 > 0 and t1 < 10 else (f"${t1:.2f}" if t1 > 0 else "—")
+            p_str   = (f"{pnl_pct:+.2f}%" if pnl_pct is not None else "—")
+            out_rows.append([
+                o["ticker"],
+                sess[:10],
+                f"{conv:.0f}/100",
+                e_str,
+                c_str,
+                t1_str,
                 p_str,
-                f"${pnl_usd:+,.2f}",
-                f"{pnl_pct:+.2f}%",
             ])
-        port_rows.append([
-            "TOTAL", "", "", "",
-            f"${total_pnl:+,.2f}",
-            "",
-        ])
         story.append(_table(
-            ["Ticker", "Shares", "Avg Cost", "Current", "P&L $", "P&L %"],
-            port_rows,
-            [0.8 * inch, 0.7 * inch, 1.0 * inch, 1.0 * inch, 1.5 * inch, 1.0 * inch],
-            right_cols=[1, 2, 3, 4, 5],
-            total_row=True,
+            ["Ticker", "Session", "Conv.", "Entry", "EOD Close", "T1", "P&L vs Entry"],
+            out_rows,
+            [0.7*inch, 0.9*inch, 0.7*inch, 0.8*inch, 0.9*inch, 0.8*inch, 0.9*inch],
+            right_cols=[2, 3, 4, 5, 6],
         ))
+        # Reasoning mini-section
+        for o in conviction_outcomes:
+            why = o.get("reasoning", "")
+            if why:
+                story.append(Paragraph(f"<b>{o['ticker']}</b> — {why}", ST["note"]))
     else:
-        story.append(Paragraph("No portfolio holdings recorded.", ST["body"]))
+        story.append(Paragraph(
+            "No conviction buys were signalled today, or conviction engine did not run.",
+            ST["body"],
+        ))
     story.append(_section_rule())
 
     # ── 6. WATCHPOINTS FOR TOMORROW ──────────────────────────────────────────
@@ -849,13 +858,35 @@ def upload_to_filebin(filename: str) -> Optional[str]:
 
 def send_report_notification(filename: str, n_signals: int,
                               n_alerts: int, n_stocks: int) -> None:
+    """
+    Deliver the EOD PDF report via two channels:
+      1. Telegram — sends the actual PDF file as a document (primary).
+      2. Pushover — sends a text notification with filebin.net download link (backup).
+    """
+    date_tag = datetime.now().strftime("%b %d")
+    caption  = (
+        f"<b>Axiom EOD Report — {date_tag}</b>\n"
+        f"Stocks scanned: {n_stocks} | Signals: {n_signals} | Alerts: {n_alerts}"
+    )
+
+    # ── 1. Telegram PDF (primary delivery) ───────────────────────────────────
+    print("  Sending PDF via Telegram...")
+    try:
+        from alerts import send_via_telegram
+        tg_ok = send_via_telegram(caption, pdf_path=filename, caption=caption)
+        if not tg_ok:
+            print("  [eod] Telegram delivery failed — will still send Pushover")
+    except Exception as tg_err:
+        print(f"  [eod] Telegram error: {tg_err}")
+
+    # ── 2. Pushover link (backup / second screen) ─────────────────────────────
     user_key  = os.environ.get("PUSHOVER_USER_KEY", "")
     api_token = os.environ.get("PUSHOVER_API_TOKEN", "")
     if not user_key or not api_token:
-        print("  [eod] No Pushover keys — skipping notification")
+        print("  [eod] No Pushover keys — skipping Pushover notification")
         return
 
-    print("  Uploading PDF to Filebin...")
+    print("  Uploading PDF to Filebin for Pushover link...")
     download_url = upload_to_filebin(filename)
 
     try:
@@ -864,12 +895,11 @@ def send_report_notification(filename: str, n_signals: int,
             data={
                 "token":     api_token,
                 "user":      user_key,
-                "title":     f"Daily report ready — {n_alerts} alerts, {n_signals} signals today",
+                "title":     f"EOD Report — {n_alerts} alerts, {n_signals} signals",
                 "message":   (
-                    f"Stocks scanned: {n_stocks}\n"
-                    f"Signals logged: {n_signals}\n"
-                    f"Alerts fired:   {n_alerts}\n\n"
-                    f"Tap to download the full PDF."
+                    f"Scanned: {n_stocks} stocks\n"
+                    f"Signals: {n_signals} | Alerts: {n_alerts}\n"
+                    f"PDF sent to Telegram. Tap for web download."
                 ),
                 "url":       download_url or "",
                 "url_title": "Download Daily Report PDF",
@@ -878,9 +908,9 @@ def send_report_notification(filename: str, n_signals: int,
             },
             timeout=10,
         )
-        print("  Notification sent")
+        print("  Pushover notification sent")
     except Exception as e:
-        print(f"  [eod] Notification failed: {e}")
+        print(f"  [eod] Pushover notification failed: {e}")
 
 
 # ─── Main entry point ─────────────────────────────────────────────────────────
@@ -906,17 +936,6 @@ def run_eod_report():
     todays_sigs   = _get_todays_signals()
     todays_alerts = _get_todays_alerts()
     send_report_notification(filename, len(todays_sigs), len(todays_alerts), len(watchlist))
-
-    # Save path for dashboard download button
-    try:
-        with open("latest_report.json", "w") as f:
-            json.dump({
-                "path":      filename,
-                "date":      datetime.now().strftime("%Y-%m-%d"),
-                "generated": datetime.now().isoformat(),
-            }, f)
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":
