@@ -170,6 +170,24 @@ def _get_sqlite_conn() -> sqlite3.Connection:
     return conn
 
 
+from contextlib import contextmanager
+
+@contextmanager
+def _pg_conn_ctx():
+    """Context manager that guarantees _put_pg_conn is always called."""
+    conn = _get_pg_conn()
+    try:
+        yield conn
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        _put_pg_conn(conn)
+
+
 # ── ET date/time helpers for timezone-aware queries ──────────────────────────
 def _et_date() -> str:
     """Return today's date in ET — use in all date-range queries."""
@@ -214,7 +232,13 @@ def initialize_db():
 
 
 def _init_postgres():
-    conn = _get_pg_conn()
+    with _pg_conn_ctx() as conn:
+        _init_postgres_with_conn(conn)
+    print("  ✓ PostgreSQL tables initialized")
+    _seed_admin_user_pg()
+
+
+def _init_postgres_with_conn(conn):
     cur  = conn.cursor()
 
     # Serialise concurrent schema migrations with a blocking transaction-level advisory
@@ -659,9 +683,6 @@ def _init_postgres():
 
     conn.commit()
     cur.close()
-    _put_pg_conn(conn)
-    print("  ✓ PostgreSQL tables initialized")
-    _seed_admin_user_pg()
 
 
 def _init_sqlite():
@@ -1287,15 +1308,13 @@ def load_watchlist() -> dict:
 
     if _is_postgres():
         try:
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute(
-                "SELECT tickers, stats FROM watchlist WHERE date = %s ORDER BY id DESC LIMIT 1",
-                (date_str,)
-            )
-            row = cur.fetchone()
-            cur.close()
-            _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT tickers, stats FROM watchlist WHERE date = %s ORDER BY id DESC LIMIT 1",
+                    (date_str,)
+                )
+                row = cur.fetchone(); cur.close()
             if row:
                 return {
                     "date":    date_str,
@@ -1321,15 +1340,13 @@ def save_alert(message: str, ticker: str = "", alert_type: str = ""):
         alert_time = _et_date_time_str()
 
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute(
-                "INSERT INTO alert_log (alert_time, message, ticker, alert_type) VALUES (%s, %s, %s, %s)",
-                (alert_time, message, ticker, alert_type)
-            )
-            conn.commit()
-            cur.close()
-            _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO alert_log (alert_time, message, ticker, alert_type) VALUES (%s, %s, %s, %s)",
+                    (alert_time, message, ticker, alert_type)
+                )
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute(
@@ -1418,44 +1435,42 @@ def save_scanner_state(state_dict: dict):
     date_str = _et_date()
     if _is_postgres():
         try:
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                INSERT INTO scanner_state
-                    (date, alerted_today, known_filings, scan_count, last_updated,
-                     vwap_snapshot, momentum_ranking,
-                     signals_suppressed_today, universe_size, open_positions,
-                     last_conviction_run, last_accuracy_run)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (date) DO UPDATE SET
-                    alerted_today             = EXCLUDED.alerted_today,
-                    known_filings             = EXCLUDED.known_filings,
-                    scan_count                = EXCLUDED.scan_count,
-                    last_updated              = EXCLUDED.last_updated,
-                    vwap_snapshot             = EXCLUDED.vwap_snapshot,
-                    momentum_ranking          = EXCLUDED.momentum_ranking,
-                    signals_suppressed_today  = EXCLUDED.signals_suppressed_today,
-                    universe_size             = EXCLUDED.universe_size,
-                    open_positions            = EXCLUDED.open_positions,
-                    last_conviction_run       = EXCLUDED.last_conviction_run,
-                    last_accuracy_run         = EXCLUDED.last_accuracy_run
-            """, (
-                date_str,
-                json.dumps(list(state_dict.get("alerted_today", []))),
-                json.dumps(list(state_dict.get("known_filings", []))),
-                state_dict.get("scan_count", 0),
-                state_dict.get("last_updated", ""),
-                json.dumps(state_dict.get("vwap_snapshot", {})),
-                json.dumps(state_dict.get("momentum_ranking", [])),
-                state_dict.get("signals_suppressed_today", 0),
-                state_dict.get("universe_size", 0),
-                state_dict.get("open_positions", 0),
-                state_dict.get("last_conviction_run"),
-                state_dict.get("last_accuracy_run"),
-            ))
-            conn.commit()
-            cur.close()
-            _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO scanner_state
+                        (date, alerted_today, known_filings, scan_count, last_updated,
+                         vwap_snapshot, momentum_ranking,
+                         signals_suppressed_today, universe_size, open_positions,
+                         last_conviction_run, last_accuracy_run)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (date) DO UPDATE SET
+                        alerted_today             = EXCLUDED.alerted_today,
+                        known_filings             = EXCLUDED.known_filings,
+                        scan_count                = EXCLUDED.scan_count,
+                        last_updated              = EXCLUDED.last_updated,
+                        vwap_snapshot             = EXCLUDED.vwap_snapshot,
+                        momentum_ranking          = EXCLUDED.momentum_ranking,
+                        signals_suppressed_today  = EXCLUDED.signals_suppressed_today,
+                        universe_size             = EXCLUDED.universe_size,
+                        open_positions            = EXCLUDED.open_positions,
+                        last_conviction_run       = EXCLUDED.last_conviction_run,
+                        last_accuracy_run         = EXCLUDED.last_accuracy_run
+                """, (
+                    date_str,
+                    json.dumps(list(state_dict.get("alerted_today", []))),
+                    json.dumps(list(state_dict.get("known_filings", []))),
+                    state_dict.get("scan_count", 0),
+                    state_dict.get("last_updated", ""),
+                    json.dumps(state_dict.get("vwap_snapshot", {})),
+                    json.dumps(state_dict.get("momentum_ranking", [])),
+                    state_dict.get("signals_suppressed_today", 0),
+                    state_dict.get("universe_size", 0),
+                    state_dict.get("open_positions", 0),
+                    state_dict.get("last_conviction_run"),
+                    state_dict.get("last_accuracy_run"),
+                ))
+                conn.commit(); cur.close()
         except Exception as e:
             print(f"  [db] State save failed: {e}")
     # Also save local JSON as fallback
@@ -1640,25 +1655,25 @@ def log_signal(ticker: str, signal_label: str, score: float,
     breakdown_json = json.dumps(score_breakdown)
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute("""
-                INSERT INTO signal_log
-                    (ticker, signal_label, score, score_breakdown,
-                     price_at_signal, volume_at_signal, alert_type,
-                     quant_adj, source_quality, session_mode, quality_tag,
-                     scoring_path, catalyst_mult,
-                     entry_price, stop_loss, target_1, target_2, risk_reward)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-            """, (ticker, signal_label, _f(score), breakdown_json,
-                  _f(price_at_signal), _f(volume_at_signal), alert_type,
-                  _f(quant_adj) if quant_adj is not None else None,
-                  source_quality, session_mode or "MARKET", quality_tag,
-                  scoring_path, _f(catalyst_mult),
-                  _f(entry_price), _f(stop_loss), _f(target_1), _f(target_2), _f(risk_reward)))
-            sig_id = cur.fetchone()[0]
-            cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (%s)", (sig_id,))
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO signal_log
+                        (ticker, signal_label, score, score_breakdown,
+                         price_at_signal, volume_at_signal, alert_type,
+                         quant_adj, source_quality, session_mode, quality_tag,
+                         scoring_path, catalyst_mult,
+                         entry_price, stop_loss, target_1, target_2, risk_reward)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                """, (ticker, signal_label, _f(score), breakdown_json,
+                      _f(price_at_signal), _f(volume_at_signal), alert_type,
+                      _f(quant_adj) if quant_adj is not None else None,
+                      source_quality, session_mode or "MARKET", quality_tag,
+                      scoring_path, _f(catalyst_mult),
+                      _f(entry_price), _f(stop_loss), _f(target_1), _f(target_2), _f(risk_reward)))
+                sig_id = cur.fetchone()[0]
+                cur.execute("INSERT INTO signal_outcomes (signal_id) VALUES (%s)", (sig_id,))
+                conn.commit(); cur.close()
             return sig_id
         else:
             conn = _get_sqlite_conn()
@@ -1977,23 +1992,22 @@ def _seed_admin_user_pg():
         return
     try:
         from auth import hash_password
-        conn = _get_pg_conn()
-        cur  = conn.cursor()
-        cur.execute("SELECT id FROM users WHERE username = %s", (username,))
-        row = cur.fetchone()
-        if row is None:
-            if not password:
-                cur.close(); _put_pg_conn(conn); return
-            cur.execute("""
-                INSERT INTO users (username, email, password_hash, role)
-                VALUES (%s, %s, %s, 'admin')
-            """, (username, f"{username}@admin.local", hash_password(password)))
-            print(f"  ✓ Admin user '{username}' created")
-        else:
-            cur.execute("UPDATE users SET role = 'admin' WHERE username = %s", (username,))
-            print(f"  ✓ Admin role granted to '{username}'")
-        conn.commit()
-        cur.close(); _put_pg_conn(conn)
+        with _pg_conn_ctx() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM users WHERE username = %s", (username,))
+            row = cur.fetchone()
+            if row is None:
+                if not password:
+                    cur.close(); return
+                cur.execute("""
+                    INSERT INTO users (username, email, password_hash, role)
+                    VALUES (%s, %s, %s, 'admin')
+                """, (username, f"{username}@admin.local", hash_password(password)))
+                print(f"  ✓ Admin user '{username}' created")
+            else:
+                cur.execute("UPDATE users SET role = 'admin' WHERE username = %s", (username,))
+                print(f"  ✓ Admin role granted to '{username}'")
+            conn.commit(); cur.close()
     except Exception as e:
         print(f"  [db] Admin seed failed: {e}")
 
@@ -2251,19 +2265,18 @@ def log_scanner_event(level: str, message: str) -> None:
     level = level.lower().strip()
     try:
         if _is_postgres():
-            conn = _get_pg_conn()
-            cur  = conn.cursor()
-            cur.execute(
-                "INSERT INTO scanner_logs (level, message) VALUES (%s, %s)",
-                (level, message[:500])
-            )
-            # Keep only the newest 500 rows
-            cur.execute("""
-                DELETE FROM scanner_logs WHERE id NOT IN (
-                    SELECT id FROM scanner_logs ORDER BY created_at DESC LIMIT 500
+            with _pg_conn_ctx() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO scanner_logs (level, message) VALUES (%s, %s)",
+                    (level, message[:500])
                 )
-            """)
-            conn.commit(); cur.close(); _put_pg_conn(conn)
+                cur.execute("""
+                    DELETE FROM scanner_logs WHERE id NOT IN (
+                        SELECT id FROM scanner_logs ORDER BY created_at DESC LIMIT 500
+                    )
+                """)
+                conn.commit(); cur.close()
         else:
             conn = _get_sqlite_conn()
             conn.execute(
