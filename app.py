@@ -2497,7 +2497,159 @@ def _tab_scanner():
                     st.markdown(f'<span style="font-family:\'JetBrains Mono\',monospace;color:#cbd5e1;font-size:0.75em;">{r["ticker"]} — {r.get("filter_reason","")}</span>', unsafe_allow_html=True)
 
 
+def _portfolio_photo_importer():
+    """
+    Image upload → Claude Vision → editable preview → upsert to portfolio.
+    Uses the ANTHROPIC_API_KEY already in .env (same key as the scanner uses).
+    """
+    import base64
+
+    st.caption(
+        "Take a screenshot or photo of your brokerage positions page and upload it. "
+        "Claude will extract tickers, share counts, and cost basis automatically."
+    )
+
+    img_file = st.file_uploader(
+        "upload_brokerage_screenshot",
+        type=["jpg", "jpeg", "png"],
+        key="portfolio_photo_upload",
+        label_visibility="collapsed",
+    )
+
+    if img_file is None:
+        return
+
+    ext        = img_file.name.rsplit(".", 1)[-1].lower()
+    media_type = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
+    img_bytes  = img_file.read()
+    b64        = base64.standard_b64encode(img_bytes).decode()
+
+    # Cache parse result for this exact file so we don't re-call on every rerun
+    parse_key = f"photo_parse_{img_file.name}_{len(img_bytes)}"
+
+    if parse_key not in st.session_state:
+        with st.spinner("Claude is reading your positions…"):
+            try:
+                import anthropic
+                api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+                if not api_key:
+                    st.error("ANTHROPIC_API_KEY not set — add it to the server .env file.")
+                    return
+
+                client = anthropic.Anthropic(api_key=api_key)
+                msg = client.messages.create(
+                    model="claude-sonnet-4-5-20251001",
+                    max_tokens=1024,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    "This is a screenshot of a brokerage portfolio or positions page. "
+                                    "Extract every stock position and return ONLY a valid JSON array "
+                                    "(no markdown, no code fences, no explanation). "
+                                    "Each element must have exactly these keys:\n"
+                                    "  ticker   (string — the stock symbol, e.g. \"AAPL\")\n"
+                                    "  shares   (number — quantity held, e.g. 100 or 12.5)\n"
+                                    "  avg_cost (number — average cost per share in USD, e.g. 182.34)\n\n"
+                                    "Rules:\n"
+                                    "- If cost basis is not shown, set avg_cost to 0.\n"
+                                    "- Preserve fractional shares exactly.\n"
+                                    "- Skip cash, money market, or non-equity rows.\n"
+                                    "- Output ONLY the JSON array, nothing else."
+                                ),
+                            },
+                        ],
+                    }],
+                )
+                raw = msg.content[0].text.strip()
+                # Strip markdown code fences if the model adds them anyway
+                if raw.startswith("```"):
+                    parts = raw.split("```")
+                    raw = parts[1] if len(parts) > 1 else parts[0]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                    raw = raw.strip()
+                parsed = json.loads(raw)
+                st.session_state[parse_key] = parsed
+            except json.JSONDecodeError as exc:
+                st.error(f"Could not parse Claude's response as JSON: {exc}")
+                return
+            except Exception as exc:
+                st.error(f"Vision API error: {exc}")
+                return
+
+    rows = st.session_state.get(parse_key, [])
+    if not rows:
+        st.warning("No positions detected in the image. Try a clearer screenshot.")
+        return
+
+    st.success(f"Detected **{len(rows)}** position(s) — review and confirm below.")
+
+    edit_df = pd.DataFrame([
+        {
+            "Import":      True,
+            "Ticker":      str(r.get("ticker", "")).upper().strip(),
+            "Shares":      float(r.get("shares", 0)),
+            "Avg Cost ($)": float(r.get("avg_cost", 0)),
+        }
+        for r in rows
+    ])
+
+    edited = st.data_editor(
+        edit_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "Import":       st.column_config.CheckboxColumn("Import", width=60, default=True),
+            "Ticker":       st.column_config.TextColumn("Ticker", width=80),
+            "Shares":       st.column_config.NumberColumn("Shares", format="%.4f", width=110),
+            "Avg Cost ($)": st.column_config.NumberColumn("Avg Cost ($)", format="$%.4f", width=130),
+        },
+        key="portfolio_photo_editor",
+    )
+
+    if st.button("✅ Import to Portfolio", type="primary", key="portfolio_photo_confirm"):
+        to_import = edited[edited["Import"] == True]
+        if to_import.empty:
+            st.warning("No rows checked — tick the Import checkbox for the positions you want.")
+            return
+        count = 0
+        for _, row in to_import.iterrows():
+            ticker = str(row["Ticker"]).upper().strip()
+            if not ticker:
+                continue
+            upsert_holding(
+                ticker,
+                float(row["Shares"]),
+                float(row["Avg Cost ($)"]),
+                notes="imported from photo",
+                user_id=_current_user["id"],
+            )
+            count += 1
+        st.success(f"Imported {count} position(s) into your portfolio!")
+        # Clear cached parse so the next upload starts fresh
+        if parse_key in st.session_state:
+            del st.session_state[parse_key]
+        st.cache_data.clear()
+        st.rerun()
+
+
 def _tab_portfolio():
+    # ── Photo import ──────────────────────────────────────────────────────────
+    with st.expander("📷 Import Positions from Photo", expanded=False):
+        _portfolio_photo_importer()
+
     portfolio_df = get_portfolio(_current_user["id"])
 
     if portfolio_df.empty:
@@ -2505,7 +2657,7 @@ def _tab_portfolio():
         <div class="empty">
           <div class="ico">--</div>
           <h3>NO HOLDINGS SAVED</h3>
-          <p>Enter positions in the sidebar: TICKER, SHARES, AVG_COST</p>
+          <p>Use <b>📷 Import Positions from Photo</b> above, or enter positions in the sidebar.</p>
         </div>""", unsafe_allow_html=True)
     else:
         scan_map = {r["ticker"]:r for r in st.session_state.get("scan_results",[])
