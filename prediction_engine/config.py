@@ -8,8 +8,8 @@ import os
 DATABASE_URL      = os.environ.get("DATABASE_URL", "")
 FINNHUB_API_KEY   = os.environ.get("FINNHUB_API_KEY", "")
 TIINGO_API_KEY    = os.environ.get("TIINGO_API_KEY", "")
-PUSHOVER_USER     = os.environ.get("PUSHOVER_USER_KEY", "")
-PUSHOVER_TOKEN    = os.environ.get("PUSHOVER_API_TOKEN", "")
+PUSHOVER_USER     = os.environ.get("PE_PUSHOVER_USER_KEY",  os.environ.get("PUSHOVER_USER_KEY",  ""))
+PUSHOVER_TOKEN    = os.environ.get("PE_PUSHOVER_API_TOKEN", os.environ.get("PUSHOVER_API_TOKEN", ""))
 
 # ─── Ollama ───────────────────────────────────────────────────────────────────
 # Running on t3.xlarge (4 vCPU, 16GB RAM, NO GPU).
