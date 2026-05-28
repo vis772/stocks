@@ -160,7 +160,9 @@ def _score_batch(batch: list, batch_idx: int, total: int,
                     "model":   MODEL_QWEN,
                     "system":  _SYSTEM_QWEN_SWEEP,
                     "prompt":  prompt,
-                    "format":  "json",
+                    # No "format": "json" — that makes the model return a single
+                    # object instead of the array the prompt requests.
+                    # _parse_response handles extracting [...] from free text.
                     "stream":  False,
                     "options": options,
                 },
