@@ -224,7 +224,7 @@ def run(candidates: list) -> dict:
 
         model_elapsed = time.monotonic() - model_start
         scored_count  = sum(
-            1 for t in results.values()
+            1 for t in results.keys()
             if results[t].get(model_name, {}).get("score") is not None
         )
         logger.info(
