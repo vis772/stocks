@@ -97,11 +97,11 @@ def main():
         misfire_grace_time=300,  # Allow 5-minute late start
     )
 
-    # Log next fire time
+    # Log next fire time (next_run_time is None until scheduler.start() in some APScheduler versions)
     jobs = scheduler.get_jobs()
     for job in jobs:
-        logger.info("[scheduler] Scheduled: '%s' — next run: %s",
-                    job.name, job.next_run_time)
+        next_run = getattr(job, "next_run_time", None) or "pending (starts after scheduler.start())"
+        logger.info("[scheduler] Scheduled: '%s' — next run: %s", job.name, next_run)
 
     logger.info("[scheduler] Waiting for next 3:55 AM ET window (Mon-Fri)...")
 
