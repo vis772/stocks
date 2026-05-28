@@ -151,8 +151,8 @@ def _score_batch(batch: list, batch_idx: int, total: int,
     for attempt in range(retries + 1):
         try:
             options = dict(MODEL_OPTIONS.get(MODEL_QWEN, {}))
-            # Batch needs more output tokens proportional to batch size
-            options["num_predict"] = max(200, SWEEP_BATCH_SIZE * 35)
+            # Each ticker entry ≈ 60 tokens in JSON. Add 50% headroom.
+            options["num_predict"] = max(400, SWEEP_BATCH_SIZE * 60)
 
             resp = requests.post(
                 f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate",
@@ -241,6 +241,22 @@ def _parse_response(raw: str, batch: list) -> Optional[dict]:
                 parsed_list = json.loads(text[start:end + 1])
             except json.JSONDecodeError:
                 pass
+
+    # Last resort: truncated array recovery — extract all complete {...} objects
+    if not parsed_list:
+        import re
+        objects = re.findall(r'\{[^{}]+\}', text)
+        if objects:
+            recovered = []
+            for obj_str in objects:
+                try:
+                    recovered.append(json.loads(obj_str))
+                except json.JSONDecodeError:
+                    pass
+            if recovered:
+                logger.warning("[stage2] _parse_response: recovered %d partial objects from truncated array",
+                               len(recovered))
+                parsed_list = recovered
 
     if not parsed_list:
         logger.debug("[stage2] _parse_response: no list found in: %.200s", text[:200])
