@@ -106,8 +106,14 @@ def main():
     logger.info("[scheduler] Waiting for next 3:55 AM ET window (Mon-Fri)...")
 
     # Optional: run immediately if --now flag passed (for testing)
+    # Add --skip-waits to also bypass internal ET timing gates
     if "--now" in sys.argv:
-        logger.info("[scheduler] --now flag detected — running pipeline immediately")
+        if "--skip-waits" in sys.argv:
+            logger.info("[scheduler] --now --skip-waits: running all stages immediately (no timing gates)")
+            import prediction_engine.main as _pe_main
+            _pe_main._SKIP_WAITS = True
+        else:
+            logger.info("[scheduler] --now: running pipeline immediately (ET timing gates still apply)")
         _run_pipeline_job()
         return
 

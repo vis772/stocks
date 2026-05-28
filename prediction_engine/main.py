@@ -44,8 +44,16 @@ def _et_now() -> datetime:
     return utc + timedelta(hours=offset)
 
 
+# Set to True by --skip-waits flag (testing only — runs all stages immediately)
+_SKIP_WAITS = False
+
+
 def _wait_until_et(hour: int, minute: int, label: str):
-    """Sleep until a specific ET time. Logs remaining time periodically."""
+    """Sleep until a specific ET time. Skipped entirely when _SKIP_WAITS is True."""
+    if _SKIP_WAITS:
+        logger.info("[main] [SKIP-WAITS] Bypassing wait for %s (%02d:%02d ET)",
+                    label, hour, minute)
+        return
     now = _et_now()
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if now >= target:
@@ -53,7 +61,6 @@ def _wait_until_et(hour: int, minute: int, label: str):
     delta = (target - now).total_seconds()
     logger.info("[main] Waiting %.0f minutes until %s (%02d:%02d ET)",
                 delta / 60, label, hour, minute)
-    # Sleep in 60-second chunks so we can log progress
     while True:
         remaining = (target - _et_now()).total_seconds()
         if remaining <= 0:
