@@ -294,7 +294,6 @@ class ScannerState:
 
     def mark_alerted(self, key: str):
         self.alerted_today.add(key)
-        self.save()
 
     def log_alert(self, msg: str):
         try:

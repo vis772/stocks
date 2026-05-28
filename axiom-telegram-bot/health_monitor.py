@@ -1,6 +1,10 @@
 # axiom-telegram-bot/health_monitor.py
 # Background thread that watches axiom-scanner and sends Pushover alerts
 # when it crashes or recovers. Transitions only — no spam.
+#
+# State is persisted to STATE_FILE (on the host-mounted /project volume) so
+# that bot container restarts during deploys don't lose the "was_running=False"
+# flag — ensuring the "recovered" alert always fires after a deploy or crash.
 
 import os
 import time
@@ -11,9 +15,31 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-MONITOR_INTERVAL = 60          # seconds between checks
+MONITOR_INTERVAL = 60          # seconds between checks  (v2)
 WATCHED_CONTAINER = "axiom-scanner"
 PUSHOVER_API = "https://api.pushover.net/1/messages.json"
+
+# Persisted on the host-mounted volume so state survives bot container restarts.
+STATE_FILE = os.path.join(os.environ.get("PROJECT_DIR", "/project"), ".health_monitor_state")
+
+
+def _load_state() -> bool:
+    """Return last-persisted was_running value. Defaults to False so first deploy always fires recovered."""
+    try:
+        with open(STATE_FILE) as f:
+            return f.read().strip() == "running"
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def _save_state(running: bool) -> None:
+    try:
+        with open(STATE_FILE, "w") as f:
+            f.write("running" if running else "down")
+    except Exception as e:
+        logger.warning(f"[health_monitor] could not save state: {e}")
 
 
 def _pushover(title: str, message: str, priority: int = 0) -> None:
@@ -50,8 +76,11 @@ def _is_container_running(name: str) -> bool:
 
 
 def _monitor_loop() -> None:
-    was_running = True   # assume healthy at start so we don't false-alarm on boot
-    logger.info(f"[health_monitor] Watching {WATCHED_CONTAINER} every {MONITOR_INTERVAL}s")
+    # Load persisted state so bot restarts (e.g. during deploys) don't drop the
+    # was_running=False flag and swallow the "recovered" notification.
+    was_running = _load_state()
+    logger.info(f"[health_monitor] Watching {WATCHED_CONTAINER} every {MONITOR_INTERVAL}s "
+                f"(last known state: {'running' if was_running else 'DOWN'})")
 
     while True:
         try:
@@ -61,7 +90,7 @@ def _monitor_loop() -> None:
                 # Transition: was up, now down
                 logger.error(f"[health_monitor] {WATCHED_CONTAINER} is DOWN — alerting")
                 _pushover(
-                    title=f"🔴 Axiom Scanner DOWN",
+                    title="🔴 Axiom Scanner DOWN",
                     message=(
                         f"{WATCHED_CONTAINER} is no longer running.\n"
                         f"Check logs: /logs scanner\n"
@@ -69,14 +98,17 @@ def _monitor_loop() -> None:
                     ),
                     priority=1,
                 )
+                _save_state(False)
+
             elif not was_running and running:
                 # Transition: was down, now recovered
                 logger.info(f"[health_monitor] {WATCHED_CONTAINER} recovered — alerting")
                 _pushover(
-                    title=f"🟢 Axiom Scanner Recovered",
+                    title="🟢 Axiom Scanner Recovered",
                     message=f"{WATCHED_CONTAINER} is running again.",
                     priority=0,
                 )
+                _save_state(True)
 
             was_running = running
 
