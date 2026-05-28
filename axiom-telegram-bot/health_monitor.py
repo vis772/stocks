@@ -24,14 +24,14 @@ STATE_FILE = os.path.join(os.environ.get("PROJECT_DIR", "/project"), ".health_mo
 
 
 def _load_state() -> bool:
-    """Return last-persisted was_running value. Defaults to True (no false alarm on first boot)."""
+    """Return last-persisted was_running value. Defaults to False so first deploy always fires recovered."""
     try:
         with open(STATE_FILE) as f:
             return f.read().strip() == "running"
     except FileNotFoundError:
-        return True
+        return False
     except Exception:
-        return True
+        return False
 
 
 def _save_state(running: bool) -> None:
