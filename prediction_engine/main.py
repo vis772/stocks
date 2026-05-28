@@ -91,12 +91,17 @@ def run_pipeline():
 
     upsert_run_status(date_str, "STARTING", "running")
 
-    # ── RAM baseline (t3.xlarge, CPU mode — no GPU) ───────────────────────────
+    # ── Baseline resource snapshot (g4dn.xlarge — T4 GPU) ────────────────────
     ram_info = get_ram_info()
     if ram_info:
         logger.info("[main] RAM: %dMB used / %dMB total (%.0f%% used)",
                     ram_info.get("used_mb", 0), ram_info.get("total_mb", 0),
                     ram_info.get("pct", 0))
+    gpu_info = get_gpu_memory_info()
+    if gpu_info:
+        logger.info("[main] VRAM: %dMB used / %dMB total (%.0f%% used)",
+                    gpu_info.get("used_mb", 0), gpu_info.get("total_mb", 0),
+                    gpu_info.get("pct", 0))
 
     # ─────────────────────────────────────────────────────────────────────────
     # 3:55 AM — Load models into VRAM
@@ -113,13 +118,13 @@ def run_pipeline():
     if not models_ok:
         logger.warning("[main] Some models failed to load — pipeline may be degraded")
 
-    ram_info = get_ram_info()
-    if ram_info:
-        logger.info("[main] RAM after model load: %dMB used / %dMB free (%.0f%%)",
-                    ram_info.get("used_mb", 0), ram_info.get("free_mb", 0),
-                    ram_info.get("pct", 0))
-        if ram_info.get("pct", 0) > 85:
-            logger.warning("[main] RAM usage above 85%% — consider reducing model count")
+    gpu_info = get_gpu_memory_info()
+    if gpu_info:
+        logger.info("[main] VRAM after model load: %dMB used / %dMB free (%.0f%%)",
+                    gpu_info.get("used_mb", 0), gpu_info.get("free_mb", 0),
+                    gpu_info.get("pct", 0))
+        if gpu_info.get("pct", 0) > 90:
+            logger.warning("[main] VRAM usage above 90%% — models may not all fit")
 
     # ─────────────────────────────────────────────────────────────────────────
     # 4:00 AM — Stage 1: Fetch universe + basic filters
@@ -295,17 +300,17 @@ def run_pipeline():
 
 
 def _cleanup_and_exit():
-    """Unload all models and return RAM + CPU to the Axiom scanner."""
+    """Unload all models and return VRAM + GPU to the Axiom scanner."""
     try:
         unload_models()
     except Exception as e:
         logger.warning("[main] Model unload error: %s", e)
 
-    ram_info = get_ram_info()
-    if ram_info:
-        logger.info("[main] RAM after unload: %dMB used / %dMB free (%.0f%%)",
-                    ram_info.get("used_mb", 0), ram_info.get("free_mb", 0),
-                    ram_info.get("pct", 0))
+    gpu_info = get_gpu_memory_info()
+    if gpu_info:
+        logger.info("[main] VRAM after unload: %dMB used / %dMB free (%.0f%%)",
+                    gpu_info.get("used_mb", 0), gpu_info.get("free_mb", 0),
+                    gpu_info.get("pct", 0))
 
 
 def _import_base_url() -> str:

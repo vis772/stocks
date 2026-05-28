@@ -12,11 +12,11 @@ PUSHOVER_USER     = os.environ.get("PE_PUSHOVER_USER_KEY",  os.environ.get("PUSH
 PUSHOVER_TOKEN    = os.environ.get("PE_PUSHOVER_API_TOKEN", os.environ.get("PUSHOVER_API_TOKEN", ""))
 
 # ─── Ollama ───────────────────────────────────────────────────────────────────
-# Running on t3.xlarge (4 vCPU, 16GB RAM, NO GPU).
-# Ollama runs CPU-only — inference is ~12-30s per call for 1.5B models.
-# All timeouts and batch sizes are tuned for CPU throughput.
+# Running on g4dn.xlarge (4 vCPU, 16GB RAM, NVIDIA T4 16GB VRAM).
+# Ollama uses GPU — inference is ~2-5s per call for 1.5B models (~6-10x faster than CPU).
+# All 4 models fit in T4 VRAM simultaneously (~10-12GB total).
 OLLAMA_BASE_URL   = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_TIMEOUT    = int(os.environ.get("OLLAMA_TIMEOUT", "300"))   # 5 min — CPU inference is slow
+OLLAMA_TIMEOUT    = int(os.environ.get("OLLAMA_TIMEOUT", "60"))    # 60s — GPU inference is fast
 
 # SLM names — must match what's installed via `ollama pull`
 MODEL_QWEN        = "qwen2.5:1.5b"    # Speed sweep + momentum confirmation
@@ -25,13 +25,13 @@ MODEL_GEMMA       = "gemma3:1b"        # Pattern recognition + price action
 MODEL_SMOL        = "smollm2:1.7b"    # Sentiment + news catalyst scoring
 ALL_MODELS        = [MODEL_QWEN, MODEL_PHI, MODEL_GEMMA, MODEL_SMOL]
 
-# CPU-tuned inference options: smaller context = faster throughput.
-# num_threads tells Ollama to use all 4 vCPUs.
+# GPU-tuned inference options: larger context now affordable with T4 VRAM.
+# No num_thread needed — GPU handles parallelism internally.
 MODEL_OPTIONS = {
-    MODEL_QWEN:  {"temperature": 0.05, "num_ctx": 512,  "num_predict": 200, "num_thread": 4},
-    MODEL_PHI:   {"temperature": 0.05, "num_ctx": 1024, "num_predict": 300, "num_thread": 4},
-    MODEL_GEMMA: {"temperature": 0.05, "num_ctx": 512,  "num_predict": 200, "num_thread": 4},
-    MODEL_SMOL:  {"temperature": 0.05, "num_ctx": 512,  "num_predict": 200, "num_thread": 4},
+    MODEL_QWEN:  {"temperature": 0.05, "num_ctx": 2048, "num_predict": 200},
+    MODEL_PHI:   {"temperature": 0.05, "num_ctx": 4096, "num_predict": 300},
+    MODEL_GEMMA: {"temperature": 0.05, "num_ctx": 2048, "num_predict": 200},
+    MODEL_SMOL:  {"temperature": 0.05, "num_ctx": 2048, "num_predict": 200},
 }
 
 # ─── Stage 1: Universe Fetch & Basic Filters ──────────────────────────────────
@@ -47,19 +47,18 @@ FETCH_MAX_WORKERS       = 20             # ThreadPoolExecutor workers for Stage 
 STAGE1_MAX_CANDIDATES   = 500
 
 # ─── Stage 2: Qwen Sweep ─────────────────────────────────────────────────────
-# CPU timing math (t3.xlarge): Qwen 1.5B ~15s/call.
-# Batching 8 tickers per call → 500/8 = 63 calls × 15s = ~16 minutes. Fits in 1-hour window.
+# GPU timing math (g4dn.xlarge T4): Qwen 1.5B ~3s/call.
+# Batching 8 tickers per call → 500/8 = 63 calls × 3s = ~3 minutes. Well within 1-hour window.
 SWEEP_TOP_N             = 50             # Qwen reduces 500 → 50
 SWEEP_MIN_SCORE         = 40             # Qwen must score ≥ 40 to advance
-SWEEP_BATCH_SIZE        = 8             # Tickers per batched prompt (CPU efficiency)
+SWEEP_BATCH_SIZE        = 8              # Tickers per batched prompt
 
 # ─── Stage 3: Deep Dive ──────────────────────────────────────────────────────
-# CPU mode: run models SEQUENTIALLY, not in parallel.
-# Ollama CPU is single-threaded — parallel threads just queue behind each other.
-# Sequential per-model keeps each SLM hot in RAM for its full 50-stock batch.
-# Timing: 4 models × 50 stocks × 25s avg = ~83 minutes. Fits in 6AM-8AM window.
-DEEPDIVE_MAX_WORKERS    = 1              # Sequential on CPU (parallel = no benefit)
-DEEPDIVE_RETRIES        = 2             # Retry failed Ollama calls
+# GPU mode: Ollama serializes GPU calls, so sequential per-model is still optimal.
+# All 4 models loaded in T4 VRAM simultaneously — no swap overhead.
+# Timing: 4 models × 50 stocks × 4s avg = ~13 minutes. Well within 6AM-8AM window.
+DEEPDIVE_MAX_WORKERS    = 1              # Ollama serializes GPU — sequential is optimal
+DEEPDIVE_RETRIES        = 2              # Retry failed Ollama calls
 
 # ─── Stage 4: Consensus Voting ───────────────────────────────────────────────
 MIN_MODEL_AGREEMENT     = 3             # Minimum models that must agree (≥ score threshold)

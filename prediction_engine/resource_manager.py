@@ -1,10 +1,11 @@
 # prediction_engine/resource_manager.py
-# Ollama model lifecycle management and CPU contention monitoring.
-# Running on t3.xlarge — CPU-only inference (no GPU).
-# Pre-warms models into RAM at 3:55 AM ET; unloads at 10:00 AM ET.
+# Ollama model lifecycle management and resource monitoring.
+# Running on g4dn.xlarge — GPU inference (NVIDIA T4 16GB VRAM).
+# Pre-warms models into VRAM at 3:55 AM ET; unloads at 10:00 AM ET.
 
 import time
 import logging
+import subprocess
 import requests
 import psutil
 from typing import Optional
@@ -25,18 +26,18 @@ def _ollama_url(path: str) -> str:
 
 def load_models() -> bool:
     """
-    Warm all 4 models into RAM (CPU mode) by sending a trivial generation request.
-    On t3.xlarge with 16GB RAM, all four models (total ~10-12GB) fit simultaneously.
+    Warm all 4 models into VRAM (GPU mode) by sending a trivial generation request.
+    On g4dn.xlarge with T4 16GB VRAM, all four models (total ~10-12GB) fit simultaneously.
     Pre-loading avoids cold-start latency during the timed pipeline stages.
     Returns True if all models loaded successfully.
     """
-    logger.info("[resource] CPU mode — loading %d models into RAM (~10-12GB total)...",
+    logger.info("[resource] GPU mode — loading %d models into VRAM (~10-12GB total)...",
                 len(ALL_MODELS))
     success = True
     for model in ALL_MODELS:
         ok = _warm_model(model)
         if ok:
-            logger.info("  [resource] %s loaded", model)
+            logger.info("  [resource] %s loaded into VRAM", model)
         else:
             logger.error("  [resource] FAILED to load %s", model)
             success = False
@@ -45,14 +46,14 @@ def load_models() -> bool:
 
 def unload_models():
     """
-    Unload all models from RAM by setting keep_alive=0.
-    Called at 10:00 AM ET to return RAM and CPU to the Axiom scanner.
-    Without this, Ollama holds models in memory indefinitely.
+    Unload all models from VRAM by setting keep_alive=0.
+    Called at 10:00 AM ET to return VRAM and GPU to the Axiom scanner.
+    Without this, Ollama holds models in VRAM indefinitely.
     """
-    logger.info("[resource] Unloading models from RAM (returning resources to Axiom scanner)...")
+    logger.info("[resource] Unloading models from VRAM (returning GPU to Axiom scanner)...")
     for model in ALL_MODELS:
         _unload_model(model)
-    logger.info("[resource] All models unloaded")
+    logger.info("[resource] All models unloaded from VRAM")
 
 
 def _warm_model(model: str, retries: int = 3) -> bool:
@@ -156,10 +157,7 @@ def wait_for_cpu_headroom(threshold: float = CPU_YIELD_THRESHOLD,
 
 
 def get_ram_info() -> dict:
-    """
-    Return system RAM stats (replaces GPU memory info for t3.xlarge CPU-only mode).
-    Used for logging; non-fatal if psutil unavailable.
-    """
+    """Return system RAM stats. Used for baseline logging."""
     try:
         mem = psutil.virtual_memory()
         return {
@@ -174,7 +172,31 @@ def get_ram_info() -> dict:
 
 def get_gpu_memory_info() -> dict:
     """
-    No GPU on t3.xlarge. Returns empty dict.
-    Kept for API compatibility — callers handle empty dict gracefully.
+    Return NVIDIA T4 VRAM stats via nvidia-smi.
+    Used to monitor VRAM usage during model load/unload.
+    Returns empty dict if nvidia-smi is unavailable.
     """
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used,memory.free,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            parts = [p.strip() for p in result.stdout.strip().split(",")]
+            if len(parts) >= 3:
+                used  = int(parts[0])
+                free  = int(parts[1])
+                total = int(parts[2])
+                return {
+                    "used_mb":  used,
+                    "free_mb":  free,
+                    "total_mb": total,
+                    "pct":      round(used / total * 100, 1) if total > 0 else 0,
+                }
+    except Exception:
+        pass
     return {}
