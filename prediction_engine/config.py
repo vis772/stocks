@@ -16,7 +16,7 @@ PUSHOVER_TOKEN    = os.environ.get("PE_PUSHOVER_API_TOKEN", os.environ.get("PUSH
 # Ollama uses GPU — inference is ~2-5s per call for 1.5B models (~6-10x faster than CPU).
 # All 4 models fit in T4 VRAM simultaneously (~10-12GB total).
 OLLAMA_BASE_URL   = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_TIMEOUT    = int(os.environ.get("OLLAMA_TIMEOUT", "60"))    # 60s — GPU inference is fast
+OLLAMA_TIMEOUT    = int(os.environ.get("OLLAMA_TIMEOUT", "120"))   # 120s — GPU fast but batch calls need headroom
 
 # SLM names — must match what's installed via `ollama pull`
 MODEL_QWEN        = "qwen2.5:1.5b"    # Speed sweep + momentum confirmation

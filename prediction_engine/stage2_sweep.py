@@ -187,6 +187,12 @@ def _score_batch(batch: list, batch_idx: int, total: int,
             time.sleep(3 * (attempt + 1))
 
     logger.error("[stage2] Batch %d/%d: all %d attempts failed", batch_idx, total, retries + 1)
+    # Log the last raw response to help diagnose parse failures
+    try:
+        logger.debug("[stage2] Last raw response for batch %d: %.300s", batch_idx,
+                     resp.json().get("response", "")[:300] if 'resp' in dir() else "no_response")
+    except Exception:
+        pass
     return None
 
 
@@ -203,21 +209,24 @@ def _parse_response(raw: str, batch: list) -> Optional[dict]:
         lines = text.split("\n")
         text  = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
 
-    # The model may return a JSON object with a key wrapping the array
-    # Try direct array parse first, then wrapped
+    # The model may return a JSON object with a key wrapping the array.
+    # Try direct array parse first, then ANY dict value that is a list.
     parsed_list = None
     try:
         obj = json.loads(text)
         if isinstance(obj, list):
             parsed_list = obj
         elif isinstance(obj, dict):
-            # Try common wrapper keys
-            for key in ("stocks", "results", "scores", "data"):
-                if isinstance(obj.get(key), list):
-                    parsed_list = obj[key]
+            # Try any value that is a non-empty list (model may use any key name)
+            for val in obj.values():
+                if isinstance(val, list) and val:
+                    parsed_list = val
                     break
     except json.JSONDecodeError:
-        # Try to extract [...] block
+        pass
+
+    # Fallback: extract the first [...] block from the raw text
+    if not parsed_list:
         start = text.find("[")
         end   = text.rfind("]")
         if start != -1 and end > start:
@@ -227,6 +236,7 @@ def _parse_response(raw: str, batch: list) -> Optional[dict]:
                 pass
 
     if not parsed_list:
+        logger.debug("[stage2] _parse_response: no list found in: %.200s", text[:200])
         return None
 
     result = {}
