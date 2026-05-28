@@ -99,18 +99,30 @@ def _batch_fetch_snapshots(tickers: list) -> dict:
     def fetch_chunk(chunk: list) -> dict:
         result = {}
         try:
+            # yfinance 0.2.x: do NOT use group_by="ticker" or threads=True (both deprecated).
+            # Default multi-ticker format is MultiIndex columns (Price, Ticker),
+            # so data["Close"][ticker] works correctly for multi-ticker downloads.
             data = yf.download(
                 chunk, period="5d", auto_adjust=True,
-                progress=False, threads=True, group_by="ticker",
+                progress=False,
             )
+            if data.empty:
+                return result
+
             for ticker in chunk:
                 try:
                     if len(chunk) == 1:
+                        # Single ticker: flat columns — data["Close"] is a Series
                         close_series = data["Close"]
                         vol_series   = data["Volume"]
                     else:
-                        close_series = data["Close"][ticker]
-                        vol_series   = data["Volume"][ticker]
+                        # Multi-ticker: MultiIndex (Price, Ticker) — data["Close"][ticker] is a Series
+                        close_col = data["Close"]
+                        vol_col   = data["Volume"]
+                        if ticker not in close_col.columns:
+                            continue
+                        close_series = close_col[ticker]
+                        vol_series   = vol_col[ticker]
 
                     close_series = close_series.dropna()
                     vol_series   = vol_series.dropna()
@@ -130,10 +142,10 @@ def _batch_fetch_snapshots(tickers: list) -> dict:
                         "volume":     vol_today,
                         "avg_volume": avg_vol,
                     }
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("[stage1] Ticker %s parse error: %s", ticker, e)
         except Exception as e:
-            logger.debug("[stage1] Chunk fetch error: %s", e)
+            logger.warning("[stage1] Chunk fetch error: %s", e)
         return result
 
     with ThreadPoolExecutor(max_workers=FETCH_MAX_WORKERS) as pool:
