@@ -167,17 +167,28 @@ def _score_batch(batch: list, batch_idx: int, total: int,
                 timeout=OLLAMA_TIMEOUT,
             )
             resp.raise_for_status()
-            raw = resp.json().get("response", "")
+            resp_json = resp.json()
+
+            # Check for Ollama error in response body
+            if "error" in resp_json:
+                logger.warning("[stage2] Batch %d/%d attempt %d: Ollama error: %s",
+                               batch_idx, total, attempt + 1, resp_json["error"])
+                if attempt < retries:
+                    time.sleep(3 * (attempt + 1))
+                continue
+
+            raw = resp_json.get("response", "")
 
             parsed = _parse_response(raw, batch)
             if parsed:
                 return parsed
 
-            logger.debug("[stage2] Batch %d/%d attempt %d: parse failed, retrying",
-                         batch_idx, total, attempt + 1)
+            # Log what the model actually returned so we can diagnose parse failures
+            logger.warning("[stage2] Batch %d/%d attempt %d: parse failed. Raw (first 300): %s",
+                           batch_idx, total, attempt + 1, raw[:300])
 
         except requests.RequestException as e:
-            logger.warning("[stage2] Batch %d/%d attempt %d: %s",
+            logger.warning("[stage2] Batch %d/%d attempt %d: request error: %s",
                            batch_idx, total, attempt + 1, e)
         except Exception as e:
             logger.warning("[stage2] Batch %d/%d attempt %d: unexpected error: %s",
@@ -187,12 +198,6 @@ def _score_batch(batch: list, batch_idx: int, total: int,
             time.sleep(3 * (attempt + 1))
 
     logger.error("[stage2] Batch %d/%d: all %d attempts failed", batch_idx, total, retries + 1)
-    # Log the last raw response to help diagnose parse failures
-    try:
-        logger.debug("[stage2] Last raw response for batch %d: %.300s", batch_idx,
-                     resp.json().get("response", "")[:300] if 'resp' in dir() else "no_response")
-    except Exception:
-        pass
     return None
 
 
