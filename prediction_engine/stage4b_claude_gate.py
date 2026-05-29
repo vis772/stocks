@@ -98,12 +98,13 @@ def run(candidates: list) -> list:
             messages   = [{"role": "user", "content": prompt}],
         )
         raw = response.content[0].text if response.content else ""
-        logger.debug("[stage4b] Raw response: %s", raw[:400])
+        logger.info("[stage4b] Claude raw response: %s", raw[:600])
 
         verdicts = _parse_verdicts(raw)
 
         if not verdicts:
             logger.warning("[stage4b] Could not parse Claude response — passing all candidates through")
+            logger.warning("[stage4b] Full raw response: %s", raw)
             return candidates
 
         # Log and filter
@@ -181,21 +182,37 @@ def _format_candidates(candidates: list) -> str:
 
 
 def _parse_verdicts(raw: str) -> dict:
-    """Parse Claude's JSON array response into {ticker: {verdict, reason}}."""
+    """
+    Parse Claude's response into {ticker: {verdict, reason}}.
+    Handles: plain JSON array, markdown-fenced array, object wrapping an array,
+    and free text with an embedded JSON array.
+    """
     text = raw.strip()
 
-    # Strip markdown fences
+    # Strip markdown fences (```json ... ``` or ``` ... ```)
     if text.startswith("```"):
         lines = text.split("\n")
-        text  = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        inner = lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:]
+        text  = "\n".join(inner).strip()
 
-    # Try to extract JSON array
     parsed = None
+
+    # 1. Try direct parse
     try:
         obj = json.loads(text)
         if isinstance(obj, list):
             parsed = obj
+        elif isinstance(obj, dict):
+            # Might be {"verdicts": [...]} or {"results": [...]} etc.
+            for val in obj.values():
+                if isinstance(val, list) and val:
+                    parsed = val
+                    break
     except json.JSONDecodeError:
+        pass
+
+    # 2. Extract the first [...] block from anywhere in the text
+    if not parsed:
         start = text.find("[")
         end   = text.rfind("]")
         if start != -1 and end > start:
@@ -204,14 +221,33 @@ def _parse_verdicts(raw: str) -> dict:
             except json.JSONDecodeError:
                 pass
 
+    # 3. Last resort: pull individual {...} objects
+    if not parsed:
+        import re
+        objects = re.findall(r'\{[^{}]+\}', text)
+        recovered = []
+        for obj_str in objects:
+            try:
+                recovered.append(json.loads(obj_str))
+            except json.JSONDecodeError:
+                pass
+        if recovered:
+            parsed = recovered
+
     if not parsed:
         return {}
 
-    return {
-        str(item.get("ticker", "")).upper().strip(): {
-            "verdict": str(item.get("verdict", "CONFIRM")).upper().strip(),
-            "reason":  str(item.get("reason", "")),
-        }
-        for item in parsed
-        if isinstance(item, dict) and item.get("ticker")
-    }
+    result = {}
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        ticker  = str(item.get("ticker", "")).upper().strip()
+        verdict = str(item.get("verdict", "CONFIRM")).upper().strip()
+        reason  = str(item.get("reason", ""))
+        if not ticker:
+            continue
+        if verdict not in ("CONFIRM", "KILL"):
+            verdict = "CONFIRM"
+        result[ticker] = {"verdict": verdict, "reason": reason}
+
+    return result
