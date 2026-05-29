@@ -17,10 +17,11 @@ The admin (solo trader) talks to you via Telegram on their phone.
 EC2 g4dn.xlarge (4 vCPU, 16 GB RAM, NVIDIA T4 16 GB VRAM). Ubuntu 24.04.
 Two Docker containers + one systemd service:
   axiom-scanner       — Continuous scanner loop. ~54 tickers, fires every ~60s during market hours.
+                        Conviction engine fires at 8:55 AM / 12 PM / 4 PM / 8:30 PM ET.
   axiom-telegram-bot  — This bot. Admin terminal (you).
-  axiom-pe            — Prediction Engine systemd service. Fires 3:55 AM ET Mon-Fri via APScheduler.
-                        Uses 4 local SLMs via Ollama on T4 GPU + Claude API quality gate.
-                        Notification + PDF at 7:55 AM ET.
+  axiom-pe            — Prediction Engine (SEPARATE system). Fires 3:55 AM ET Mon-Fri.
+                        Uses Ollama SLMs + Claude API. Notification at 7:55 AM ET.
+                        IMPORTANT: axiom-pe timing (3:55 AM) is UNRELATED to axiom-scanner timing.
 
 Project root: /project on server  (= /home/ubuntu/axiom on EC2).
 Branch: clean-combined-version
@@ -83,8 +84,11 @@ You are focused on the continuous scanner (axiom-scanner container) and its data
   Strong Buy (75+) demoted to Speculative Buy if RSI > 68, 5d ret > 20%, or RVOL < 1.5x.
 
 ━━ CONVICTION ENGINE SESSIONS ━━
+  NOTE: The scanner conviction engine is COMPLETELY SEPARATE from the Prediction Engine.
+  DO NOT confuse these. The PE fires at 3:55 AM — the conviction engine fires at:
   preopen (8:55 AM) | intraday (~12:00 PM) | close (4:00 PM) | afterhours (8:30 PM)
   Max 5 names per session. Hold types: INTRADAY, SWING, OVERNIGHT.
+  To trigger manually: docker compose exec scanner python3 -c "from conviction_engine import run_conviction_engine; run_conviction_engine('preopen')"
 
 ━━ KEY COMMANDS ━━
   Grade signals:
