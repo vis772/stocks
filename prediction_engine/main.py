@@ -30,6 +30,7 @@ from . import (
     stage6_report,
     stage7_notify,
     stage8_sanity,
+    stage9_refine,
 )
 from .db         import initialize_schema, save_picks, upsert_run_status, _et_date
 from .resource_manager import (
@@ -150,10 +151,11 @@ def run_pipeline():
         return
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 5:00 AM — Stage 2: Qwen2.5 sweep (500 → 50)
+    # Stage 2: Qwen2.5 sweep (500 → 50)
+    # GPU mode: runs immediately after Stage 1 (~3 min on T4 vs. 16 min on CPU).
+    # No longer waits until 5:00 AM — refinement loop covers the extra analysis time.
     # ─────────────────────────────────────────────────────────────────────────
-    _wait_until_et(5, 0, "STAGE2_SWEEP")
-    logger.info("[main] ── STAGE 2: Qwen sweep (5:00 AM ET) ────────────────────")
+    logger.info("[main] ── STAGE 2: Qwen sweep (GPU — running immediately) ──────")
     upsert_run_status(date_str, "STAGE2_SWEEP", "running", tickers_input=len(candidates))
 
     top50 = []
@@ -179,10 +181,10 @@ def run_pipeline():
         return
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 6:00 AM — Stage 3: All 4 SLMs deep dive
+    # Stage 3: All 4 SLMs deep dive
+    # GPU mode: ~10 min for 50 tickers × 4 models on T4. Runs immediately.
     # ─────────────────────────────────────────────────────────────────────────
-    _wait_until_et(6, 0, "STAGE3_DEEPDIVE")
-    logger.info("[main] ── STAGE 3: 4-model deep dive (6:00 AM ET) ─────────────")
+    logger.info("[main] ── STAGE 3: 4-model deep dive (GPU — running immediately) ─")
     upsert_run_status(date_str, "STAGE3_DEEPDIVE", "running", tickers_input=len(top50))
 
     model_scores = {}
@@ -200,10 +202,9 @@ def run_pipeline():
         upsert_run_status(date_str, "STAGE3_DEEPDIVE", "failed", error_msg=str(e))
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 8:00 AM — Stage 4: Consensus voting
+    # Stage 4: Consensus voting — runs immediately after Stage 3
     # ─────────────────────────────────────────────────────────────────────────
-    _wait_until_et(8, 0, "STAGE4_CONSENSUS")
-    logger.info("[main] ── STAGE 4: Consensus voting (8:00 AM ET) ──────────────")
+    logger.info("[main] ── STAGE 4: Consensus voting ────────────────────────────")
     upsert_run_status(date_str, "STAGE4_CONSENSUS", "running")
 
     consensus = []
@@ -217,10 +218,10 @@ def run_pipeline():
         upsert_run_status(date_str, "STAGE4_CONSENSUS", "failed", error_msg=str(e))
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Stage 5: Select top 5 and compute entry/target/stop
-    # (Runs immediately after Stage 4 — within 8:00-8:30 window)
+    # Stage 5: Select initial top 5 — entry/target/stop computed here.
+    # These are PRELIMINARY picks. Stage 9 will refine them until 7:55 AM.
     # ─────────────────────────────────────────────────────────────────────────
-    logger.info("[main] ── STAGE 5: Final conviction selection ──────────────────")
+    logger.info("[main] ── STAGE 5: Initial conviction selection ─────────────────")
     upsert_run_status(date_str, "STAGE5_CONVICTION", "running")
 
     picks = []
@@ -230,10 +231,10 @@ def run_pipeline():
         else:
             logger.warning("[main] No consensus picks — Stage 5 skipped")
 
-        logger.info("[main] Stage 5 complete: %d final picks", len(picks))
+        logger.info("[main] Stage 5 complete: %d initial picks", len(picks))
         upsert_run_status(date_str, "STAGE5_CONVICTION", "completed", picks_count=len(picks))
 
-        # Persist picks to DB
+        # Persist preliminary picks to DB (will be overwritten by refined picks)
         if picks:
             save_picks(date_str, picks)
     except Exception as e:
@@ -241,10 +242,33 @@ def run_pipeline():
         upsert_run_status(date_str, "STAGE5_CONVICTION", "failed", error_msg=str(e))
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 8:30 AM — Stage 6: Generate PDF report
+    # Stage 9: Pre-Open Refinement Loop (~4:20 AM → 7:50 AM ET)
+    # Re-scores the top 5 every 20 min with fresh premarket data + all 4 models.
+    # Blocks until 7:50 AM ET, then returns final refined picks.
     # ─────────────────────────────────────────────────────────────────────────
-    _wait_until_et(8, 30, "STAGE6_REPORT")
-    logger.info("[main] ── STAGE 6: PDF report generation (8:30 AM ET) ─────────")
+    logger.info("[main] ── STAGE 9: Pre-open refinement loop (until 7:50 AM ET) ──")
+    upsert_run_status(date_str, "STAGE9_REFINE", "running")
+
+    try:
+        stage9_refine._SKIP_WAITS = _SKIP_WAITS  # propagate testing flag
+        picks = stage9_refine.run(picks, model_scores, skip_waits=_SKIP_WAITS)
+        logger.info("[main] Stage 9 complete: %d refined picks", len(picks))
+        upsert_run_status(date_str, "STAGE9_REFINE", "completed", picks_count=len(picks))
+
+        # Overwrite DB with final refined picks
+        if picks:
+            save_picks(date_str, picks)
+    except Exception as e:
+        logger.exception("[main] Stage 9 failed: %s", e)
+        upsert_run_status(date_str, "STAGE9_REFINE", "failed", error_msg=str(e))
+        # picks retains Stage 5 values — pipeline continues with initial picks
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 7:55 AM — Stage 6: Generate PDF with final refined scores
+    # (Stage 9 exits at ~7:50 AM so this fires right on time)
+    # ─────────────────────────────────────────────────────────────────────────
+    _wait_until_et(7, 55, "STAGE6_REPORT")
+    logger.info("[main] ── STAGE 6: PDF report generation (7:55 AM ET) ──────────")
     upsert_run_status(date_str, "STAGE6_REPORT", "running")
 
     report_path = None
@@ -257,10 +281,10 @@ def run_pipeline():
         upsert_run_status(date_str, "STAGE6_REPORT", "failed", error_msg=str(e))
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 9:20 AM — Stage 7: Pushover notification
+    # Stage 7: Pushover notification — fires immediately after PDF (~7:55 AM ET)
+    # This is what hits your phone before the 9:30 AM open.
     # ─────────────────────────────────────────────────────────────────────────
-    _wait_until_et(9, 20, "STAGE7_NOTIFY")
-    logger.info("[main] ── STAGE 7: Pushover notification (9:20 AM ET) ──────────")
+    logger.info("[main] ── STAGE 7: Pushover notification (~7:55 AM ET) ──────────")
     upsert_run_status(date_str, "STAGE7_NOTIFY", "running")
 
     try:
@@ -272,10 +296,11 @@ def run_pipeline():
         upsert_run_status(date_str, "STAGE7_NOTIFY", "failed", error_msg=str(e))
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 9:45 AM — Stage 8: Post-open sanity check (CPU only, no SLMs)
+    # 9:20 AM — Stage 8: Pre-open sanity check (just before 9:30 AM market open)
+    # Validates picks against live prices — cancels any that drifted too far.
     # ─────────────────────────────────────────────────────────────────────────
-    _wait_until_et(9, 45, "STAGE8_SANITY")
-    logger.info("[main] ── STAGE 8: Post-open sanity check (9:45 AM ET) ─────────")
+    _wait_until_et(9, 20, "STAGE8_SANITY")
+    logger.info("[main] ── STAGE 8: Pre-open sanity check (9:20 AM ET) ──────────")
     upsert_run_status(date_str, "STAGE8_SANITY", "running")
 
     try:

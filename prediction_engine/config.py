@@ -56,9 +56,18 @@ SWEEP_BATCH_SIZE        = 8              # Tickers per batched prompt
 # ─── Stage 3: Deep Dive ──────────────────────────────────────────────────────
 # GPU mode: Ollama serializes GPU calls, so sequential per-model is still optimal.
 # All 4 models loaded in T4 VRAM simultaneously — no swap overhead.
-# Timing: 4 models × 50 stocks × 4s avg = ~13 minutes. Well within 6AM-8AM window.
+# Timing: 4 models × 50 stocks × 4s avg = ~13 minutes. Runs immediately after Stage 2 on GPU.
 DEEPDIVE_MAX_WORKERS    = 1              # Ollama serializes GPU — sequential is optimal
 DEEPDIVE_RETRIES        = 2              # Retry failed Ollama calls
+
+# ─── Stage 9: Pre-Open Refinement Loop ───────────────────────────────────────
+# After initial top-5 are found (~4:20 AM), re-score them every N minutes
+# until REFINEMENT_NOTIFY_MINUTE. PDF + Pushover fire at REFINEMENT_NOTIFY_HOUR:MINUTE.
+# Each iteration: fresh premarket prices + news + all 4 models → updated conviction scores.
+# ~10 refinement passes (4:20 AM → 7:50 AM at 20-min intervals) before notification.
+REFINEMENT_NOTIFY_HOUR   = 7    # Notification fires at 7:55 AM ET
+REFINEMENT_NOTIFY_MINUTE = 55
+REFINEMENT_INTERVAL_MIN  = 20   # Re-analyze every 20 minutes
 
 # ─── Stage 4: Consensus Voting ───────────────────────────────────────────────
 MIN_MODEL_AGREEMENT     = 3             # Minimum models that must agree (≥ score threshold)
