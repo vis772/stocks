@@ -36,9 +36,10 @@ SESSION_TIMEOUT  = 4 * 3600   # 4 hours of inactivity → auto-lock
 MAX_HISTORY      = 30         # max message turns kept in memory per session
 
 # ── In-memory session state (resets on every container restart) ───────────────
-# _sessions: user_id → {"ts": float, "history": list}
+# _sessions: user_id → {"ts": float, "history": list, "mode": str}
 #   ts      — UNIX timestamp of last activity
 #   history — Claude message history for this session
+#   mode    — "scanner" (default) or "pe"
 _sessions: dict[int, dict] = {}
 
 # _pending: user_id → {"type": "sql"|"restart"|"edit", ...extra data}
@@ -68,7 +69,17 @@ def _touch(user_id: int) -> None:
     if user_id in _sessions:
         _sessions[user_id]["ts"] = time.time()
     else:
-        _sessions[user_id] = {"ts": time.time(), "history": []}
+        _sessions[user_id] = {"ts": time.time(), "history": [], "mode": "scanner"}
+
+
+def _get_mode(user_id: int) -> str:
+    return _sessions.get(user_id, {}).get("mode", "scanner")
+
+
+def _set_mode(user_id: int, mode: str) -> None:
+    if user_id in _sessions:
+        _sessions[user_id]["mode"]    = mode
+        _sessions[user_id]["history"] = []   # clear history — new context
 
 
 def _lock(user_id: int) -> None:
@@ -196,10 +207,11 @@ def _check(update: Update) -> tuple[bool, bool]:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     allowed, authed = _check(update)
+    uid = update.effective_user.id
     if not allowed:
         return
     if authed:
-        await _send(update, _help_text())
+        await _send(update, _help_text(uid))
     else:
         await _send(update, (
             "🔐 <b>Axiom Admin Terminal</b>\n\n"
@@ -211,13 +223,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     allowed, authed = _check(update)
+    uid = update.effective_user.id
     if not allowed:
         return
     if not authed:
         await _send(update, "🔒 Enter PIN first.")
         return
-    _touch(update.effective_user.id)
-    await _send(update, _help_text())
+    _touch(uid)
+    await _send(update, _help_text(uid))
 
 
 # ── /lock ─────────────────────────────────────────────────────────────────────
@@ -548,20 +561,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 _failed_pins.pop(uid, None)
 
         if text == SESSION_PIN:
-            _sessions[uid] = {"ts": time.time(), "history": []}
+            _sessions[uid] = {"ts": time.time(), "history": [], "mode": "scanner"}
             _failed_pins.pop(uid, None)
             _lockout_until.pop(uid, None)
             logger.info(f"[AUDIT] user={uid} authenticated via PIN")
             _notify_session_opened(uid)
             await _send(update, (
                 "✅ <b>PIN accepted.</b> Session active for 4 hours.\n\n"
-                "Just talk to me normally — ask about signals, scanner health, "
-                "logs, anything. Slash commands still work too.\n\n"
+                "Mode: <b>SCANNER</b> — ask about signals, win rates, scanner health.\n"
+                "Say <b>switch to PE</b> to switch to Prediction Engine mode.\n\n"
                 "Examples:\n"
                 "• <i>any signals today?</i>\n"
-                "• <i>show me scanner logs</i>\n"
                 "• <i>what's the win rate this week?</i>\n"
-                "• <i>restart the scanner</i>"
+                "• <i>show me scanner logs</i>\n"
+                "• <i>switch to PE</i>"
             ))
         else:
             _failed_pins[uid] = _failed_pins.get(uid, 0) + 1
@@ -614,6 +627,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _send(update, f"⏳ Waiting for <b>confirm</b> or <b>cancel</b>.")
         return
 
+    # ── Mode switch detection ──────────────────────────────────────────────────
+    import re as _re
+    _lower = text.lower().strip()
+    _switch_to_pe      = _re.search(r'\b(switch|change|go|use)\b.*(pe|prediction\s*engine)\b', _lower) \
+                         or _lower in ("pe", "pe mode", "prediction engine", "switch to pe")
+    _switch_to_scanner = _re.search(r'\b(switch|change|go|use)\b.*\bscanner\b', _lower) \
+                         or _lower in ("scanner", "scanner mode", "switch to scanner")
+
+    if _switch_to_pe:
+        _set_mode(uid, "pe")
+        await _send(update, (
+            "🔀 Switched to <b>PE MODE</b> — Prediction Engine.\n\n"
+            "I now focus on: PE picks, pipeline stages, model votes, "
+            "Ollama SLMs, Claude gate, refinement loop.\n\n"
+            "Say <b>switch to scanner</b> to go back."
+        ))
+        return
+
+    if _switch_to_scanner:
+        _set_mode(uid, "scanner")
+        await _send(update, (
+            "🔀 Switched to <b>SCANNER MODE</b>.\n\n"
+            "I now focus on: signals, conviction buys, win rates, "
+            "scanner health, accuracy metrics.\n\n"
+            "Say <b>switch to PE</b> to go back."
+        ))
+        return
+
     # ── No pending action — route to Claude Haiku agent ─────────────────────
     _audit(uid, "agent", text[:80])
     try:
@@ -623,6 +664,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         pass
     sess    = _sessions[uid]
     history = sess.get("history", [])
+    mode    = sess.get("mode", "scanner")
 
     # Show typing indicator for longer responses
     await context.bot.send_chat_action(
@@ -630,7 +672,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
     try:
-        reply, new_history = _agent_module.chat(text, history)
+        reply, new_history = _agent_module.chat(text, history, mode=mode)
         sess["history"] = _trim_history(new_history, MAX_HISTORY)
         await _send_chunked(update, reply)
     except Exception as e:
@@ -667,11 +709,61 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _send(update, f"❌ Upload failed: {e}")
 
 
+# ── /mode ─────────────────────────────────────────────────────────────────────
+
+async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed, authed = _check(update)
+    uid = update.effective_user.id
+    if not allowed:
+        return
+    if not authed:
+        await _send(update, "🔒 Enter PIN first.")
+        return
+
+    _touch(uid)
+    _audit(uid, "mode", " ".join(context.args or []))
+
+    arg = (context.args[0].lower() if context.args else "").strip()
+
+    if arg in ("pe", "prediction", "prediction_engine"):
+        _set_mode(uid, "pe")
+        await _send(update, (
+            "🔀 Switched to <b>PE MODE</b> — Prediction Engine.\n\n"
+            "I now focus on: daily picks, pipeline stages, model votes, "
+            "Ollama SLMs, Claude gate, bear analyst, refinement loop.\n\n"
+            "Say <b>switch to scanner</b> or <code>/mode scanner</code> to go back."
+        ))
+    elif arg in ("scanner", "scan"):
+        _set_mode(uid, "scanner")
+        await _send(update, (
+            "🔀 Switched to <b>SCANNER MODE</b>.\n\n"
+            "I now focus on: signals, conviction buys, win rates, "
+            "scanner health, accuracy metrics.\n\n"
+            "Say <b>switch to PE</b> or <code>/mode pe</code> to go to PE mode."
+        ))
+    else:
+        # No arg — show current mode
+        current = _get_mode(uid)
+        label   = "PE (Prediction Engine)" if current == "pe" else "SCANNER"
+        icon    = "🤖" if current == "pe" else "📡"
+        other   = "scanner" if current == "pe" else "pe"
+        await _send(update, (
+            f"{icon} Current mode: <b>{label}</b>\n\n"
+            f"Switch with: <code>/mode {other}</code>\n"
+            f"Or just say: <i>switch to {other}</i>"
+        ))
+
+
 # ── Help text ─────────────────────────────────────────────────────────────────
 
-def _help_text() -> str:
+def _help_text(uid: int = 0) -> str:
+    mode    = _get_mode(uid) if uid else "scanner"
+    label   = "PE (Prediction Engine)" if mode == "pe" else "SCANNER"
+    icon    = "🤖" if mode == "pe" else "📡"
+    other   = "scanner" if mode == "pe" else "pe"
     return (
-        "<b>Axiom Admin Terminal — Commands</b>\n\n"
+        f"<b>Axiom Admin Terminal</b>  {icon} Mode: <b>{label}</b>\n"
+        f"Switch: <code>/mode {other}</code>  or say <i>switch to {other}</i>\n\n"
         "<b>Database</b>\n"
         "/sql &lt;query&gt;       run SQL (writes need confirm)\n"
         "/stats              signal count, win rate, last scan\n"
@@ -687,6 +779,7 @@ def _help_text() -> str:
         "/read &lt;path&gt;        show file contents\n"
         "/edit &lt;path&gt;        edit file (reply with new content)\n\n"
         "<b>Session</b>\n"
+        "/mode [scanner|pe]  check or switch AI context mode\n"
         "/lock               lock session (PIN required again)\n"
         "/help               show this message\n\n"
         "<i>Relative paths are under /project (= /home/ubuntu/axiom on EC2).</i>"
@@ -711,6 +804,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("help",        cmd_help))
     app.add_handler(CommandHandler("lock",        cmd_lock))
+    app.add_handler(CommandHandler("mode",        cmd_mode))
     app.add_handler(CommandHandler("sql",         cmd_sql))
     app.add_handler(CommandHandler("logs",        cmd_logs))
     app.add_handler(CommandHandler("status",      cmd_status))
