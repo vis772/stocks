@@ -313,66 +313,66 @@ def save_model_vote(date: str, ticker: str, model_name: str,
 
 
 def save_picks(date: str, picks: list):
-    """Write the final top-5 picks. One row per pick."""
+    """
+    Write the picks for this date. Completely replaces any previous picks for
+    the same date so that Stage 9 refined picks always overwrite Stage 5
+    preliminary picks and the DB never holds a mix of two different runs.
+    """
     if not picks:
         return
-    for pick in picks:
-        try:
-            ticker = pick["ticker"]
-            if _is_postgres():
-                conn = _get_conn(); cur = conn.cursor()
-                cur.execute("""
-                    INSERT INTO prediction_engine_signals
-                        (date, ticker, conviction_score, conviction_tier,
-                         model_agreement_count, catalyst, technical_setup,
-                         pattern_summary, sentiment_score, short_interest,
-                         entry, target, stop, thesis)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT DO NOTHING
-                """, (
-                    date, ticker,
-                    pick.get("conviction_score"),
-                    pick.get("conviction_tier"),
-                    pick.get("model_agreement_count"),
-                    pick.get("catalyst"),
-                    pick.get("technical_setup"),
-                    pick.get("pattern_summary"),
-                    pick.get("sentiment_score"),
-                    pick.get("short_interest"),
-                    pick.get("entry"),
-                    pick.get("target"),
-                    pick.get("stop"),
-                    pick.get("thesis"),
-                ))
-                conn.commit(); cur.close(); _put_conn(conn)
-            else:
-                conn = _get_sqlite()
-                conn.execute("""
-                    INSERT OR IGNORE INTO prediction_engine_signals
-                        (date, ticker, conviction_score, conviction_tier,
-                         model_agreement_count, catalyst, technical_setup,
-                         pattern_summary, sentiment_score, short_interest,
-                         entry, target, stop, thesis)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    date, ticker,
-                    pick.get("conviction_score"),
-                    pick.get("conviction_tier"),
-                    pick.get("model_agreement_count"),
-                    pick.get("catalyst"),
-                    pick.get("technical_setup"),
-                    pick.get("pattern_summary"),
-                    pick.get("sentiment_score"),
-                    pick.get("short_interest"),
-                    pick.get("entry"),
-                    pick.get("target"),
-                    pick.get("stop"),
-                    pick.get("thesis"),
-                ))
-                conn.commit(); conn.close()
-            print(f"  [pe/db] Saved pick: {ticker}")
-        except Exception as e:
-            print(f"  [pe/db] save_picks failed for {pick.get('ticker')}: {e}")
+
+    rows = [
+        (
+            date,
+            p["ticker"],
+            p.get("conviction_score"),
+            p.get("conviction_tier"),
+            p.get("model_agreement_count"),
+            p.get("catalyst"),
+            p.get("technical_setup"),
+            p.get("pattern_summary"),
+            p.get("sentiment_score"),
+            p.get("short_interest"),
+            p.get("entry"),
+            p.get("target"),
+            p.get("stop"),
+            p.get("thesis"),
+        )
+        for p in picks
+    ]
+
+    try:
+        if _is_postgres():
+            conn = _get_conn(); cur = conn.cursor()
+            # Delete the entire day's picks first, then re-insert the new set.
+            # This ensures Stage 9 refined picks fully replace Stage 5 preliminary
+            # picks rather than both sets coexisting in the DB.
+            cur.execute("DELETE FROM prediction_engine_signals WHERE date = %s", (date,))
+            cur.executemany("""
+                INSERT INTO prediction_engine_signals
+                    (date, ticker, conviction_score, conviction_tier,
+                     model_agreement_count, catalyst, technical_setup,
+                     pattern_summary, sentiment_score, short_interest,
+                     entry, target, stop, thesis)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, rows)
+            conn.commit(); cur.close(); _put_conn(conn)
+        else:
+            conn = _get_sqlite()
+            conn.execute("DELETE FROM prediction_engine_signals WHERE date = ?", (date,))
+            conn.executemany("""
+                INSERT INTO prediction_engine_signals
+                    (date, ticker, conviction_score, conviction_tier,
+                     model_agreement_count, catalyst, technical_setup,
+                     pattern_summary, sentiment_score, short_interest,
+                     entry, target, stop, thesis)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, rows)
+            conn.commit(); conn.close()
+        tickers = [p["ticker"] for p in picks]
+        print(f"  [pe/db] Saved {len(picks)} picks for {date}: {', '.join(tickers)}")
+    except Exception as e:
+        print(f"  [pe/db] save_picks failed for {date}: {e}")
 
 
 def load_todays_picks(date: str) -> list:
