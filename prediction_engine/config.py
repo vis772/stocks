@@ -10,6 +10,8 @@ FINNHUB_API_KEY   = os.environ.get("FINNHUB_API_KEY", "")
 TIINGO_API_KEY    = os.environ.get("TIINGO_API_KEY", "")
 PUSHOVER_USER     = os.environ.get("PE_PUSHOVER_USER_KEY",  os.environ.get("PUSHOVER_USER_KEY",  ""))
 PUSHOVER_TOKEN    = os.environ.get("PE_PUSHOVER_API_TOKEN", os.environ.get("PUSHOVER_API_TOKEN", ""))
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+PE_CLAUDE_MODEL   = os.environ.get("PE_CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
 # ─── Ollama ───────────────────────────────────────────────────────────────────
 # Running on g4dn.xlarge (4 vCPU, 16GB RAM, NVIDIA T4 16GB VRAM).
@@ -68,6 +70,19 @@ DEEPDIVE_RETRIES        = 2              # Retry failed Ollama calls
 REFINEMENT_NOTIFY_HOUR   = 7    # Notification fires at 7:55 AM ET
 REFINEMENT_NOTIFY_MINUTE = 55
 REFINEMENT_INTERVAL_MIN  = 20   # Re-analyze every 20 minutes
+
+# ─── Stage 3b: Bear-Case Analyst ─────────────────────────────────────────────
+# A 5th adversarial pass using Qwen with a short-seller framing.
+# High bear risk score reduces conviction; very high kills the pick entirely.
+ROLE_BEAR            = "bear_analyst"  # Key in model_scores dict (not an Ollama model name)
+BEAR_RISK_THRESHOLD  = 65              # Bear score ≥ 65 → conviction penalty
+BEAR_KILL_THRESHOLD  = 82              # Bear score ≥ 82 → pick eliminated entirely
+
+# ─── Stage 4b: Claude Quality Gate ───────────────────────────────────────────
+# Final CONFIRM/KILL pass using Claude API after SLM consensus.
+# One batched API call for all candidates — cheap (< $0.01/day) but high-value.
+CLAUDE_GATE_ENABLED  = True            # Set False to skip (testing without API key)
+CLAUDE_GATE_MIN_KEEP = 3              # Always keep at least this many picks even if Claude kills some
 
 # ─── Stage 4: Consensus Voting ───────────────────────────────────────────────
 MIN_MODEL_AGREEMENT     = 3             # Minimum models that must agree (≥ score threshold)

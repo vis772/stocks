@@ -26,6 +26,7 @@ from . import (
     stage2_sweep,
     stage3_deepdive,
     stage4_consensus,
+    stage4b_claude_gate,
     stage5_conviction,
     stage6_report,
     stage7_notify,
@@ -216,6 +217,26 @@ def run_pipeline():
     except Exception as e:
         logger.exception("[main] Stage 4 failed: %s", e)
         upsert_run_status(date_str, "STAGE4_CONSENSUS", "failed", error_msg=str(e))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Stage 4b: Claude Quality Gate
+    # One batched API call — Claude reviews all consensus candidates and
+    # returns CONFIRM / KILL for each. Removes traps the SLMs can't catch.
+    # ─────────────────────────────────────────────────────────────────────────
+    logger.info("[main] ── STAGE 4b: Claude quality gate ──────────────────────")
+    upsert_run_status(date_str, "STAGE4B_GATE", "running")
+
+    try:
+        gated = stage4b_claude_gate.run(consensus)
+        killed = len(consensus) - len(gated)
+        logger.info("[main] Stage 4b complete: %d confirmed, %d killed by Claude",
+                    len(gated), killed)
+        upsert_run_status(date_str, "STAGE4B_GATE", "completed",
+                          tickers_input=len(gated))
+        consensus = gated  # pass confirmed candidates to Stage 5
+    except Exception as e:
+        logger.exception("[main] Stage 4b failed: %s — using all consensus picks", e)
+        upsert_run_status(date_str, "STAGE4B_GATE", "failed", error_msg=str(e))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Stage 5: Select initial top 5 — entry/target/stop computed here.

@@ -9,6 +9,7 @@ from typing import Optional
 from .config import (
     MIN_MODEL_AGREEMENT, MODEL_AGREE_THRESHOLD, TOP_N_PICKS,
     MODEL_QWEN, MODEL_PHI, MODEL_GEMMA, MODEL_SMOL,
+    ROLE_BEAR, BEAR_RISK_THRESHOLD, BEAR_KILL_THRESHOLD,
 )
 from .db import save_model_vote, _et_date
 
@@ -73,8 +74,29 @@ def run(candidates: list, model_scores: dict) -> list:
             )
             continue
 
+        # ── Bear-case risk check ──────────────────────────────────────────
+        bear_data    = votes.get(ROLE_BEAR, {})
+        bear_risk    = bear_data.get("score") or 0
+        primary_risk = (bear_data.get("raw") or {}).get("primary_risk", "")
+
+        if bear_risk >= BEAR_KILL_THRESHOLD:
+            logger.info(
+                "[stage4] %s KILLED by bear analyst (risk=%d ≥ %d) — %s",
+                ticker, bear_risk, BEAR_KILL_THRESHOLD, primary_risk[:60],
+            )
+            continue
+
         # Final conviction score = average of agreeing models only
         final_score = sum(s for _, s, _ in agreeing_models) / len(agreeing_models)
+
+        # Bear penalty: risk ≥ threshold reduces conviction proportionally
+        if bear_risk >= BEAR_RISK_THRESHOLD:
+            penalty     = (bear_risk - BEAR_RISK_THRESHOLD) / (100 - BEAR_RISK_THRESHOLD) * 15
+            final_score = max(0, final_score - penalty)
+            logger.info(
+                "[stage4] %s bear penalty: risk=%d → conviction %.1f → %.1f  (%s)",
+                ticker, bear_risk, final_score + penalty, final_score, primary_risk[:50],
+            )
 
         # Synthesize per-model insights into the consensus record
         catalyst        = _extract_field(all_model_data, MODEL_SMOL,  "thesis") or \
@@ -97,6 +119,8 @@ def run(candidates: list, model_scores: dict) -> list:
             "pattern_summary":      pattern_summary or "",
             "sentiment_score":      sentiment_score,
             "short_interest":       short_interest,
+            "bear_risk_score":      bear_risk,
+            "bear_primary_risk":    primary_risk,
             # Pass through premarket snapshot from Stage 1
             "premarket_price":      c.get("premarket_price") or c.get("price", 0),
             "price":                c.get("price", 0),

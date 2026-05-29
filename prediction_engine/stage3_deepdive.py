@@ -14,7 +14,7 @@ from typing import Optional
 from .config import (
     OLLAMA_BASE_URL, OLLAMA_TIMEOUT, DEEPDIVE_MAX_WORKERS, DEEPDIVE_RETRIES,
     MODEL_QWEN, MODEL_PHI, MODEL_GEMMA, MODEL_SMOL, MODEL_OPTIONS,
-    FINNHUB_API_KEY,
+    FINNHUB_API_KEY, ROLE_BEAR,
 )
 
 logger = logging.getLogger("pe.stage3")
@@ -47,6 +47,38 @@ _SYS_SMOL = (
     "Evaluate news catalyst strength, sentiment quality, and signal reliability. "
     "Return only valid JSON — no markdown, no explanation."
 )
+
+_SYS_BEAR = (
+    "You are an adversarial risk analyst and short-seller. "
+    "Your ONLY job is to find reasons this pre-market setup will FAIL. "
+    "Be cynical. Ignore the bull case entirely. Return only valid JSON — no markdown."
+)
+
+_PROMPT_BEAR_DEEP = """\
+You are a short-seller. Find every reason this trade will go wrong.
+
+Ticker: {ticker}
+Premarket Gap: {gap_pct:+.1f}%  (Price: ${price:.2f})
+Volume Ratio: {volume_ratio:.1f}x average
+RSI(14): {rsi:.1f}
+Short Interest: {short_float_pct:.1f}% of float
+Days to Cover: {days_to_cover:.1f}
+Price vs 20-day SMA: {vs_sma20:+.1f}%
+52-week High: ${high_52w:.2f}  (current is {pct_from_52wh:+.1f}% from it)
+Earnings in {earnings_days} days
+Has Options Market: {has_options}
+
+Recent News:
+{news_text}
+
+Assign a RISK score 0-100 (higher = more likely to fail):
+- 70-100 HIGH RISK: gap >20%, earnings imminent, at 52w high, no real catalyst, RSI>75
+- 40-70 MODERATE: some concern but manageable
+- 0-40 LOW: clean setup, bear case is weak
+
+Return exactly this JSON:
+{{"risk_score": <0-100>, "verdict": "<dangerous|moderate|low>", "primary_risk": "<single biggest risk in 8 words>", "risk_type": "<dilution|halt_risk|overbought|resistance|weak_catalyst|earnings_gamble|other>"}}
+"""
 
 
 # ─── Prompt templates per model ───────────────────────────────────────────────
@@ -232,13 +264,38 @@ def run(candidates: list) -> dict:
             model_name, scored_count, len(enriched), model_elapsed,
         )
 
+    # ── Bear-case pass (5th) ─────────────────────────────────────────────────
+    # Uses MODEL_QWEN with adversarial framing. Results stored under ROLE_BEAR.
+    # NOT counted in consensus voting — used only to penalise/kill risky picks.
+    bear_start = time.monotonic()
+    logger.info("[stage3] Bear-case pass: adversarial risk scoring %d tickers...", len(enriched))
+
+    for ticker_idx, c in enumerate(enriched, 1):
+        ticker = c["ticker"]
+        risk_score, risk_verdict, risk_raw = _run_model(
+            MODEL_QWEN, _SYS_BEAR, _build_bear_prompt, c
+        )
+        results[ticker][ROLE_BEAR] = {
+            "score":   risk_score,
+            "verdict": risk_verdict,
+            "raw":     risk_raw or {},
+        }
+        if risk_score is not None and risk_score >= 65:
+            logger.info("[stage3] BEAR %-8s  risk=%3.0f  [%s]  %s",
+                        ticker, risk_score, risk_verdict,
+                        (risk_raw or {}).get("primary_risk", "")[:50])
+
+    logger.info("[stage3] Bear-case pass complete in %.0fs",
+                time.monotonic() - bear_start)
+
     elapsed = time.monotonic() - start
     total_scores = sum(
         1 for t in results.values()
-        for v in t.values() if v.get("score") is not None
+        for k, v in t.items()
+        if k != ROLE_BEAR and v.get("score") is not None
     )
     logger.info(
-        "[stage3] All 4 models complete — %d scores across %d tickers in %.1fs (%.0fm)",
+        "[stage3] All 4+bear models complete — %d bull scores across %d tickers in %.1fs (%.0fm)",
         total_scores, len(candidates), elapsed, elapsed / 60,
     )
     return results
@@ -334,6 +391,37 @@ def _fetch_yf_data(ticker: str) -> dict:
         market_cap_m   = float((info.get("marketCap") or 0) / 1_000_000)
         float_shares   = int(info.get("floatShares") or 0)
 
+        # ── Earnings calendar (days until next earnings) ──────────────────
+        earnings_days = 999  # default: no upcoming earnings known
+        try:
+            cal = tk.calendar
+            if cal is not None and not cal.empty:
+                from datetime import date as _date
+                earn_col = cal.columns[0] if not cal.empty else None
+                if earn_col is not None:
+                    earn_val = cal.iloc[0, 0]
+                    if hasattr(earn_val, "date"):
+                        earnings_days = (earn_val.date() - _date.today()).days
+                    elif hasattr(earn_val, "year"):
+                        earnings_days = (earn_val - _date.today()).days
+        except Exception:
+            pass
+
+        # ── Options market check ──────────────────────────────────────────
+        has_options = False
+        options_iv  = 0.0
+        try:
+            expirations = tk.options
+            has_options = bool(expirations)
+            if has_options and current_price > 0:
+                chain      = tk.option_chain(expirations[0])
+                calls      = chain.calls
+                atm_calls  = calls[abs(calls["strike"] - current_price) < current_price * 0.08]
+                if not atm_calls.empty:
+                    options_iv = float(atm_calls["impliedVolatility"].median())
+        except Exception:
+            pass
+
         return {
             "rsi":              rsi,
             "sma20":            sma20,
@@ -357,6 +445,9 @@ def _fetch_yf_data(ticker: str) -> dict:
             "days_to_cover":    days_to_cover,
             "market_cap_m":     market_cap_m,
             "float_shares":     float_shares,
+            "earnings_days":    earnings_days,   # NEW: days until next earnings
+            "has_options":      has_options,     # NEW: options market exists
+            "options_iv":       options_iv,      # NEW: ATM implied volatility
         }
     except Exception as e:
         logger.debug("[stage3/yf] %s error: %s", ticker, e)
@@ -520,6 +611,33 @@ def _build_smol_prompt(c: dict) -> str:
         volume_ratio = c.get("volume_ratio", 0),
         volume_spike = volume_spike,
         news_text    = news_text,
+    )
+
+
+def _build_bear_prompt(c: dict) -> str:
+    yf_d  = c.get("yf_data", {})
+    news  = c.get("news", [])
+    price = c.get("premarket_price") or c.get("price", 0)
+    high_52w     = yf_d.get("high_52w", price * 1.5)
+    pct_from_52wh = ((price - high_52w) / high_52w * 100) if high_52w > 0 else 0
+    news_text    = "\n".join(f"  - {n['headline']}" for n in news[:5]) or "  No news found."
+    earnings_days = yf_d.get("earnings_days", 999)
+    earn_str      = str(earnings_days) if earnings_days < 90 else "90+"
+
+    return _PROMPT_BEAR_DEEP.format(
+        ticker          = c.get("ticker", "?"),
+        price           = price,
+        gap_pct         = c.get("gap_pct", 0),
+        volume_ratio    = c.get("volume_ratio", 0),
+        rsi             = yf_d.get("rsi", 50),
+        short_float_pct = yf_d.get("short_float_pct", 0),
+        days_to_cover   = yf_d.get("days_to_cover", 0),
+        vs_sma20        = yf_d.get("vs_sma20", 0),
+        high_52w        = high_52w,
+        pct_from_52wh   = pct_from_52wh,
+        earnings_days   = earn_str,
+        has_options     = "YES" if yf_d.get("has_options") else "NO",
+        news_text       = news_text,
     )
 
 
